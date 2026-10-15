@@ -1,0 +1,318 @@
+<h1 id="symbolic-execution">Symbolic Execution</h1>
+<h2 id="summary">Summary</h2>
+<p>Testing every input is impossible; reasoning about paths is not. <strong>Symbolic execution</strong> executes<br />
+a program with symbolic rather than concrete inputs, so each branch forks into both possibilities<br />
+and the tool tracks the <em>set</em> of states that could reach your target.</p>
+<p>This is MIT 6.858 lecture 10, and the practical reading is on symbolic execution finding "inputs<br />
+of death" in real binaries.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>Replace concrete values with <strong>symbolic</strong> ones; the program forks at each branch</li>
+<li>Maintain a <strong>path condition</strong>: the constraints that must hold to reach this state</li>
+<li>Goal-directed search: keep only states that can still reach the target</li>
+<li><strong>Concrete execution</strong> (run it for real) versus <strong>concrete symbolic execution</strong> (fork the<br />
+  uninteresting parts, run the interesting ones)</li>
+<li><strong>Fuzzers</strong> (AFL) do the opposite: random inputs with coverage feedback. Symbolic goes<br />
+  exhaustively; fuzzing goes broad and cheap. They are complements.</li>
+<li>The limit is path explosion: 100 branches = 2^100 paths</li>
+</ul>
+<h2 id="concolic-execution-the-practical-middle">Concolic execution, the practical middle</h2>
+<pre><code class="language-text">symbolic:  every path      -&gt; complete, but explodes
+fuzzing:   random paths    -&gt; fast, but may miss the bug
+concolic:   most concrete, fork at interesting branches -&gt; the practical choice
+</code></pre>
+<p>When the engine hits a syscall or complex library, it stops branching and<br />
+actually runs the code, then records the inputs for replay. That is what<br />
+<code>angr</code> does by default and what makes it usable on real binaries.</p>
+<h2 id="path-conditions-in-practice">Path conditions in practice</h2>
+<pre><code class="language-python">def is_admin(user, password):
+    if not check_password(password):     # branch A
+        return False
+    if user != &quot;admin&quot;:                 # branch B
+        return False
+    return True
+</code></pre>
+<p>Concolic reasoning: to reach the <code>return True</code>, you need branch A <em>false</em><br />
+(password correct) and branch B <em>false</em> (user is admin). The engine derives<br />
+precisely those constraints and solves them.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Symbolic execution</strong></td>
+<td>Execute with symbolic inputs, forking at branches</td>
+</tr>
+<tr>
+<td><strong>Path condition</strong></td>
+<td>Constraints under which this path is feasible</td>
+</tr>
+<tr>
+<td><strong>Path explosion</strong></td>
+<td>Branching causes 2^n paths</td>
+</tr>
+<tr>
+<td><strong>Concolic execution</strong></td>
+<td>Concrete execution plus symbolic branching at interesting points</td>
+</tr>
+<tr>
+<td><strong>Z3 / SMT solver</strong></td>
+<td>The constraint solver deciding feasibility</td>
+</tr>
+<tr>
+<td><strong><code>angr</code></strong></td>
+<td>A CFG-based binary analysis framework</td>
+</tr>
+<tr>
+<td><strong>Fuzzing / AFL</strong></td>
+<td>Coverage-guided random input generation</td>
+</tr>
+<tr>
+<td><strong>Coverage</strong></td>
+<td>Which code paths the input reached</td>
+</tr>
+<tr>
+<td><strong>Hook</strong></td>
+<td>Override a function during symbolic execution</td>
+</tr>
+<tr>
+<td><strong>JIT / stub</strong></td>
+<td>Generated code emulating external calls</td>
+</tr>
+<tr>
+<td><strong>Input of death</strong></td>
+<td>An input the analysis proves causes memory unsafety</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- is angr available? ---
+command -v angr angr-management
+python3 -c &quot;import angr; print('  angr', angr.__version__)&quot; 2&gt;/dev/null || \
+  echo &quot;  not installed: pipx install angr  (large, ~100MB of dependencies)&quot;
+
+# --- fuzzing is the cheaper half, and it IS installed ---
+command -v afl-fuzz radamsa
+dpkg -l | grep -iE &quot;^ii\s+a?fl&quot; | awk '{print &quot;  &quot;$2, $3}'
+
+# --- read a binary's CFG without any framework ---
+command -v angr-info radare2 r2 rabin2
+rabin2 -S ./target 2&gt;/dev/null | head -15
+readelf -h ./target | grep -E &quot;Type|Entry&quot;
+
+# --- count branches: the path-explosion problem, measured ---
+python3 - &lt;&lt;'PY'
+import subprocess, re
+out = subprocess.run([&quot;objdump&quot;,&quot;-d&quot;,&quot;./target&quot;],capture_output=True,text=True).stdout
+jcc = len(re.findall(r&quot;\b(j[a-z]+|loop\w*)\b&quot;, out))
+calls = len(re.findall(r&quot;\bcall\b&quot;, out))
+print(f&quot;  conditional branches : {jcc}&quot;)
+print(f&quot;  call instructions    : {calls}&quot;)
+print(f&quot;  naive path count     : 2^{jcc} = {2**jcc if jcc &lt; 64 else 'unrepresentable'}&quot;)
+print()
+print(&quot;  That number is why nobody brute-forces paths, and why fuzzing exists.&quot;)
+PY
+
+# --- coverage, the thing a fuzzer optimises ---
+command -v gcov lcov
+gcc --coverage -O0 -g target.c -o target_cov 2&gt;/dev/null &amp;&amp; \
+  { ./target_cov &quot;x&quot; &gt;/dev/null 2&gt;&amp;1; gcov target.c 2&gt;/dev/null | head -4; } || \
+  echo &quot;  (build with --coverage to measure it)&quot;
+
+# --- a manual concolic experiment, no framework needed ---
+cat &gt; concolic.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;
+A concolic demonstration without any framework: find the inputs that
+reach each branch by solving the constraints directly.
+&quot;&quot;&quot;
+def check(user, pin):
+    if len(pin) != 4:      return &quot;A:wrong-length&quot;
+    if not pin.isdigit():  return &quot;B:not-digits&quot;
+    if pin != &quot;1337&quot;:      return &quot;C:wrong-code&quot;
+    if user != &quot;root&quot;:     return &quot;D:wrong-user&quot;
+    return &quot;E:authenticated&quot;
+
+# Instead of trying 10000 combinations, derive the requirements:
+print(&quot;  path to E requires:&quot;)
+print(&quot;    len(pin) == 4&quot;)
+print(&quot;    pin.isdigit()&quot;)
+print(&quot;    pin == '1337'&quot;)
+print(&quot;    user == 'root'&quot;)
+print()
+print(&quot;  solution: user='root', pin='1337'  -&gt; &quot;, check(&quot;root&quot;,&quot;1337&quot;))
+print(&quot;  failure : user='guest', pin='1337' -&gt; &quot;, check(&quot;guest&quot;,&quot;1337&quot;))
+print()
+print(&quot;  The engine never 'tried' the wrong inputs. It reasoned about them.&quot;)
+PY
+python3 concolic.py | tee 01-concolic.txt
+rm -f concolic.py
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> measure path explosion, run a coverage-instrumented build, and (if angr is<br />
+available) let a solver find your input.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-10 &amp;&amp; cd ~/aegis/labs/mit858-10
+
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+
+/* Four branches. Reaching the final line requires satisfying all four. */
+void check(const char *user, const char *pin) {
+    if (strlen(pin) != 4)            { puts(&quot;length&quot;);  return; }
+    if (!isdigit((unsigned char)pin[0])) { puts(&quot;digits&quot;); return; }
+    if (strcmp(pin, &quot;1337&quot;) != 0)    { puts(&quot;code&quot;);    return; }
+    if (strcmp(user, &quot;root&quot;) != 0)   { puts(&quot;user&quot;);    return; }
+    puts(&quot;AUTHENTICATED&quot;);
+}
+
+int main(int argc, char **argv) {
+    if (argc &lt; 3) { fprintf(stderr, &quot;usage: %s &lt;user&gt; &lt;pin&gt;\n&quot;, argv[0]); return 1; }
+    check(argv[1], argv[2]);
+    return 0;
+}
+EOF
+gcc -O0 -g target.c -o target
+
+# --- 1. path explosion, measured on the real binary ---
+echo &quot;=== how many paths does this program have? ===&quot;
+python3 - &lt;&lt;'PY' | tee 01-paths.txt
+import subprocess, re
+out = subprocess.run([&quot;objdump&quot;,&quot;-d&quot;,&quot;./target&quot;],capture_output=True,text=True).stdout
+jcc = len(re.findall(r&quot;\n\s+[0-9a-f]+:.*\b(j[a-z]{1,3}|loop\w*)\b&quot;, out))
+print(f&quot;  conditional branches in ./target : {jcc}&quot;)
+print(f&quot;  paths if fully explored          : 2^{jcc} = {2**jcc}&quot;)
+print()
+print(&quot;  Now add a loop with 100 iterations and the count becomes 2^100.&quot;)
+print(&quot;  No analyser survives exhaustive enumeration of a real program.&quot;)
+print()
+print(&quot;  Hence the three strategies:&quot;)
+print(&quot;    symbolic : explore every path      (complete, infeasible)&quot;)
+print(&quot;    fuzzing  : explore random paths    (cheap, incomplete)&quot;)
+print(&quot;    concolic : run concrete, fork the interesting bits (what angr does)&quot;)
+PY
+cat 01-paths.txt
+
+# --- 2. coverage: what a fuzzer is actually optimising ---
+echo &quot;=== coverage instrumentation ===&quot;
+gcc -O0 -g --coverage target.c -o target_cov
+./target_cov root 1337
+gcov target.c 2&gt;/dev/null | head -4 | tee 02-coverage.txt
+ls -la *.gcda *.gcov 2&gt;/dev/null | head -3
+
+echo
+echo &quot;=== how much of the program did each input reach? ===&quot;
+for args in &quot;guest 1234&quot; &quot;root 1337&quot;; do
+  rm -f *.gcda
+  ./target_cov $args &gt;/dev/null 2&gt;&amp;1
+  pct=$(gcov target.c 2&gt;/dev/null | grep -A1 &quot;File 'target.c'&quot; | grep -oE &quot;Lines executed:[0-9.]+%&quot; | head -1)
+  printf &quot;  %-14s %s\n&quot; &quot;$args&quot; &quot;${pct:-?}&quot;
+done
+rm -f *.gcda *.gcov
+
+# --- 3. concolic reasoning by hand ---
+cat &gt; 03-concolic.md &lt;&lt;'EOF'
+# Concolic execution by hand
+
+`target` has four branches. To reach `AUTHENTICATED`, all four must go the
+way that does not return:
+
+    strlen(pin) == 4          AND
+    isdigit(pin[0])           AND
+    pin == &quot;1337&quot;             AND
+    user == &quot;root&quot;
+
+A concolic engine derives exactly that conjunction and hands it to a solver.
+The solver returns `{pin: &quot;1337&quot;, user: &quot;root&quot;}`.
+
+**The key insight:** the engine never *executes* the wrong paths. It executes
+one path concretely, and when it reaches a branch whose outcome depends on
+input it forks and adds the constraint to each successor's path condition.
+Where execution reaches something it cannot model (a syscall, a library), it
+stops forking and runs concretely, recording inputs for replay.
+
+## The three knobs in angr
+
+- `angr.Project(path, auto_load_libs=False)` — skip libc, model only your code
+- `state = proj.factory.entry_state(args=[...])`
+- `simgr = proj.factory.simulation_manager(state)`
+- `simgr.explore(find=ADDR_AUTH, avoid=ADDR_FAIL)` — goal-directed
+
+That is the whole API for the common case.
+EOF
+cat 03-concolic.md
+
+# --- 4. run it for real, if angr is present ---
+if python3 -c &quot;import angr&quot; 2&gt;/dev/null; then
+cat &gt; solve.py &lt;&lt;'PY'
+import angr, claripy
+proj = angr.Project(&quot;./target&quot;, auto_load_libs=False)
+state = proj.factory.entry_state(args=[angr.SimFile(&quot;/dev/stdin&quot;), &quot;root&quot;, &quot;1337&quot;])
+sm = proj.factory.simulation_manager(state)
+print(&quot;  exploring for the path that reaches AUTHENTICATED...&quot;)
+sm.explore(find=lambda s: b&quot;AUTHENTICATED&quot; in s.posix.dumps(0),
+           avoid=lambda s: b&quot;length&quot; in s.posix.dumps(0) or b&quot;digits&quot; in s.posix.dumps(0))
+if sm.found:
+    stdin = sm.found[0].posix.dumps(0)
+    print(f&quot;  found: {stdin!r}&quot;)
+else:
+    print(&quot;  no solution found within the step budget&quot;)
+PY
+python3 solve.py 2&gt;&amp;1 | tail -5 | tee 04-angr.txt
+else
+  echo &quot;  angr not installed. To install (large, no sudo needed):&quot; | tee 04-angr.txt
+  echo &quot;    pipx install angr&quot; &gt;&gt; 04-angr.txt
+  echo &gt;&gt; 04-angr.txt
+  cat &gt;&gt; 04-angr.txt &lt;&lt;'EOF'
+  Then re-run this step. Angr can find the input that reaches a branch you
+  never would have guessed - which is exactly the 'input of death' technique
+  from the 6.858 preparation reading.
+EOF
+  cat 04-angr.txt
+fi
+
+# --- 5. which analysis when? ---
+cat &gt; 05-choosing.md &lt;&lt;'EOF'
+# Choosing an analysis technique
+
+| Technique | Cost | Completeness | Use when |
+|---|---|---|---|
+| unit tests | minutes | none | you know the input |
+| fuzzing | minutes-hours | none | the input space is large, crashes are detectable |
+| concolic / symbolic | seconds-minutes | high on small inputs | you can express a goal |
+| static analysis (SAST) | seconds | high on what it models | reviewing, before running |
+| dynamic taint tracking | runtime | high on observed paths | you need &quot;where did this input go&quot; |
+| manual review | hours | low | the logic is subtle, or the bug is in the design |
+
+**They are complements.** Fuzz to find crashes cheaply, symbolic to explain
+and to reach deep states, static to review, dynamic to confirm.
+
+The important discipline: each technique's *blind spots* are different, so
+combining them finds what any one misses. This is the same argument as
+defence in depth, applied to analysis.
+EOF
+cat 05-choosing.md
+echo
+echo &quot;=== summary of coverage across inputs ===&quot;
+cat 02-coverage.txt
+</code></pre>
+<p><strong>Step 3 is the lesson</strong>: you derived the solution by reasoning, not by trying 10,000 inputs.<br />
+Step 4 will do the same mechanically once angr is installed.</p>
+<p><strong>Record:</strong> <code>03-concolic.md</code> and <code>05-choosing.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is a path condition, and what does the solver decide?</li>
+<li>Why is exhaustive path exploration infeasible on a real binary?</li>
+<li>How does concolic execution differ from both pure symbolic and pure fuzzing?</li>
+<li>What does <code>auto_load_libs=False</code> change about an analysis?</li>
+<li>Give one blind spot each for fuzzing and for static analysis.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Symbolic Execution (angr)</strong> → <strong>Fuzzing</strong> → <strong>Coverage</strong> → <strong>Static Analysis</strong> →<br />
+<strong>Dynamic Analysis</strong>.</p>

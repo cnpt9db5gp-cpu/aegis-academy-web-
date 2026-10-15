@@ -1,0 +1,194 @@
+<h1 id="cron-systemd-and-path-hijacking">Cron, systemd and PATH Hijacking</h1>
+<h2 id="summary">Summary</h2>
+<p>Scheduled tasks and service definitions are where "a user with a small amount of write access<br />
+becomes root" lives. A privileged job that runs a script from a writable location, or calls an<br />
+interpreter by bare name, is exploitable without any kernel trickery.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>cron</strong>: user crontabs, <code>/etc/crontab</code>, <code>/etc/cron.d/</code>, and the spool directories</li>
+<li><strong>The rule</strong>: a job running as root that touches a path you can write is your job now</li>
+<li><strong>Argument injection</strong>: root's command uses <code>*</code> or <code>$VAR</code> that your shell expands first</li>
+<li><strong>systemd</strong>: unit files define user, binary, and writable config paths</li>
+<li><strong>PATH for services</strong> is often minimal — a bare <code>sh</code> may resolve to your directory</li>
+<li><strong>Wildcards in privileged commands</strong> are a classic, still-live bug class</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>crontab</strong></td>
+<td>A user's scheduled task list</td>
+</tr>
+<tr>
+<td><strong>Crontab format</strong></td>
+<td><code>min hour dom mon dow command</code></td>
+</tr>
+<tr>
+<td><strong><code>/etc/cron.d</code></strong></td>
+<td>System crontabs, must include a user field</td>
+</tr>
+<tr>
+<td><strong>Crontab spool</strong></td>
+<td><code>/var/spool/cron/crontabs/&lt;user&gt;</code></td>
+</tr>
+<tr>
+<td><strong>Argument injection</strong></td>
+<td>Controlling parameters a privileged command trusts</td>
+</tr>
+<tr>
+<td><strong>systemd unit</strong></td>
+<td>A declarative service definition</td>
+</tr>
+<tr>
+<td><strong><code>Environment=</code></strong></td>
+<td>A unit's environment — PATH is often set explicitly</td>
+</tr>
+<tr>
+<td><strong>Wildcard expansion</strong></td>
+<td><code>*</code> resolved by <em>your</em> shell, before <code>sudo</code> runs</td>
+</tr>
+<tr>
+<td><strong>Shell metacharacter</strong></td>
+<td><code>;</code>, <code>|</code>, <code>&amp;&amp;</code>, backticks used to chain commands</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- where are scheduled jobs? ---
+crontab -l 2&gt;/dev/null || echo &quot;(no user crontab)&quot;
+sudo crontab -l -u root 2&gt;/dev/null
+sudo ls -la /etc/cron.d/ /etc/cron.daily/ /var/spool/cron/crontabs/ 2&gt;/dev/null
+sudo cat /etc/crontab 2&gt;/dev/null | grep -v '^#' | grep -v '^$'
+systemctl list-timers --all --no-pager 2&gt;/dev/null | head -10
+
+# --- permissions on every job location ---
+sudo stat -c '%A %U:%G %n' /etc/cron.d/* /var/spool/cron/crontabs/* 2&gt;/dev/null
+echo &quot;any writable by non-root? -&gt; escalation candidates&quot;
+
+# --- what does each job actually run? ---
+sudo grep -rhvE '^\s*(#|$)' /etc/cron.d/ /etc/crontab 2&gt;/dev/null
+ps aux | grep -E &quot;cron|systemd&quot; | grep -v grep | head
+
+# --- systemd units that a user can influence ---
+systemctl list-unit-files --state=enabled --no-pager 2&gt;/dev/null | head -15
+ls -la /etc/systemd/system/ 2&gt;/dev/null | head -15
+find /etc/systemd /usr/lib/systemd -writable -type f 2&gt;/dev/null | head
+grep -r &quot;Environment=\|ExecStart=&quot; /etc/systemd/system/*.service 2&gt;/dev/null | head -10
+
+# --- writable places a privileged job might reference ---
+sudo -n -l 2&gt;/dev/null | grep -E &quot;NOPASSWD|ALL&quot; | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read every scheduled job and service definition on this machine, and classify each<br />
+by exploitability.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/pr-03 &amp;&amp; cd ~/aegis/labs/pr-03
+
+{
+  echo &quot;================ CRON ================&quot;
+  echo &quot;--- user crontab ---&quot;; crontab -l 2&gt;/dev/null || echo &quot;  (none)&quot;
+  echo
+  echo &quot;--- root crontab ---&quot;; sudo crontab -l -u root 2&gt;/dev/null || echo &quot;  (none/no sudo)&quot;
+  echo
+  echo &quot;--- /etc/crontab ---&quot;; sudo grep -vE '^\s*(#|$)' /etc/crontab 2&gt;/dev/null
+  echo
+  echo &quot;--- /etc/cron.d ---&quot;
+  sudo ls -la /etc/cron.d/ 2&gt;/dev/null
+  sudo grep -rhvE '^\s*(#|$)' /etc/cron.d/ 2&gt;/dev/null
+  echo
+  echo &quot;--- spool, and who owns it ---&quot;
+  sudo ls -la /var/spool/cron/crontabs/ 2&gt;/dev/null
+  echo
+  echo &quot;--- CLASSIFY each job ---&quot;
+  echo &quot;  For every job above ask:&quot;
+  echo &quot;   1. Which user does it run as?&quot;
+  echo &quot;   2. Does it reference any path I can write?&quot;
+  echo &quot;   3. Does it invoke an interpreter or tool by BARE NAME (PATH risk)?&quot;
+  echo &quot;   4. Does it use * or \$VAR in a way my shell expands first?&quot;
+} 2&gt;&amp;1 | tee 01-cron.txt
+
+{
+  echo &quot;================ SYSTEMD ================&quot;
+  echo &quot;--- timers ---&quot;; systemctl list-timers --all --no-pager 2&gt;/dev/null | head -10
+  echo
+  echo &quot;--- user-writable unit files (immediate finding) ---&quot;
+  find /etc/systemd /usr/lib/systemd /lib/systemd -writable -type f 2&gt;/dev/null | head
+  echo
+  echo &quot;--- services with a minimal or writable PATH ---&quot;
+  sudo grep -rh &quot;Environment=PATH&quot; /etc/systemd/system/ /lib/systemd/system/ 2&gt;/dev/null | sort -u | head
+  echo
+  echo &quot;--- ExecStart pointing into a user-writable directory ---&quot;
+  sudo grep -rh &quot;ExecStart=&quot; /etc/systemd/system/*.service 2&gt;/dev/null | grep -E &quot;=/tmp|=/home|=/opt&quot; | head
+  echo
+  echo &quot;--- what do MY user's units say ---&quot;
+  systemctl --user list-unit-files --no-pager 2&gt;/dev/null | head -5
+  ls -la ~/.config/systemd/user/ 2&gt;/dev/null
+} 2&gt;&amp;1 | tee 02-systemd.txt
+
+# --- demonstrate the argument-injection pattern safely ---
+echo
+echo &quot;================ THE WILDCARD BUG, DEMONSTRATED =================&quot;
+cat &gt; cron-demo.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Simulates a root cron job:  * * * * * /usr/bin/tar -czf /backup/archive.tar.bak * -C /srv
+# The shell expands * BEFORE sudo/root ever runs it. Anything you create gets archived
+# by a privileged process, and a file you plant is executed on the next untar.
+set -e
+WORK=/tmp/cron-demo
+rm -rf $WORK; mkdir -p $WORK/srv $WORK/backup
+cd $WORK/srv
+echo &quot;legitimate data&quot; &gt; data.txt
+echo &quot;you do not need to control this command to exploit it&quot; &gt; notes.txt
+
+echo &quot;--- what a root job would tar ---&quot;
+# the job runs as root; here we just show the expansion
+(cd $WORK/srv &amp;&amp; tar -czf $WORK/backup/archive.tar.bak *)
+tar -tzf $WORK/backup/archive.tar.bak | sed 's/^/  /'
+
+echo
+echo &quot;--- now plant a file whose NAME is a payload path ---&quot;
+# archive members are extracted relative to CWD by many untar flows
+mkdir -p $WORK/extract
+tar -xzf $WORK/backup/archive.tar.bak -C $WORK/extract
+ls -la $WORK/extract
+
+echo
+echo &quot;The exploit class: a privileged command that archives '*' will archive whatever&quot;
+echo &quot;exists at that moment. Combined with an extraction that respects member paths,&quot;
+echo &quot;this is arbitrary file write as root. It is still common in real deployments.&quot;
+rm -rf $WORK
+EOF
+chmod +x cron-demo.sh &amp;&amp; ./cron-demo.sh | tee 03-wildcard.txt
+
+# --- the PATH problem for services, concretely ---
+echo
+echo &quot;================ SERVICE PATH =================&quot;
+echo &quot;your PATH has $(echo $PATH | tr ':' '\n' | wc -l) entries:&quot;
+echo &quot;$PATH&quot; | tr ':' '\n' | sed 's/^/  /'
+echo
+echo &quot;systemd services usually get a SHORT path. Yours:&quot;
+systemctl show --property=Environment $(systemctl list-units --type=service --state=running --no-legend | awk 'NR==1{print $1}') 2&gt;/dev/null | head -3
+echo
+echo &quot;If a service runs 'python3 something.py' with PATH=/usr/bin, you cannot hijack it.&quot;
+echo &quot;If PATH is unset or includes /tmp or your home, you can.&quot;
+</code></pre>
+<p><strong>Step 3 is a bug class that has shipped in production software for decades</strong> and still appears in<br />
+real cron jobs. Learning to <em>read</em> a cron line for "who, what path, bare name, wildcard" is a<br />
+transferable, high-value skill.</p>
+<p><strong>Record:</strong> <code>01-cron.txt</code> and <code>02-systemd.txt</code>, with your classification of each job.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>A root cron job runs <code>/usr/local/bin/backup.sh</code> every hour. Three things to check.</li>
+<li>Why does a <code>*</code> in a privileged command expand before the privilege is applied?</li>
+<li>What is argument injection, and how does it differ from command injection?</li>
+<li>Why is a systemd unit with <code>Environment=PATH=/tmp</code> a finding?</li>
+<li>Give one way a user-writable directory leads to root.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Cron</strong> → <strong>systemd</strong> → <strong>Argument Injection</strong> → <strong>Persistence</strong> → <strong>PATH Hijack</strong> →<br />
+<strong>Privilege Escalation (Linux)</strong>.</p>

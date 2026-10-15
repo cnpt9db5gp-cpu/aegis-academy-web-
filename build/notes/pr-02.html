@@ -1,0 +1,183 @@
+<h1 id="file-permissions-suid-and-writable-service-abuse">File Permissions, SUID and Writable Service Abuse</h1>
+<h2 id="summary">Summary</h2>
+<p>Unix permissions are the oldest and still the most exploited privilege boundary. This lecture<br />
+covers the misconfigurations that turn an unprivileged user into root: SUID binaries, writable<br />
+service files, world-writable directories in PATH, and unsafe interpreter invocations.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>Mode bits: <code>rwx</code> for owner/group/others; special bits <code>s</code> (SUID/SGID), <code>t</code> (sticky)</li>
+<li><strong>SUID on a file means: run with the file owner's privileges.</strong> Any bug in a SUID binary is<br />
+  a privilege escalation path by definition</li>
+<li><strong>The directory matters, not just the file.</strong> A writable directory containing an executable<br />
+  lets you replace the executable</li>
+<li><strong>PATH hijacking</strong>: if any PATH directory is writable by your user, you control that command</li>
+<li><strong>Unsafe interpreter calls</strong>: <code>system("sh -c 'input'")</code> runs <code>sh</code> from PATH</li>
+<li><strong>Writable config files</strong> for privileged services</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Mode bits</strong></td>
+<td>The 9 permission bits plus special bits</td>
+</tr>
+<tr>
+<td><strong>SUID (4000)</strong></td>
+<td>Run as the file's owner</td>
+</tr>
+<tr>
+<td><strong>SGID (2000)</strong></td>
+<td>Run with the file's group; also directory inheritance</td>
+</tr>
+<tr>
+<td><strong>Sticky bit (1000)</strong></td>
+<td>Only the owner can delete files in the directory</td>
+</tr>
+<tr>
+<td><strong>umask</strong></td>
+<td>Bits removed when creating files</td>
+</tr>
+<tr>
+<td><strong>PATH hijack</strong></td>
+<td>Placing a malicious binary earlier in PATH</td>
+</tr>
+<tr>
+<td><strong>Wildcard <code>sudo</code></strong></td>
+<td><code>sudo *</code> or <code>sudo /path/*</code> — always a finding</td>
+</tr>
+<tr>
+<td><strong>Race window</strong></td>
+<td>Time between a check and the action</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- find every SUID/SGID on this machine ---
+find / -perm -4000 -type f 2&gt;/dev/null | tee /tmp/suid.txt
+find / -perm -2000 -type f 2&gt;/dev/null | head -20
+find / -perm -6000 -type f 2&gt;/dev/null          # both bits
+
+# --- which of them are NOT part of the base system? ---
+dpkg -S $(cat /tmp/suid.txt) 2&gt;/dev/null | grep -v &quot;^dpkg-query&quot; | head
+# an SUID binary with no owning package = dropped there by someone
+
+# --- world-writable files, excluding virtual filesystems ---
+find / -xdev -perm -o+w -type f 2&gt;/dev/null | grep -vE '^/(proc|sys|dev|run|tmp)' | head -20
+
+# --- world-writable DIRECTORIES are more dangerous ---
+find / -xdev -perm -o+w -type d 2&gt;/dev/null | grep -vE '^/(proc|sys|dev|run|tmp|var/tmp)' | head -20
+
+# --- is any PATH directory writable by me? ---
+IFS=: read -ra P &lt;&lt;&lt; &quot;$PATH&quot;
+for d in &quot;${P[@]}&quot;; do
+  [ -d &quot;$d&quot; ] &amp;&amp; [ -w &quot;$d&quot; ] &amp;&amp; echo &quot;  WRITABLE IN PATH: $d ($(stat -c %U &quot;$d&quot;))&quot;
+done
+
+# --- the classic interpreter attack surface ---
+grep -rn &quot;system(\|popen(\|exec.*sh\|/bin/sh&quot; /usr/local/bin /opt 2&gt;/dev/null | head
+
+# --- sudo rules, always ---
+sudo -n -l 2&gt;/dev/null || sudo -l
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> demonstrate four real escalation classes locally and safely, then verify them.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/pr-02 &amp;&amp; cd ~/aegis/labs/pr-02
+WORK=/tmp/privesc-lab
+rm -rf $WORK &amp;&amp; mkdir -p $WORK &amp;&amp; cd $WORK
+
+echo &quot;=== CLASS 1: PATH HIJACKING (no privileges needed) ===&quot;
+mkdir -p evil
+cat &gt; evil/ls &lt;&lt;'EOF'
+#!/bin/sh
+echo &quot;[HIJACK] this is not /bin/ls - you just ran a binary from a writable PATH dir&quot;
+exec /bin/ls &quot;$@&quot;
+EOF
+chmod +x evil/ls
+echo &quot;normal  : $(PATH=/usr/bin:/bin command -v ls)&quot;
+echo &quot;hijacked: $(PATH=$PWD/evil:/usr/bin:/bin command -v ls)&quot;
+PATH=$PWD/evil:/usr/bin:/bin ls -d /tmp | sed 's/^/  /'
+
+echo
+echo &quot;=== CLASS 2: SUID BINARY ABUSE ===&quot;
+# Copy a shell and make it setuid-root in a LAB-SAFE way using a user namespace.
+# If userns is available, this is contained and reversible.
+if command -v unshare &gt;/dev/null; then
+  unshare -r sh -c '
+    id
+    cp /bin/bash /tmp/privesc-lab/bash-suid
+    chmod u+s /tmp/privesc-lab/bash-suid
+    ls -l /tmp/privesc-lab/bash-suid
+    echo &quot;--- escalating inside the user namespace (contained to this shell) ---&quot;
+    /tmp/privesc-lab/bash-suid -c &quot;id -u; whoami&quot;
+  ' 2&gt;&amp;1 | tee 01-suid.txt
+  echo
+  echo &quot;Note: inside a user namespace you are 'root' for that namespace ONLY.&quot;
+  echo &quot;On a real target the same technique targets a genuinely SUID-root binary.&quot;
+else
+  echo &quot;unshare not available - see the SUID list from pr-01 instead&quot;
+fi
+
+echo
+echo &quot;=== CLASS 3: WRITABLE SERVICE / CRON FILE ===&quot;
+# Simulate the misconfiguration that root's cron job will read.
+sudo mkdir -p /opt/aegis-backup 2&gt;/dev/null
+sudo cp /dev/null /opt/aegis-backup/status 2&gt;/dev/null
+sudo chmod 777 /opt/aegis-backup 2&gt;/dev/null
+ls -ld /opt/aegis-backup 2&gt;/dev/null
+echo &quot;  A root cron job that runs /opt/aegis-backup/run.sh would be exploited by:&quot;
+cat &gt; /opt/aegis-backup/run.sh 2&gt;/dev/null &lt;&lt;'EOF'
+#!/bin/sh
+# the payload a world-writable service directory lets you install
+id &gt; /tmp/pwned-by-cron.txt
+EOF
+chmod +x /opt/aegis-backup/run.sh 2&gt;/dev/null
+echo &quot;  -&gt; wrote run.sh into a 777 directory. If root's cron runs it, you win.&quot;
+sudo chmod 755 /opt/aegis-backup 2&gt;/dev/null
+sudo rm -rf /opt/aegis-backup 2&gt;/dev/null
+
+echo
+echo &quot;=== CLASS 4: PERMISSION AUDIT OF YOUR OWN MACHINE ===&quot;
+{
+  echo &quot;--- SUID binaries not owned by any package (planted?) ---&quot;
+  comm -23 &lt;(sort /tmp/suid.txt) &lt;(dpkg -S $(cat /tmp/suid.txt) 2&gt;/dev/null | cut -d: -f1 | sort -u) | head
+  echo
+  echo &quot;--- world-writable dirs outside /tmp ---&quot;
+  find / -xdev -perm -o+w -type d 2&gt;/dev/null | grep -vE '^/(proc|sys|dev|run|tmp|var/tmp)' | head
+  echo
+  echo &quot;--- world-writable files in /etc ---&quot;
+  find /etc -writable -type f 2&gt;/dev/null | head
+  echo
+  echo &quot;--- writable PATH directories ---&quot;
+  IFS=: read -ra P &lt;&lt;&lt; &quot;$PATH&quot;
+  for d in &quot;${P[@]}&quot;; do [ -d &quot;$d&quot; ] &amp;&amp; [ -w &quot;$d&quot; ] &amp;&amp; echo &quot;  $d&quot;; done
+  echo
+  echo &quot;--- sudo rules ---&quot;
+  sudo -n -l 2&gt;/dev/null | tail -8
+} 2&gt;&amp;1 | tee 02-audit.txt
+
+echo
+echo &quot;=== CLEANUP ===&quot;
+cd /tmp &amp;&amp; rm -rf $WORK /tmp/pwned-by-cron.txt
+echo &quot;lab artefacts removed&quot;
+</code></pre>
+<p><strong><code>02-audit.txt</code> is a genuine assessment of your own machine.</strong> An SUID binary with no owning<br />
+package, a world-writable directory outside <code>/tmp</code>, or a writable PATH entry are all real<br />
+findings you should be able to explain to a non-technical colleague.</p>
+<p><strong>Record:</strong> <code>02-audit.txt</code>, and which of the four classes you found on your own box.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does the SUID bit actually change when you execute a file?</li>
+<li>Why is a writable directory more dangerous than a writable file?</li>
+<li>How does PATH hijacking work, and what is the fix?</li>
+<li>Why is <code>sudo /usr/bin/vi</code> or <code>sudo *</code> always a finding?</li>
+<li>What does a SUID binary with no owning package suggest?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>File Permissions (Mode Bits)</strong> → <strong>SUID / SGID Bits</strong> → <strong>SUID Binaries</strong> →<br />
+<strong>Linux Privilege Escalation</strong> → <strong>PATH Hijack</strong> → <strong>find &amp; locate Enumeration</strong>.</p>

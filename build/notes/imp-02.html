@@ -1,0 +1,241 @@
+<h1 id="psexec-wmiexec-and-smbexec-for-remote-execution">psexec, wmiexec and smbexec for Remote Execution</h1>
+<h2 id="summary">Summary</h2>
+<p>Remote execution is how an engagement moves. Impacket has five ways to do it and the choice<br />
+matters — each leaves a different artifact in the client's logs and touches a different part of<br />
+the host.</p>
+<p>The framing: <strong>every remote execution method writes something somewhere.</strong> The question is not<br />
+"which is stealthy" but "which artifact, and does the ROE permit it."</p>
+<blockquote>
+<p><strong>AUTHORISATION.</strong> These run a command on a host you are engaged to<br />
+test. That requires explicit scope; "credential testing" alone is not<br />
+sufficient. All examples target the lab range.</p>
+</blockquote>
+<h2 id="the-five-compared">The five, compared</h2>
+<pre><code class="language-text">  TOOL        MECHANISM            WRITES        SERVICE?  NEEDS
+  ------------------------------------------------------------------------
+  psexec      creates a service    a service     YES       admin or SYSTEM
+                            (ADMIN$ to upload the binary)
+  smbexec     runs a command       a .exe in     no        admin or SYSTEM
+              via a service        ADMIN$ or C$
+  wmiexec     WMI Win32_Process    nothing on   no        admin (remote WMI
+              Create               disk          (no
+                                       service)     9)
+  dcomexec    DCOM Service Control nothing on   YES       admin
+              Manager - to start   disk
+              a temporary service
+  atexec      a scheduled task     nothing on   no        admin
+                                          disk          (a task)
+
+  AND THE INTERACTIVE ONE:
+  evil-winrm  WinRM (5985/5986)   nothing on   no        the right privilege
+              - a real PowerShell  disk          (WinRM    and a shell
+                                must be enabled)
+              session
+
+  THE RANKING, for an assessment:
+    1. evil-winrm      - interactive, no artifact, no service. Best UX.
+    2. wmiexec         - no file on disk, no service. Cleanest of the
+                         SMB-based ones.
+    3. atexec          - creates a task, but tasks are normal and
+                         self-cleaning.
+    4. psexec          - the standard. Creates a service (7045 in the
+                         log) and uploads a binary to ADMIN$.
+    5. smbexec         - worst. Writes an executable into ADMIN$ or C$
+                         that is left behind.
+</code></pre>
+<h2 id="the-commands">The commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/imp-02 &amp;&amp; cd ~/aegis/labs/imp-02
+
+cat &gt; 00-guard.md &lt;&lt;'EOF'
+# Scope and authorisation for remote execution
+
+```bash
+lab_only() {
+  case &quot;$1&quot; in
+    192.168.56.*|10.10.10.*|127.*) return 0 ;;
+    *) echo &quot;REFUSED: $1 is not in the AEGIS lab range.&quot; &gt;&amp;2; exit 3 ;;
+  esac
+}
+```
+
+```text
+  REMOTE EXECUTION IS A WRITE TO A HOST. It requires:
+    [ ] the host is in the written scope
+    [ ] the ROE permits remote execution (it is not implied by
+        &quot;credential testing&quot;)
+    [ ] you know whether it creates a service (7045 in the client's
+        logs) and whether they will call about it
+    [ ] you know whether it writes a file to ADMIN$ or C$ - that is a
+        change to their disk that you must clean up
+    [ ] if you run it as SYSTEM on a DC, you know what that does to
+        their monitoring
+
+  AND: it is the step most likely to BREAK something. A command that
+  assumes a path, a tool, or a locale that is not there is an outage.
+  Prefer commands that are read-only (whoami, hostname, systeminfo)
+  until you are sure the host is in a known state.
+```
+EOF
+cat &gt; /dev/null &lt;&lt;'X'
+X
+
+cat &gt; exec.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Wraps the five remote-execution methods with the scope guard and
+# prints the artifact each one leaves.
+set -euo pipefail
+H=&quot;${1:?usage: ./exec.sh &lt;lab-ip&gt; &lt;domain/cred&gt; [method] [command]}&quot;
+CRED=&quot;${2:?domain/cred, e.g. LAB/alice:LabPass123}&quot;
+METHOD=&quot;${3:-whoami}&quot;
+CMD=&quot;${4:-whoami}&quot;
+case &quot;$H&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $H not in the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+case &quot;$CRED&quot; in LAB/*|lab.internal/*) ;;
+  *) echo &quot;REFUSED: $CRED is not a lab domain credential.&quot; &gt;&amp;2; exit 3 ;; esac
+
+case &quot;$METHOD&quot; in
+  psexec)  echo &quot;[method] psexec   -&gt; creates a SERVICE (event 7045), uploads a binary to ADMIN\$&quot;
+           echo &quot;[method]            -&gt; cleans up the service, leaves the upload briefly&quot;
+           impacket-psexec -no-passback -dc-ip &quot;$H&quot; &quot;$CRED@$H&quot; &quot;$CMD&quot; ;;
+  smbexec) echo &quot;[method] smbexec  -&gt; writes an .exe to ADMIN\$/C\$ and LEAVES IT if it crashes&quot;
+           echo &quot;[method]            -&gt; least preferred&quot;
+           impacket-smbexec -no-passback -dc-ip &quot;$H&quot; &quot;$CRED@$H&quot; &quot;$CMD&quot; ;;
+  wmiexec) echo &quot;[method] wmiexec  -&gt; no file on disk, no service. WMI Create only&quot;
+           echo &quot;[method]            -&gt; needs remote WMI (port 135/49664) enabled&quot;
+           impacket-wmiexec -no-passback -dc-ip &quot;$H&quot; &quot;$CRED@$H&quot; &quot;$CMD&quot; ;;
+  dcomexec) echo &quot;[method] dcomexec -&gt; creates a service via DCOM, then deletes it&quot;
+           impacket-dcomexec -no-passback -dc-ip &quot;$H&quot; &quot;$CRED@$H&quot; &quot;$CMD&quot; ;;
+  atexec)  echo &quot;[method] atexec   -&gt; creates a SCHEDULED TASK, runs, deletes&quot;
+           echo &quot;[method]            -&gt; tasks are normal and visible in Task Scheduler&quot;
+           impacket-atexec -no-passback -dc-ip &quot;$H&quot; &quot;$CRED@$H&quot; &quot;$CMD&quot; ;;
+  winrm)   echo &quot;[method] winrm    -&gt; a real interactive PowerShell. No artifact.&quot;
+           command -v evil-winrm &gt;/dev/null 2&gt;&amp;1 || { echo &quot;install evil-winrm&quot;; exit 1; }
+           evil-winrm -i &quot;$H&quot; -u &quot;${CRED%%:*}&quot; -p &quot;${CRED##*:}&quot; ;;
+  *) echo &quot;methods: psexec smbexec wmiexec dcomexec atexec winrm&quot; &gt;&amp;2; exit 1 ;;
+esac
+EOF
+chmod +x exec.sh
+
+# --- 2. the artifact table ---
+cat &gt; 02-artifacts.md &lt;&lt;'EOF'
+# What each method leaves, and where the client sees it
+
+| Method | Disk | Service | Log events | Cleanup |
+|---|---|---|---|---|
+| psexec | binary in ADMIN$ (removed after) | yes, transient | 7045, 4698/4702 (psexesvc) | automatic |
+| smbexec | .exe in ADMIN$ or C$ | yes | 7045 | **manual - may persist** |
+| wmiexec | none | no | 4688 (WmiPrvSE), 1 (WinRM host) | automatic |
+| dcomexec | none | yes, transient | 7045, 4698 | automatic |
+| atexec | none | no | 4698/4702 (a task), 4699 | automatic |
+| evil-winrm | none | no | 4624 type 3, 21 (WinRM) | automatic |
+
+## The ones to check after
+
+</code></pre>
+<p>AFTER ANY REMOTE EXECUTION, ON EVERY HOST YOU TOUCHED:</p>
+<pre><code>Windows (on the host, as admin):
+  Get-ChildItem \\ADMIN$\\ -Filter *.exe | Select Name, LastWriteTime
+  Get-ChildItem \\C$\\Windows\\Temp\\ | Where LastWriteTime -gt (Get-Date).AddHours(-1)
+  Get-ChildItem \\C$\\Windows\\Temp\\ -Filter *.bat -Recurse -EA 0
+  Get-SmbOpenFile          # who has a handle open right now
+
+The cleanup is the client's filesystem. Leaving an executable in
+ADMIN$ is a change you must either remove or report.
+</code></pre>
+<pre><code>
+## The commands to run first
+
+```text
+  Start with read-only. whoami /all, hostname, ipconfig /all.
+  You are confirming:
+    - who the command actually ran as (admin? SYSTEM? a service?)
+    - that the host is the host you think it is
+    - the network position, for pivoting (ad-06)
+  Every one of these is non-destructive. A command that fails because
+  of a missing path is an outage you caused.
+</code></pre>
+<h2 id="what-does-not-need-remote-execution">What does NOT need remote execution</h2>
+<pre><code class="language-text">  If you only need to READ something, do not execute anything:
+
+    psexec - just read a file
+      smbclient '//LAB/alice%pass@HOST/C$' -c 'get ADMIN\web.config'
+      impacket-secretsdump -sam SAM -security SECURITY -system SYSTEM ...
+
+    psexec - list the local administrators
+      netexec smb HOST -u alice -H &lt;hash&gt; --local-auth
+
+    psexec - check for delegation
+      netexec smb HOST -u alice -p pass --delegation
+
+    psexec - enumerate sessions on the host
+      netexec smb HOST -u alice -p pass --enum-sessions
+
+  A command that creates a service to run `dir` is a service created
+  to run `dir`. Every unnecessary remote execution is a finding you
+  created.
+</code></pre>
+<p>EOF<br />
+cat 02-artifacts.md</p>
+<h1 id="-3-the-matrix-read-only-first-">--- 3. the matrix, read-only first ---</h1>
+<p>cat &gt; 03-matrix.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash">!/usr/bin/env bash</h1>
+<h1 id="read-only-across-the-lab-range-no-remote-execution">Read-only across the lab range. NO remote execution.</h1>
+<h1 id="use-this-to-decide-where-execution-is-needed-not-as-a-substitute-for-it">Use this to decide WHERE execution is needed, not as a substitute for it.</h1>
+<p>H="${1:?usage: ./03-matrix.sh 192.168.56.20}"<br />
+U="${2:-alice}"; P="${3:-LabPass123}"<br />
+case "$H" in 192.168.56.<em>|10.10.10.</em>|127.<em>) ;;<br />
+</em>) echo "REFUSED: $H not in the lab range." &gt;&2; exit 3 ;; esac<br />
+echo "[scope] $H in the lab range; read-only"<br />
+echo<br />
+echo "=== 1. who am I here, and what rights do I have? ==="<br />
+lookupsid.py "LAB/$U:$P@$H" 2&gt;/dev/null | head -3 | sed 's/^/  /'<br />
+echo<br />
+echo "=== 2. is this host a DC? (lookupsid against a DC behaves differently) ==="<br />
+nxc smb "$H" -u "$U" -p "$P" --enum-domain-trusts 2&gt;&amp;1 | sed 's/^/  /'<br />
+echo<br />
+echo "=== 3. delegation - unconstrained means I can capture TGTs here ==="<br />
+nxc smb "$H" -u "$U" -p "$P" --delegation 2&gt;&amp;1 | sed 's/^/  /'<br />
+echo<br />
+echo "=== 4. sessions - who is logged in HERE right now (imp-03 material) ==="<br />
+nxc smb "$H" -u "$U" -p "$P" --enum-sessions 2&gt;&amp;1 | sed 's/^/  /'<br />
+echo<br />
+echo "=== 5. local admin - whose hash gets me SYSTEM here ==="<br />
+nxc smb "$H" -u "$U" -p "$P" --local-auth 2&gt;&amp;1 | sed 's/^/  /'<br />
+echo<br />
+echo "=== 6. what can I read without executing anything? ==="<br />
+nxc smb "$H" -u "$U" -p "$P" --shares 2&gt;&amp;1 | sed 's/^/  /'<br />
+echo<br />
+echo "=== THE ORDER OF USE ==="<br />
+echo "  1. run this matrix over the lab range (read-only, no services)"<br />
+echo "  2. look for: a DC, unconstrained delegation, sessions, writable"<br />
+echo "     shares, local admin"<br />
+echo "  3. ONLY THEN execute, and only on the hosts where execution"<br />
+echo "     buys you something this matrix did not"<br />
+echo "  4. evil-winrm first, smbexec last"<br />
+EOF<br />
+chmod +x 03-matrix.sh<br />
+```</p>
+<p><strong><code>03-matrix.sh</code> is the deliverable.</strong> The entire point of this note is on that line: <em>"A<br />
+command that creates a service to run <code>dir</code> is a service created to run <code>dir</code>."</em> Six read-only<br />
+checks — delegation, sessions, local admin, shares, trust — and only then execution, and only<br />
+where it buys something the matrix didn't.</p>
+<p><strong><code>02-artifacts.md</code></strong> maps each method to the exact log event the client will see (7045 for the<br />
+service, 4698 for the task) and to its cleanup behaviour, including that <strong>smbexec may leave an<br />
+executable in <code>ADMIN$</code> if it crashes</strong> — which is a change to their disk you either remove or<br />
+report.</p>
+<p><strong>Record:</strong> <code>02-artifacts.md</code> and <code>03-matrix.sh</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the five remote-execution methods and what each writes to disk.</li>
+<li>Which method creates a service, and what log event is that?</li>
+<li>Why is smbexec the worst option, and what must you check afterwards?</li>
+<li>What does wmiexec need enabled that the others do not?</li>
+<li>Why is evil-winrm usually the best first choice?</li>
+<li>Give four things you can learn without executing anything remotely.</li>
+<li>Why is a read-only matrix the right first step across a range?</li>
+<li>Name two checks you must run after any remote execution.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pivoting</strong> → <strong>Remote Execution</strong> → <strong>Pass-the-Hash</strong> → <strong>SMB</strong> →<br />
+<strong>Windows Logging</strong> → <strong>Active Directory</strong>.<br />
+<code>imp-03</code> is where the sessions this matrix found get used.</p>

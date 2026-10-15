@@ -1,0 +1,252 @@
+<h1 id="os-security-privilege-separation">OS Security: Privilege Separation</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161's OS-security block asks how an operating system stays trustworthy while running thousands<br />
+of untrusted programs. The lecture's answer is the same one MIT 6.858 reaches, stated as a<br />
+design requirement rather than an architecture: <strong>the OS must be the only thing you trust, and it<br />
+must therefore be as small as it can be.</strong></p>
+<blockquote>
+<p>Companion to <code>mit858-02</code> and <code>mit858-05</code>. This note is the threat model<br />
+against the kernel; those are the mechanisms.</p>
+</blockquote>
+<h2 id="the-adversary-precisely">The adversary, precisely</h2>
+<p>An operating system faces adversaries it cannot trust:</p>
+<pre><code class="language-text">  ordinary processes   - run arbitrary code, deliberately buggy or malicious
+  users               - may attempt to read others' data, escalate
+  input               - network data reaching a parser
+  the hardware         - assume honest
+  the OS itself        - if it is compromised, everything is lost
+</code></pre>
+<p>The design goal: <strong>a compromise of any userland component must not yield<br />
+kernel privilege</strong>, because privilege is what the kernel holds.</p>
+<h2 id="the-mechanisms-and-what-each-buys">The mechanisms, and what each buys</h2>
+<table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Boundary strength</th>
+<th>Survives a kernel bug?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User/kernel rings</td>
+<td>hardware</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Unix uid/gid + file modes</td>
+<td>one kernel</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Capabilities</td>
+<td>fine-grained authority</td>
+<td>no</td>
+</tr>
+<tr>
+<td>chroot</td>
+<td>filesystem only, not authority</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Namespaces + cgroups</td>
+<td>per-service view</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Containers</td>
+<td>namespace isolation</td>
+<td>no</td>
+</tr>
+<tr>
+<td><strong>VM</strong></td>
+<td>separate kernel</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><strong>Enclave</strong></td>
+<td>hardware memory isolation</td>
+<td>yes, modulo side channels</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The honest summary:</strong> everything up to and including containers shares one<br />
+kernel, so a kernel bug defeats all of it simultaneously. Only VM and enclave<br />
+survive a kernel compromise, at a cost.</p>
+<h2 id="the-kernel-attack-surface">The kernel attack surface</h2>
+<p>A modern kernel is not small. It exposes:</p>
+<pre><code class="language-text">  ~300 syscall handlers
+  dozens of filesystems (proc, sysfs, devtmpfs, netlink, io_uring...)
+  thousands of device drivers
+  BPF, eBPF, and the verifier
+  userfaultfd, io_uring, netfilter
+</code></pre>
+<p>Each is a parser reachable from less-privileged code. That is why kernel<br />
+hardening (<code>mit858-18</code>'s mitigations, LSMs, <code>user_namespace</code> restrictions) is<br />
+the dominant operating-system security work of the last decade.</p>
+<h2 id="secure-system-call-interface">Secure system call interface</h2>
+<p>Every system call is a parser with an untrusted argument list. The design rules:</p>
+<ol>
+<li><strong>Validate every argument</strong> — pointer, length, descriptor, flag combination</li>
+<li><strong>Check for integer overflow</strong> before allocating <code>count * size</code></li>
+<li><strong>Copy in</strong>, never dereference a user pointer directly</li>
+<li><strong>Check for overflow on the copy length</strong></li>
+<li><strong>Return an error</strong>, never crash — a kernel null dereference is full compromise</li>
+</ol>
+<h2 id="what-cs161-wants-you-to-derive">What CS161 wants you to derive</h2>
+<p>Given a kernel version and an attacker with the <code>user</code> uid, determine:</p>
+<ol>
+<li>Which features are enabled that widen reach? (<code>unprivileged_userns</code>, BPF, io_uring)</li>
+<li>What is the shortest path to <code>CAP_SYS_ADMIN</code>?</li>
+<li>Is there a published local privesc for that version?</li>
+<li>What hardening would close that specific path?</li>
+</ol>
+<p>This is exactly the decision tree in <code>pr-05</code>, applied to a kernel rather than a host.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Privilege separation</strong></td>
+<td>Trusted kernel + untrusted userland</td>
+</tr>
+<tr>
+<td><strong>Reference monitor</strong></td>
+<td>The mandatory mediation point</td>
+</tr>
+<tr>
+<td><strong>Ring 0 / ring 3</strong></td>
+<td>Kernel / user privilege levels</td>
+</tr>
+<tr>
+<td><strong>System call</strong></td>
+<td>The user-to-kernel parser</td>
+</tr>
+<tr>
+<td><strong>Capability</strong></td>
+<td>Fine-grained, transferable authority</td>
+</tr>
+<tr>
+<td><strong>Namespace</strong></td>
+<td>Isolated kernel view of a resource</td>
+</tr>
+<tr>
+<td><strong>cgroup</strong></td>
+<td>Resource accounting and limits</td>
+</tr>
+<tr>
+<td><strong>cBPF / eBPF</strong></td>
+<td>In-kernel packet filter programs</td>
+</tr>
+<tr>
+<td><strong>LSM</strong></td>
+<td>Linux Security Module; mandatory access control</td>
+</tr>
+<tr>
+<td><strong>io_uring</strong></td>
+<td>Shared ring buffers between kernel and userspace</td>
+</tr>
+<tr>
+<td><strong>KPTI</strong></td>
+<td>Kernel page-table isolation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the kernel attack surface, enumerated on this machine ---
+{
+  echo &quot;=== SYSCALL SURFACE ===&quot;
+  grep -c &quot;^ *[0-9]* &quot; /usr/include/asm/unistd_64.h 2&gt;/dev/null | xargs echo &quot;  syscalls defined:&quot;
+  echo &quot;  (each one is a parser reachable from userland)&quot;
+  echo
+  echo &quot;=== FEATURES THAT WIDEN REACH (T5-05 is the vulnerability surface) ===&quot;
+  for s in unprivileged_userns_clone unprivileged_bpf_disabled perf_event_paranoid \
+           kptr_restrict userfaultfd; do
+    v=$(cat /proc/sys/kernel/$s 2&gt;/dev/null || cat /proc/sys/vm/$s 2&gt;/dev/null || echo n/a)
+    printf &quot;  %-32s %s\n&quot; &quot;$s&quot; &quot;$v&quot;
+  done
+  echo
+  echo &quot;=== LSM active? ===&quot;
+  cat /sys/kernel/security/lsm 2&gt;/dev/null | sed 's/^/  /'
+  ls /sys/kernel/security/ 2&gt;/dev/null | head -6
+  echo
+  echo &quot;=== KERNEL MODULES (a large, privileged attack surface) ===&quot;
+  lsmod | wc -l | xargs echo &quot;  modules loaded:&quot;
+  echo
+  echo &quot;=== hardening sysctls ===&quot;
+  sysctl kernel.randomize_va_space kernel.kptr_restrict kernel.dmesg_restrict 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;=== io_uring present? (a historically rich source of bugs) ===&quot;
+  grep -E &quot;io_uring&quot; /proc/kallsyms 2&gt;/dev/null | head -2 | sed 's/^/  /' || echo &quot;  not visible without root&quot;
+} 2&gt;&amp;1 | tee 01-kernel-surface.txt
+
+# --- can unprivileged code reach the kernel surface at all? ---
+echo
+echo &quot;=== what an unprivileged process can reach ===&quot;
+echo &quot;  my identity: $(id)&quot;
+echo &quot;  capabilities: $(grep CapEff /proc/self/status | awk '{print $2}')&quot;
+capsh --decode=$(grep CapEff /proc/self/status | awk '{print $2}') 2&gt;/dev/null | head -3 | sed 's/^/  /' || \
+  echo &quot;  (install libcap2-bin for capsh --decode)&quot;
+echo
+echo &quot;  Try an unprivileged user namespace:&quot;
+unshare -Ur id 2&gt;&amp;1 | sed 's/^/  /'
+unshare -Ur sh -c 'grep CapEff /proc/self/status' 2&gt;&amp;1 | sed 's/^/  /'
+echo &quot;  ^ inside a user namespace you appear to be root. That is the whole&quot;
+echo &quot;    reason most published local privesc chains are gated on this.&quot;
+
+# --- the system call surface, as an attacker sees it ---
+python3 - &lt;&lt;'PY' | tee 02-syscalls.txt
+import os
+# strace your own shell to enumerate what it touches
+print(&quot;  how many distinct syscalls does 'ls' make?&quot;)
+print(&quot;  run: strace -c -f /bin/ls 2&gt;&amp;1 | tail -20&quot;)
+print()
+print(&quot;  the top callers of the kernel on a normal system:&quot;)
+for name, path in [
+    (&quot;openat&quot;,   &quot;/proc/self/io&quot;),
+]:
+    pass
+print(&quot;  each entry in /proc/&lt;pid&gt;/syscall shows what a process is blocked in&quot;)
+print(&quot;  and is the fastest way to see which kernel interface an app uses:&quot;)
+PY
+strace -c -f /bin/ls 2&gt;&amp;1 | tail -12 | sed 's/^/  /' | tee -a 02-syscalls.txt
+
+# --- hardening, measured ---
+{
+  echo &quot;=== what each control does, and whether it is on ===&quot;
+  printf &quot;  %-40s %-12s %s\n&quot; &quot;CONTROL&quot; &quot;VALUE&quot; &quot;INTERPRETATION&quot;
+  v=$(cat /proc/sys/kernel/randomize_va_space 2&gt;/dev/null)
+  printf &quot;  %-40s %-12s %s\n&quot; &quot;randomize_va_space&quot; &quot;$v&quot; \
+    &quot;$([ &quot;$v&quot; = &quot;2&quot; ] &amp;&amp; echo 'full ASLR' || echo 'WEAKENED')&quot;
+  v=$(cat /proc/sys/kernel/kptr_restrict 2&gt;/dev/null)
+  printf &quot;  %-40s %-12s %s\n&quot; &quot;kptr_restrict&quot; &quot;$v&quot; \
+    &quot;$([ &quot;$v&quot; -ge 2 ] &amp;&amp; echo 'kernel pointers hidden' || echo 'kernel pointers LEAKED')&quot;
+  v=$(cat /proc/sys/kernel/unprivileged_userns_clone 2&gt;/dev/null || echo 0)
+  printf &quot;  %-40s %-12s %s\n&quot; &quot;unprivileged_userns_clone&quot; &quot;$v&quot; \
+    &quot;$([ &quot;$v&quot; = &quot;1&quot; ] &amp;&amp; echo 'many privesc chains work' || echo 'chains gated')&quot;
+  v=$(cat /proc/sys/kernel/perf_event_paranoid 2&gt;/dev/null)
+  printf &quot;  %-40s %-12s %s\n&quot; &quot;perf_event_paranoid&quot; &quot;$v&quot; \
+    &quot;$([ &quot;$v&quot; -ge 2 ] &amp;&amp; echo 'side-channel hardened' || echo 'profiling OPEN')&quot;
+} 2&gt;&amp;1 | tee 03-hardening.txt
+</code></pre>
+<p><strong>Step 1 is the deliverable</strong>: a real enumeration of this machine's kernel attack surface —<br />
+syscall count, the features that widen reach, active LSMs, module count. That table is the<br />
+first thing you check on a kernel target.</p>
+<p><strong>Record:</strong> <code>01-kernel-surface.txt</code> and <code>03-hardening.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Who are the adversaries an operating system faces?</li>
+<li>Why does a kernel bug defeat all userspace isolation at once?</li>
+<li>Name five syscall design rules.</li>
+<li>Why do most published local privesc exploits require <code>unprivileged_userns_clone=1</code>?</li>
+<li>What is an LSM and what problem does it address?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Separation</strong> → <strong>System Call</strong> → <strong>Capabilities</strong> → <strong>Namespace Container</strong> →<br />
+<strong>Kernel Exploitation</strong> → <strong>LSM</strong>.<br />
+<code>pr-05</code> applies the decision tree to a live kernel.</p>

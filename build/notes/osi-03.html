@@ -1,0 +1,263 @@
+<h1 id="metadata-documents-and-verification-discipline">Metadata, Documents and Verification Discipline</h1>
+<h2 id="summary">Summary</h2>
+<p>Public documents leak more than any other OSINT category, because documents are written for<br />
+humans and humans do not consider the audience. Exif data, tracked changes, revision histories,<br />
+hidden sheets, embedded objects and stale hyperlinks all survive into the published file.</p>
+<p>The framing: <strong>a published document is not a document. It is a<br />
+document plus everything the author forgot to remove.</strong> And the<br />
+discipline is verification: every claim you make about a document has<br />
+to survive someone asking how you know.</p>
+<blockquote>
+<p>Companion to <code>osi-01</code>'s method. This note is the document analysis<br />
+and the verification habit.</p>
+</blockquote>
+<h2 id="what-a-document-leaks">What a document leaks</h2>
+<pre><code class="language-text">  METADATA
+    EXIF (images)      camera, GPS, serial number, timestamp, software
+    Office core props   author, last-modified-by, company, template
+    PDF info            producer, creator, creation AND modification
+                        date, and - critically - whether they differ
+    ZIP container       the DOCX/XLSX/PPTX ZIP, and every entry's
+                        timestamp. A DOCX is a ZIP. Every timestamp
+                        in it can differ from the others.
+
+  THE MOST USEFUL SIGNAL IN ALL OF IT
+    AUTHOR != LAST-MODIFIED-BY. Two names means two people touched it.
+    LastModifiedBy = a departed employee often means the document
+    predates them being deprovisioned, which dates it.
+
+  AND: creator tool != creator tool. If a PDF's producer is a
+  different version of Word than the client's, it was made
+  elsewhere.
+
+  REVISION AND TRACKED CHANGES
+    Word: settings.xml holds rsid data; the revisions are in the
+          document.xml as &lt;w:ins&gt; and &lt;w:del&gt;. Deleted text is
+          STILL THERE.
+    Excel: sharedStrings.xml, calcChain.xml, and the recovery files
+    PDF:  incremental updates. A &quot;final&quot; PDF has ten revisions in it.
+
+  EMBEDDED OBJECTS
+    DOCX: any file, including an EXE
+    XLSX: an OLE object, a macro, a Power Query (which contains the
+          API KEYS AND THE QUERY)
+    PDF:  embedded files, attached files, JavaScript, launch actions
+
+  WHAT SURVIVES INTO A PDF
+    - a hyperlink whose visible text is example.com and whose target
+      is an internal-sharepoint-hostname
+    - a comment
+    - a layer name
+    - the document's internal structure (which pages were assembled
+      from which source)
+    - the ORDER of assembly. If page 7 is from a different template,
+      that is visible in the file structure.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/osi-03 &amp;&amp; cd ~/aegis/labs/osi-03
+
+cat &gt; 01-documents.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Document analysis. NOTHING here executes the document's content.
+# No macros run, no embedded object is opened, nothing is rendered
+# with a tool that fetches remote resources.
+D=&quot;${1:?usage: ./01-documents.sh &lt;file-or-directory&gt;}&quot;
+mkdir -p work
+
+echo &quot;=== 1. TYPE ===&quot;
+file -b &quot;$D&quot; 2&gt;/dev/null | sed 's/^/  /'
+find &quot;$D&quot; -type f 2&gt;/dev/null | while read -r f; do
+  printf &quot;  %-50s %s\n&quot; &quot;$(basename &quot;$f&quot;)&quot; &quot;$(file -b &quot;$f&quot; | cut -c1-40)&quot;
+done | head -20
+
+echo
+echo &quot;=== 2. EXIFTOOL, EVERY FIELD ===&quot;
+exiftool -a -u -G1 &quot;$D&quot; 2&gt;/dev/null | head -60 | sed 's/^/  /'
+
+echo
+echo &quot;=== 3. THE TWO CHECKS THAT MATTER ===&quot;
+exiftool -s -Author -Creator -LastAuthor -ModifyDate -CreateDate \
+         -Company -Producer -CreatorTool -Software &quot;$D&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo &quot;  ^ Author vs CreatorTool, and CreateDate vs ModifyDate.&quot;
+echo &quot;    Disagreement is a finding: it means the file was edited&quot;
+echo &quot;    somewhere else, or by someone else.&quot;
+
+echo
+echo &quot;=== 4. THE ZIP CONTAINER (DOCX/XLSX/PPTX are ZIPs) ===&quot;
+if file -b &quot;$D&quot; 2&gt;/dev/null | grep -qi &quot;zip\|microsoft&quot;; then
+  unzip -l &quot;$D&quot; 2&gt;/dev/null | head -25 | sed 's/^/  /'
+  echo &quot;  ^ any .exe, .dll, .bin, or .js in there is a finding.&quot;
+  echo &quot;    Office files with macros have a vbaProject.bin.&quot;
+  mkdir -p work/unz
+  unzip -o -q &quot;$D&quot; -d work/unz 2&gt;/dev/null
+  echo
+  echo &quot;  --- the macro, as text, without running it ---&quot;
+  ls work/unz/word/vbaProject.bin 2&gt;/dev/null \
+    &amp;&amp; strings -a -el work/unz/word/vbaProject.bin | head -20 | sed 's/^/    /'
+  echo
+  echo &quot;  --- Power Query (contains the API keys) ---&quot;
+  find work/unz -iname &quot;*query*&quot; -o -iname &quot;*connection*&quot; 2&gt;/dev/null | head -5 | sed 's/^/    /'
+  echo
+  echo &quot;  --- the tracked changes (deleted text is still there) ---&quot;
+  if [ -f work/unz/word/document.xml ]; then
+    echo &quot;    insertions: $(grep -o '&lt;w:ins ' work/unz/word/document.xml | wc -l)&quot;
+    echo &quot;    deletions : $(grep -o '&lt;w:del ' work/unz/word/document.xml | wc -l)&quot;
+    echo &quot;    ^ the deleted text is recoverable:&quot;
+    grep -oP '(?&lt;=&lt;w:delText[^&gt;]{0,60}&gt;)[^&lt;]+' work/unz/word/document.xml | head -10 | sed 's/^/      /'
+  fi
+fi
+
+echo
+echo &quot;=== 5. PDF STRUCTURE AND THE HIDDEN LAYERS ===&quot;
+if file -b &quot;$D&quot; 2&gt;/dev/null | grep -qi pdf; then
+  echo &quot;  --- what is embedded ---&quot;
+  strings -a &quot;$D&quot; | grep -iE &quot;/EmbeddedFile|/JavaScript|/Launch|/OpenAction|/URI&quot; | sort -u | head -15 | sed 's/^/    /'
+  echo &quot;  ^ /JavaScript and /Launch are findings. /EmbeddedFile means&quot;
+  echo &quot;    there is a file inside the PDF. /OpenAction runs on open.&quot;
+  echo
+  echo &quot;  --- the incremental revisions (a 'final' PDF has several) ---&quot;
+  grep -ac &quot;%%EOF&quot; &quot;$D&quot; 2&gt;/dev/null | xargs echo &quot;    %%EOF markers:&quot;
+  echo &quot;    ^ each one is a save. Ten means it was edited ten times.&quot;
+  echo
+  echo &quot;  --- the layer names, which describe the template ---&quot;
+  strings -a &quot;$D&quot; | grep -iE &quot;/(OC|Contents) ?[0-9]* ?/[A-Za-z ]*(Layer|Group|Header|Footer|Background)[A-Za-z ]*&quot; \
+    | sort -u | head -10 | sed 's/^/    /'
+  echo
+  echo &quot;  --- hyperlinks: visible text vs actual target ---&quot;
+  pdfinfo -url &quot;$D&quot; 2&gt;/dev/null | head -20 | sed 's/^/    /'
+  echo &quot;    ^ a link whose visible text and target disagree is a&quot;
+  echo &quot;      phishing indicator, and in an OSINT context it tells&quot;
+  echo &quot;      you what the internal hostname was.&quot;
+fi
+
+echo
+echo &quot;=== 6. WHAT IS DELIBERATELY NOT DONE ===&quot;
+cat &lt;&lt;'NOTE'
+  NOT RENDERED. Opening a document in a viewer or converting it with
+  a tool that fetches remote resources or follows /OpenAction will
+  TELL THE AUTHOR the document was opened, and will fetch whatever
+  the document says to fetch. On a hostile or unknown document that
+  is an outbound connection you did not authorise.
+
+  NOT EXECUTED. No macros, no embedded objects, no OLE.
+
+  THE TOOLS USED (file, exiftool, unzip, strings, pdfinfo) parse the
+  container. They do not run its content.
+NOTE
+EOF
+chmod +x 01-documents.sh
+
+cat &gt; 02-verification.md &lt;&lt;'MD'
+# Verification discipline
+
+```text
+  THE PROBLEM
+    OSINT findings are easy to get wrong in three specific ways:
+
+      1. STALE       the data was true and is not now. Shodan shows
+                     a port open from six months ago.
+      2. NOT YOURS   the name resolves to a shared host, a CDN, or
+                     somebody else's server.
+      3. MISLEADING  a technique on an attacker forum that does not
+                     work. Most public &quot;OSINT method&quot; content is
+                     written by people who have not verified it.
+
+  THE FOUR VERIFICATION HABITS
+
+  1. STAMP EVERY OBSERVATION
+     Every finding carries an observed_at. Not &quot;recently&quot; - a
+     timestamp. Six months from now you will not know, and the client
+     will not ask.
+
+  2. VERIFY OWNERSHIP BEFORE EVERY CLAIM
+     Before &quot;their web server is vulnerable&quot;, confirm the host is
+     theirs:
+       - does the IP resolve to their announced range?
+       - does the certificate match their name?
+       - do the headers (server, powered-by) match their stack?
+     A finding against a CDN edge node is a finding against the CDN.
+
+  3. DISTINGUISH &quot;THE TOOL SAYS&quot; FROM &quot;I OBSERVED&quot;
+     &quot;Shodan reports an open RDP port&quot; is a second-hand claim about
+     a moment you were not present for.
+     &quot;A connection to this address on 3389 succeeded at 14:22, and
+     the address is in their announced range&quot; is your observation.
+     The first is a lead. The second is a finding.
+
+  4. TRY IT YOURSELF, IN A BOUNDED WAY
+     Every technique you read should be tried once, against your own
+     throwaway, before you rely on it.
+     Set up a domain you control, point it at a host you control,
+     and check that the technique produces what the author claimed.
+     This takes 20 minutes and it is the difference between
+     competence and quoting.
+MD
+</code></pre>
+<pre><code class="language-bash"># --- the verification helpers ---
+cat &gt; 03-verify.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Confirm a host belongs to the domain before you claim anything about it.
+DOM=&quot;${1:?usage: ./03-verify.sh &lt;domain&gt;}&quot;
+HOST=&quot;${2:?usage: ./03-verify.sh &lt;domain&gt; &lt;ip-or-host&gt;}&quot;
+IP=$(dig +short &quot;$HOST&quot; | tail -1)
+[ -z &quot;$IP&quot; ] &amp;&amp; IP=&quot;$HOST&quot;
+echo &quot;[scope] verifying $HOST ($IP) against $DOM&quot;
+
+echo
+echo &quot;=== 1. Is the address in their announced range? ===&quot;
+dig +short &quot;$DOM&quot; | sed 's/^/  their domain resolves to: /'
+echo &quot;  their NS: $(dig +short NS &quot;$DOM&quot; | tr '\n' ' ')&quot;
+dig +short TXT &quot;$DOM&quot; | grep -iE &quot;v=spf1|include|ip4&quot; | sed 's/^/  SPF (their ranges): /'
+echo &quot;  ^ compare this list against the address. If it is not here,&quot;
+echo &quot;    the host may still be theirs (a range they announce via BGP)&quot;
+echo &quot;    but you have not proven it.&quot;
+
+echo
+echo &quot;=== 2. Does the certificate match? (one connection, TLS only) ===&quot;
+timeout 8 openssl s_client -connect &quot;$HOST:443&quot; -servername &quot;$DOM&quot; &lt;/dev/null 2&gt;/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName 2&gt;/dev/null | sed 's/^/  /'
+echo &quot;  ^ a SAN containing $DOM is ownership evidence.&quot;
+
+echo
+echo &quot;=== 3. Ownership verdict ===&quot;
+if timeout 8 openssl s_client -connect &quot;$HOST:443&quot; -servername &quot;$DOM&quot; &lt;/dev/null 2&gt;/dev/null \
+     | openssl x509 -noout -ext subjectAltName 2&gt;/dev/null \
+     | grep -qi &quot;$DOM&quot;; then
+  echo &quot;  CONFIRMED: the certificate on $HOST names $DOM.&quot;
+  echo &quot;  A claim about this host is a claim about this domain.&quot;
+else
+  echo &quot;  UNCONFIRMED: no certificate naming $DOM on this host.&quot;
+  echo &quot;  It may be a CDN, a shared host, or a third party.&quot;
+  echo &quot;  Do NOT report findings against it until you resolve this.&quot;
+fi
+echo
+echo &quot;  recorded at $(date -u +%Y-%m-%dT%H:%M:%SZ)&quot;
+EOF
+chmod +x 03-verify.sh
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>03-verify.sh</code> refuses to let you claim anything about a host<br />
+until a certificate on it names your domain — because <em>a finding against a CDN edge node is a<br />
+finding against the CDN</em>. That single check is the difference between an accurate report and an<br />
+embarrassing one.</p>
+<p><strong><code>02-verification.md</code></strong> names the three specific ways OSINT findings go wrong — <strong>stale</strong>,<br />
+<strong>not yours</strong>, and <strong>misleading</strong> (most public "OSINT method" content is written by people who<br />
+have never verified it) — and the fourth habit: try it once against your own throwaway before<br />
+relying on it.</p>
+<p><strong><code>01-documents.sh</code></strong> deliberately ends with what it does <em>not</em> do: doesn't render, doesn't<br />
+execute macros, doesn't fetch remote resources — because opening a hostile document can TELL THE<br />
+AUTHOR it was opened.</p>
+<p><strong>Record:</strong> <code>02-verification.md</code> and <code>03-verify.sh</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does a document leak that is not its content?</li>
+<li>Why is <code>Author != LastModifiedBy</code> a finding?</li>
+<li>Why is the DOCX container worth opening as a ZIP?</li>
+<li>Where does deleted text survive in a tracked-changes document?</li>
+<li>What survives into a PDF that most people do not expect?</li>
+<li>Give three reasons not to render an unknown document.</li>
+<li>Name the three ways OSINT findings go wrong.</li>
+<li>Why must you verify ownership before reporting a finding against a host?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OSINT</strong> → <strong>Metadata</strong> → <strong>Evidence Handling</strong> → <strong>Passive Recon</strong> →<br />
+<strong>Attack Surface</strong>.<br />
+<code>osi-04</code> is where this becomes user-facing: phishing analysis.</p>

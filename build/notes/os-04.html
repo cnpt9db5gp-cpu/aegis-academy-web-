@@ -1,0 +1,236 @@
+<h1 id="calling-convention-and-stack-frames">Calling Convention and Stack Frames</h1>
+<h2 id="summary">Summary</h2>
+<p>This is the most important lecture in 6.S081 for offensive work. The calling convention defines<br />
+exactly where the stack pointer, frame pointer, and return address live at every instant — which<br />
+means you can compute how many bytes to write to take over execution.</p>
+<p><strong>Everything in lecture 4's lab follows directly from this.</strong> If you can draw the frame from<br />
+memory, you can exploit it.</p>
+<h2 id="the-x86-64-system-v-abi">The x86-64 System V ABI</h2>
+<pre><code>HIGH ADDRESSES  (older frames)
+┌──────────────────────────┐  ← caller's frame
+│  caller's locals         │
+│  caller's saved RBP      │
+├──────────────────────────┤  ← RBP points here in the current frame
+│  SAVED RBP        +8     │     (16-byte return address slot)
+│  RETURN ADDRESS   +0     │  ← &quot;return address&quot; — the exploit target
+├──────────────────────────┤
+│  arg7, arg6              │
+│  arg5, arg4              │
+│  arg3, arg2              │
+│  arg1, arg1              │  ← stack-passed args start here
+├──────────────────────────┤  ← RSP points here, frame grows DOWN
+│  local variables         │
+│  ...padding for 16-byte  │
+│  alignment               │
+└──────────────────────────┘  ← lowest address
+LOW ADDRESSES   (this frame)
+</code></pre>
+<pre><code class="language-c">void example(int a, int b) {
+    char buf[16];      // local
+    // saved RBP
+    // return address
+}
+</code></pre>
+<p>Prologue (what the compiler emits):</p>
+<pre><code class="language-asm">push rbp
+mov  rbp, rsp
+sub  rsp, N
+</code></pre>
+<p>Epilogue:</p>
+<pre><code class="language-asm">leave           ; rsp = rbp; pop rbp
+ret             ; pop rip from [rsp]
+</code></pre>
+<h2 id="the-five-facts-that-make-exploitation-predictable">The five facts that make exploitation predictable</h2>
+<ol>
+<li><strong>Stack grows downward</strong> on x86-64.</li>
+<li><strong><code>call</code> pushes the return address</strong>, 8 bytes.</li>
+<li><strong><code>push rbp</code> saves the caller's frame pointer</strong>, 8 bytes.</li>
+<li><strong>Locals sit at lower addresses than the return address.</strong></li>
+<li>Therefore: <strong>overflowing a local buffer walks upward toward the return address.</strong></li>
+</ol>
+<h2 id="argument-passing">Argument passing</h2>
+<ul>
+<li>Integer/pointer args: <code>rdi</code>, <code>rsi</code>, <code>rdx</code>, <code>rcx</code>, <code>r8</code>, <code>r9</code> (first six)</li>
+<li>Floating point: <code>xmm0</code>–<code>xmm7</code></li>
+<li>Everything beyond six integers: pushed onto the stack, right-to-left</li>
+<li>Return value: <code>rax</code></li>
+<li>Callee-saved: <code>rbx</code>, <code>rbp</code>, <code>r12</code>–<code>r15</code></li>
+<li>Caller must preserve <code>rcx</code> and <code>r11</code> (the syscall instruction clobbers them)</li>
+</ul>
+<h2 id="computing-the-offset">Computing the offset</h2>
+<pre><code class="language-bash"># what is the distance from my buffer to the return address?
+gdb -q --batch \
+  -ex 'break main' -ex 'run' \
+  -ex 'info registers rsp rbp' \
+  -ex 'print $rbp - $rsp' \
+  -ex 'x/4gx $rbp' \
+  -ex 'quit' ./vuln
+</code></pre>
+<p>If <code>rbp - rsp</code> is 32 and you have a 24-byte buffer, then 8 bytes of padding reach the saved RBP<br />
+and 16 more reach the return address.</p>
+<p><strong>The cycle is: measure → compute → write → verify.</strong> That is the entire exploit development loop.</p>
+<h2 id="why-the-canary-exists">Why the canary exists</h2>
+<p>Because offsets are predictable. The stack canary is a random value placed between your buffer<br />
+and the saved frame pointer. If it does not match at <code>ret</code>, the program aborts — the overflow<br />
+still happened, but control flow was never transferred.</p>
+<pre><code class="language-bash">checksec --file=./vuln | grep canary
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Calling convention</strong></td>
+<td>The ABI rules for passing args and returning</td>
+</tr>
+<tr>
+<td><strong>Stack frame</strong></td>
+<td>Per-function stack region</td>
+</tr>
+<tr>
+<td><strong><code>rbp</code> / frame pointer</strong></td>
+<td>Points at the frame base; saved/restored</td>
+</tr>
+<tr>
+<td><strong><code>rsp</code> / stack pointer</strong></td>
+<td>Points at the current top of stack</td>
+</tr>
+<tr>
+<td><strong>Return address</strong></td>
+<td>Saved RIP; where <code>ret</code> jumps to</td>
+</tr>
+<tr>
+<td><strong>Prologue / epilogue</strong></td>
+<td>Frame setup and teardown code</td>
+</tr>
+<tr>
+<td><strong>Caller/callee-saved</strong></td>
+<td>Who must preserve which registers</td>
+</tr>
+<tr>
+<td><strong>Alignment</strong></td>
+<td>Stack kept 16-byte aligned for SSE</td>
+</tr>
+<tr>
+<td><strong>Stack canary</strong></td>
+<td>Random guard between locals and return address</td>
+</tr>
+<tr>
+<td><strong>Offset</strong></td>
+<td>Bytes from a buffer to the return address</td>
+</tr>
+<tr>
+<td><strong><code>leave; ret</code></strong></td>
+<td>Restore frame, then jump</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- read the ABI from real assembly ---
+objdump -d -M intel /usr/bin/ls | head -40
+gdb -q --batch -ex 'break main' -ex 'run' -ex 'disassemble main' ./prog 2&gt;/dev/null
+
+# --- what does checksec say? ---
+checksec --file=./myprog
+readelf -l ./myprog | grep GNU_STACK        # NX
+readelf -d ./myprog | grep -E 'BIND_NOW|FLAGS'   # RELRO
+file ./myprog                                  # PIE
+
+# --- the alignment rule, in practice ---
+python3 -c 'print(0x10, 0x10//2, (0x10//2)*2)'
+
+# --- read a frame pointer chain from a core dump ---
+sudo coredumpctl list 2&gt;/dev/null | head
+gdb ./prog core.* -ex 'bt' -ex 'info frame' 2&gt;/dev/null
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> measure your exact offset to the return address. This number is the foundation of<br />
+<code>ex-03</code> and <code>ex-04</code>.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-04 &amp;&amp; cd ~/aegis/labs/os-04
+
+cat &gt; stack.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+/* three functions so you can watch the frame chain grow */
+void third(const char *in) { char b16[16];  strcpy(b16, in);   printf(&quot;b16 ok\n&quot;); }
+void second(const char *in) { char b24[24];  strcpy(b24, in);  third(in); }
+void first (const char *in) { char b32[32];  strcpy(b32, in);  second(in); }
+
+int main(int argc, char **argv) {
+    if (argc &lt; 2) { fprintf(stderr, &quot;usage: %s &lt;string&gt;\n&quot;, argv[0]); return 1; }
+    first(argv[1]);
+    return 0;
+}
+EOF
+
+gcc -g -O0 -fno-stack-protector -no-pie -z execstack stack.c -o stack
+checksec --file=./stack | grep -E &quot;NX|Stack|PIE|Canary&quot;
+
+# --- 1. where is each buffer? ---
+for fn in first second third; do
+  gdb -q --batch -ex &quot;break $fn&quot; -ex &quot;run $(python3 -c 'print(&quot;A&quot;*80)')&quot; \
+      -ex &quot;info registers rsp rbp&quot; -ex &quot;print \$rbp - \$rsp&quot; \
+      -ex &quot;x/2gx \$rbp&quot; -ex quit ./stack 2&gt;/dev/null \
+    | sed &quot;s/^/[$fn] /&quot;
+done | tee 01-frames.txt
+
+echo
+echo &quot;Look for the return address: on the stack it looks like 0x0040.... (non-zero, non-ASCII).&quot;
+
+# --- 2. brute-force the offset, the reliable way ---
+python3 - &lt;&lt;'PY' | tee 02-offset.txt
+import subprocess
+for n in range(1, 160):
+    payload = b&quot;A&quot; * n + b&quot;BBBBBBBB&quot;          # 0x4242424242424242 marker
+    r = subprocess.run([&quot;./stack&quot;, payload], capture_output=True, timeout=5)
+    err = (r.stderr + r.stdout).decode(&quot;utf8&quot;,&quot;replace&quot;)
+    if &quot;424242424242&quot; in err or r.returncode != 0:
+        print(f&quot;offset {n:3d}  rc={r.returncode}  {err.strip().splitlines()[-1][:70] if err.strip() else ''}&quot;)
+        break
+PY
+
+echo
+echo &quot;That number is your offset to the saved return address. Write it down.&quot;
+
+# --- 3. see the frame chain by hand ---
+gdb -q --batch \
+  -ex 'break first' -ex 'run' \
+  -ex 'info registers rsp rbp' \
+  -ex 'p/x $rbp' -ex 'p/x $rsp' \
+  -ex 'x/12gx $rbp-16' \
+  -ex 'bt' -ex quit ./stack 2&gt;&amp;1 | tail -30 | tee 03-frame-dump.txt
+
+# --- 4. prove the canary stops it ---
+gcc -g -O0 -fstack-protector-strong -pie -fPIE stack.c -o stack-hard
+checksec --file=./stack-hard | grep -i canary
+python3 - &lt;&lt;'PY'
+import subprocess
+for n in range(1, 200, 4):
+    r = subprocess.run([&quot;./stack-hard&quot;, b&quot;A&quot;*n], capture_output=True, timeout=5)
+    if b&quot;stack smashing&quot; in r.stderr or b&quot;detected&quot; in r.stderr:
+        print(f&quot;stack-hard detected corruption at n={n}: {r.stderr.decode().splitlines()[0][:70]}&quot;)
+        break
+else:
+    print(&quot;no abort observed - the check may need a wider sweep&quot;)
+PY
+</code></pre>
+<p><strong>Step 2 is the deliverable.</strong> An empirically measured offset beats any calculation, because<br />
+compilers insert padding you will not have predicted. This exact loop is what <code>ex-03</code> formalises.</p>
+<p><strong>Record:</strong> your offset number, and the <code>rbp - rsp</code> values for all three frames.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>In what order are the saved RBP and return address on the stack relative to a local buffer?</li>
+<li>Why must the stack be 16-byte aligned?</li>
+<li>Which registers does the caller preserve versus the callee?</li>
+<li>Why did compilers add stack canaries, given offsets are predictable?</li>
+<li>Why is measuring the offset by brute force more reliable than computing it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Calling Convention</strong> → <strong>Stack Frame</strong> → <strong>RBP / RSP</strong> → <strong>Stack Canary</strong> → <strong>ROP</strong> →<br />
+<strong>Buffer Overflow</strong>. This lecture is the manual for everything in <code>ex-01</code>..<code>ex-06</code>.</p>

@@ -1,0 +1,358 @@
+<h1 id="privilege-separation">Privilege Separation</h1>
+<h2 id="summary">Summary</h2>
+<p>If you cannot make the trusted code small, split it. Put a small privileged component in front<br />
+of a large unprivileged one, so that a bug in the large part costs you the large part rather than<br />
+the system.</p>
+<p>The lecture's reading is OKWS (O'Keefe et al.), which is the canonical description of this<br />
+pattern.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Privilege separation</strong>: privileged monitor + unprivileged userland</li>
+<li>The monitor owns the <em>resources</em>; userland does the <em>work</em></li>
+<li>The interface between them is a small message protocol — and every message must be validated</li>
+<li><strong>Goals</strong>: survive crashes in userland, limit the blast radius of a bug, enable review</li>
+<li><strong>The classic case</strong>: Postfix, and the split between a privileged master and unprivileged<br />
+  helper processes</li>
+<li>Failure mode: a validation bug in the monitor, or a confused deputy where userland convinces<br />
+  the monitor to do something it should not</li>
+</ul>
+<h2 id="the-shape">The shape</h2>
+<pre><code class="language-text">      network
+         │
+   ┌─────▼───────────────┐
+   │  UNPRIVILEGED        │   parser, renderer, userland logic
+   │  - can crash freely  │   bugs cost you userland, not the system
+   └─────┬───────────────┘
+         │  narrow, validated IPC
+   ┌─────▼───────────────┐
+   │  PRIVILEGED MONITOR  │   owns files, sockets, privileges
+   │  - small, simple     │   must be correct
+   └─────────────────────┘
+</code></pre>
+<h2 id="the-failure-modes-to-design-against">The failure modes to design against</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Mechanism</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Validation bug</strong></td>
+<td>monitor trusts a length or path from userland</td>
+<td>strict validation at the boundary; fuzz the protocol</td>
+</tr>
+<tr>
+<td><strong>Confused deputy</strong></td>
+<td>userland asks the monitor to do something legitimate for the wrong reason</td>
+<td>bind requests to a specific operation, not a general capability</td>
+</tr>
+<tr>
+<td><strong>Resource exhaustion</strong></td>
+<td>userland sends unbounded requests</td>
+<td>rate limits and quotas at the monitor</td>
+</tr>
+<tr>
+<td><strong>Protocol injection</strong></td>
+<td>userland smuggles a second request into one</td>
+<td>length-prefixed framing, no ad-hoc concatenation</td>
+</tr>
+<tr>
+<td><strong>Over-privilege</strong></td>
+<td>monitor has more authority than it needs</td>
+<td>least privilege; the monitor holds only what it must</td>
+</tr>
+</tbody>
+</table>
+<h2 id="okws-in-one-paragraph">OKWS, in one paragraph</h2>
+<p>The design separates the <strong>switch</strong> (privileged, owns the post office connection, filesystem<br />
+and process control) from the <strong>server</strong> (unprivileged, does the work). Every request from<br />
+userland to the monitor is a fixed-format message that the monitor validates before acting. The<br />
+bug you fear is in the message parser, so the parser is tiny and fuzzed.</p>
+<p>The generalisable lesson: <strong>the interface between trusted and untrusted code is where the<br />
+security lives</strong>, and it should be as small as possible.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Privilege separation</strong></td>
+<td>Trusted monitor + unprivileged userland</td>
+</tr>
+<tr>
+<td><strong>Reference monitor</strong></td>
+<td>The mandatory mediation point</td>
+</tr>
+<tr>
+<td><strong>IPC protocol</strong></td>
+<td>The narrow message format between them</td>
+</tr>
+<tr>
+<td><strong>Confused deputy</strong></td>
+<td>A component induced to misuse its own authority</td>
+</tr>
+<tr>
+<td><strong>Length-prefixed framing</strong></td>
+<td>A protocol structure that prevents message injection</td>
+</tr>
+<tr>
+<td><strong>Blast radius</strong></td>
+<td>How much a bug costs you</td>
+</tr>
+<tr>
+<td><strong>Postfix</strong></td>
+<td>The canonical real-world privilege-separated mail system</td>
+</tr>
+<tr>
+<td><strong>Request validation</strong></td>
+<td>Checking every field at the boundary</td>
+</tr>
+<tr>
+<td><strong>Quotas / rate limits</strong></td>
+<td>Bounding resource use by the untrusted side</td>
+</tr>
+<tr>
+<td><strong>Fuzzing</strong></td>
+<td>Throwing malformed input at the parser</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- find privilege-separated software on this host ---
+dpkg -l | grep -iE &quot;postfix|dbus|nginx|apache|ssh&quot; | awk '{print &quot;  &quot;$2, $3}'
+ps -eo user,pid,comm --sort=user | awk '$1==&quot;root&quot;{print &quot;  root: &quot;$3}' | head -12
+
+# --- dbus is a privilege separation you can read ---
+ls -la /usr/bin/dbus-daemon 2&gt;/dev/null
+grep -vE '^\s*(#|$)' /etc/dbus-1/system.conf 2&gt;/dev/null | head -15
+
+# --- the unprivileged side, for contrast ---
+ps -u &quot;$(logname 2&gt;/dev/null || echo $USER)&quot; -o pid,comm 2&gt;/dev/null | head
+
+# --- setuid: privilege separation in its crudest form ---
+find / -perm -4000 -type f 2&gt;/dev/null | wc -l | xargs echo &quot;  setuid binaries:&quot;
+# each is a privilege-separated component whose boundary is &quot;parse argv correctly&quot;
+
+# --- fuzz the setuid helpers you can, safely ---
+# su, passwd, chsh, mount, newgrp are all parsers of untrusted input
+for tool in /usr/bin/passwd /usr/bin/su /usr/sbin/nologin; do
+  echo &quot;  $tool: $(strings &quot;$tool&quot; 2&gt;/dev/null | wc -l) strings, $(stat -c %s &quot;$tool&quot; 2&gt;/dev/null) bytes&quot;
+done
+
+# --- the code is the lesson ---
+mkdir -p /tmp/sep-demo &amp;&amp; cd /tmp/sep-demo
+cat &gt; monitor.c &lt;&lt;'EOF'
+/* Minimal monitor: owns the resource, validates every request. */
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+/* The ONLY operations userland may request. */
+static int op_read_file(int client, const char *path, size_t len);
+static int op_bad(const char *path, size_t len) { (void)client; (void)path; (void)len; return -1; }
+
+/* Validation is the entire security of this component. */
+static int valid_path(const char *p) {
+    if (!p || !*p) return 0;
+    if (strlen(p) != 0) {
+        if (strstr(p, &quot;..&quot;)) return 0;              /* traversal */
+        if (p[0] != '/') return 0;                   /* must be absolute */
+        if (strncmp(p, &quot;/srv/allowed/&quot;, 13) != 0) return 0;  /* confined root */
+    }
+    return 1;
+}
+
+static int op_read_file(int client, const char *path, size_t len) {
+    if (len &gt; 255) return -1;                         /* bound the request */
+    if (!valid_path(path)) return -2;
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), &quot;allowed: %s&quot;, path);
+    write(client, buf, n);
+    return 0;
+}
+EOF
+gcc -Wall -Wextra -g -O0 -c monitor.c -o monitor.o 2&gt;&amp;1 | head -3
+echo &quot;  monitor compiled: $([ -f monitor.o ] &amp;&amp; echo yes || echo no)&quot;
+echo &quot;  total trusted source lines: $(wc -l &lt; monitor.c)&quot;
+cd /tmp &amp;&amp; rm -rf sep-demo
+
+# --- the point, measured ---
+python3 - &lt;&lt;'PY'
+# Compare the size of a trust boundary to the size of what it protects.
+monitor_lines = 25          # the trusted component
+userland_lines = 2000       # everything else
+print(f&quot;  trusted component : {monitor_lines} lines&quot;)
+print(f&quot;  untrusted         : {userland_lines} lines&quot;)
+print(f&quot;  ratio             : 1:{userland_lines//monitor_lines}&quot;)
+print()
+print(&quot;  A bug in the 2000 lines costs you the 2000 lines.&quot;)
+print(&quot;  A bug in the 25 lines costs you everything - so you read those 25.&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build the smallest possible trust boundary and measure how much it protects.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-05 &amp;&amp; cd ~/aegis/labs/mit858-05
+
+# --- 1. the monitor: small, and the only privileged thing ---
+cat &gt; monitor.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+#define MAXPATH 256
+
+/* Everything below is the trusted computing base for this service. */
+static int valid_path(const char *p) {
+    if (!p || !*p)                  return 0;
+    if (strstr(p, &quot;..&quot;))            return 0;     /* no traversal */
+    if (p[0] != '/')                return 0;     /* must be absolute */
+    if (strncmp(p, &quot;/srv/allowed/&quot;, 13)) return 0; /* confined root */
+    if (strlen(p) &gt; MAXPATH - 1)    return 0;     /* bounded */
+    return 1;
+}
+
+/* The whole privileged API: three operations, no more. */
+static int op_stat(int fd, const char *path);
+static int op_read(int fd, const char *path);
+
+int main(void) {
+    char path[MAXPATH];
+    ssize_t n = read(STDIN_FILENO, path, sizeof(path) - 1);
+    if (n &lt;= 0) return 1;
+    path[n] = '\0';
+    if (!valid_path(path)) {
+        write(STDOUT_FILENO, &quot;DENIED: path failed validation\n&quot;, 34);
+        return 2;
+    }
+    write(STDOUT_FILENO, &quot;ALLOWED: &quot;, 9);
+    write(STDOUT_FILENO, path, strlen(path));
+    write(STDOUT_FILENO, &quot;\n&quot;, 1);
+    return 0;
+}
+EOF
+gcc -Wall -Wextra -g -O0 monitor.c -o monitor
+echo &quot;  trusted source: $(wc -l &lt; monitor.c) lines&quot;
+echo &quot;  compiled size : $(stat -c %s monitor) bytes&quot;
+
+# --- 2. test the boundary ---
+{
+  echo &quot;=== path validation results ===&quot;
+  while IFS= read -r p; do
+    out=$(printf '%s' &quot;$p&quot; | ./monitor 2&gt;&amp;1); rc=$?
+    printf &quot;  %-34s rc=%-3s %s\n&quot; &quot;$p&quot; &quot;$rc&quot; &quot;$(echo &quot;$out&quot; | head -1)&quot;
+  done &lt;&lt;'EOF'
+/srv/allowed/report.txt
+/srv/allowed/../../etc/passwd
+/etc/passwd
+/srv/other/secret
+srv/allowed/report.txt
+/srv/allowed/
+/dev/null
+EOF
+} | tee 01-validation.txt
+
+# --- 3. the ratio, measured ---
+echo
+echo &quot;=== the size argument ===&quot;
+cat &gt; userland.c &lt;&lt;'EOF'
+/* Deliberately large: all the parsing, rendering and logic that is UNTRUSTED. */
+#include &lt;stdio.h&gt;
+/* ... imagine 1500 lines of format parsing, template rendering, unicode
+   normalisation, timezone handling, and report generation here ... */
+int main(void) { puts(&quot;userland: does everything, holds no privilege&quot;); return 0; }
+EOF
+for i in $(seq 1 60); do cat &gt;&gt; userland.c &lt;&lt;'EOF'
+static void step_i(void) { /* logic */ }
+EOF
+done
+gcc -Wall -g -O0 userland.c -o userland
+{
+  printf &quot;  trusted monitor  : %5s lines\n&quot; &quot;$(wc -l &lt; monitor.c)&quot;
+  printf &quot;  untrusted userland: %5s lines\n&quot; &quot;$(wc -l &lt; userland.c)&quot;
+  echo
+  echo &quot;  The ratio is the point. Review the monitor; fuzz the userland.&quot;
+} | tee 02-ratio.txt
+cat 02-ratio.txt
+
+# --- 4. find real examples already installed ---
+{
+  echo &quot;=== privilege separation on THIS machine ===&quot;
+  echo
+  echo &quot;--- dbus: a privileged message bus ---&quot;
+  ls -la /usr/bin/dbus-daemon /usr/bin/dbus-send 2&gt;/dev/null
+  echo &quot;  policy files (the protocol contract):&quot;
+  ls /usr/share/dbus-1/system.d/ /etc/dbus-1/system.d/ 2&gt;/dev/null | head -8
+  echo
+  echo &quot;--- sshd: privilege separation for pre-auth ---&quot;
+  ls -la /usr/sbin/sshd 2&gt;/dev/null
+  grep -iE &quot;^UsePrivilegeSeparation|^PrivilegeSeparation&quot; /etc/ssh/sshd_config 2&gt;/dev/null || \
+    echo &quot;  (modern OpenSSH always separates, no longer configurable)&quot;
+  echo
+  echo &quot;--- postfix, if installed ---&quot;
+  dpkg -l postfix 2&gt;/dev/null | tail -2 | head -1
+  ls /usr/lib/postfix/sbin/ 2&gt;/dev/null | head
+  echo &quot;  notice the split: a few root binaries, many unprivileged helpers&quot;
+} 2&gt;&amp;1 | tee 03-real-examples.txt
+
+# --- 5. the failure modes, and how to test them ---
+cat &gt; 04-failure-modes.md &lt;&lt;'EOF'
+# Designing against the ways privilege separation fails
+
+## 1. Validation bug in the monitor
+The parser accepts something it should not.
+**Test:** fuzz it. AFL/libFuzzer on the message parser is the single
+highest-value test you can write. This is `fuzzing`.
+
+## 2. Confused deputy
+Userland legitimately asks for operation X, but in a context where X should
+not be permitted - so the request is technically valid but should never have
+been made.
+**Test:** ask &quot;who is allowed to make this request?&quot; for every operation. If
+the answer is &quot;anyone&quot;, you have a confused deputy.
+
+## 3. Protocol injection
+Userland smuggles a second, different request inside the first by
+concatenating, or by lying about a length field.
+**Test:** send `GOOD\nEVIL\n` and verify only GOOD is acted on.
+**Fix:** length-prefixed framing, never newline-terminated strings.
+
+## 4. Resource exhaustion
+Userland sends unlimited requests; the monitor allocates unboundedly.
+**Test:** send 10,000 requests and watch memory.
+**Fix:** quotas and rate limits in the monitor, not in userland.
+
+## 5. Over-privilege
+The monitor holds more authority than the operations require.
+**Test:** for each operation, list exactly which privileges it needs. A
+monitor that opens arbitrary files needs more than one that opens one.
+
+## 6. The monitor is not actually smaller
+The most common real-world failure: after three years of feature requests,
+the &quot;small&quot; monitor has grown large. Measure it.
+**This is why you re-run `wc -l` on the trusted component periodically.**
+EOF
+cat 04-failure-modes.md
+echo
+echo &quot;  write 05-my-design.md: your own monitor design and its failure modes&quot;
+</code></pre>
+<p><strong>Step 1's six-line validator is the whole lecture.</strong> Everything userland sends is checked<br />
+against it, and the trusted component is small enough that you can read it.</p>
+<p><strong>Record:</strong> <code>04-failure-modes.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the two halves of a privilege-separated design?</li>
+<li>What is a confused deputy, and how do you detect the risk?</li>
+<li>Why must IPC use length-prefixed framing rather than newlines?</li>
+<li>What is the most common way privilege separation fails over time?</li>
+<li>Why does rate limiting belong in the monitor rather than userland?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Separation</strong> → <strong>Reference Monitor</strong> → <strong>Least Privilege</strong> → <strong>Fuzzing</strong> →<br />
+<strong>Parser Differential</strong> → <strong>Attack Surface</strong>.</p>

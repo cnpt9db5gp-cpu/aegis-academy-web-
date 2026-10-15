@@ -1,0 +1,293 @@
+<h1 id="binary-hex-and-the-cpu-fetch-execute-cycle">Binary, Hex and the CPU Fetch-Execute Cycle</h1>
+<h2 id="summary">Summary</h2>
+<p>Everything a computer does is a number being moved and transformed. Before any of the higher<br />
+level work — reverse engineering, exploitation, protocol analysis — you need the fetch-execute<br />
+cycle to be automatic rather than something you have to think about.</p>
+<p>The content here is the foundation: how a number is represented, how the CPU reads bytes, and<br />
+why that makes hex the native language of the field.</p>
+<h2 id="everything-is-bits-we-group-them">Everything is bits; we group them</h2>
+<pre><code class="language-text">  1 bit   0 or 1
+  8 bits  1 byte    -&gt; 0x00 .. 0xFF    256 values
+  16 bits 2 bytes   -&gt; uint16           65,536 values
+  32 bits 4 bytes   -&gt; uint32           4,294,967,296 values
+  64 bits 8 bytes   -&gt; uint64, pointer  1.8 x 10^19 values
+
+  hex digit = 4 bits   -&gt;  one hex digit is exactly half a byte
+  hex byte  = 2 digits -&gt;  0x41 is 0100 0001
+</code></pre>
+<p>Hex exists because binary grouping is unreadable and base 16 maps exactly onto nibbles. There<br />
+is no arithmetic in hex; it is a display convenience. <code>0x41</code> is the same as 65, which is the<br />
+same as <code>'A'</code>.</p>
+<h2 id="signed-numbers-and-why-it-matters-for-overflow">Signed numbers, and why it matters for overflow</h2>
+<pre><code class="language-text">  int8:   0x7F = 127        0x80 = -128      (two's complement)
+  int32:  0x7FFFFFFF = 2147483647
+          0xFFFFFFFF = -1
+
+  Two's complement:
+    to invert:     flip every bit
+    to negate:     invert, then add 1
+    MIN_INT has no positive counterpart -&gt; negation overflows
+
+  Consequences:
+    -1     as int32 = 0xFFFFFFFF
+    -1     as uint32 = 4294967295
+    ABS(INT_MIN) overflows to INT_MIN
+    0x7FFFFFFF + 1 wraps to 0x80000000 (= INT_MIN)
+</code></pre>
+<p>This is exactly why <code>cs161-03</code>'s integer overflow is a memory-safety bug:<br />
+the wraparound produces a small allocation size and a large write.</p>
+<h2 id="endianness">Endianness</h2>
+<pre><code class="language-text">  BIG ENDIAN (&quot;network byte order&quot;)   0xDEADBEEF
+    memory:  DE AD BE EF     (most significant byte first)
+
+  LITTLE ENDIAN (x86)                 0xDEADBEEF
+    memory:  EF BE AD DE     (least significant byte first)
+
+  Why you care: the SAME 4 bytes are a different integer on each machine.
+  Anything that crosses a machine boundary must convert. Raw shellcode,
+  raw packet structures, and exploit payloads are all machine-specific.
+
+  Network protocols are big-endian. x86 is little-endian. Protocol
+  parsers are therefore a conversion exercise, and a place bugs live.
+</code></pre>
+<pre><code class="language-bash">python3 -c &quot;
+import struct, sys
+print('  sys.byteorder =', sys.byteorder)
+b = b'\xef\xbe\xad\xde'
+print('  bytes on the wire :', b.hex())
+print('  as little-endian  : 0x%08x' % struct.unpack('&lt;I', b)[0])
+print('  as big-endian     : 0x%08x' % struct.unpack('&gt;I', b)[0])
+&quot;
+</code></pre>
+<h2 id="the-fetch-execute-cycle">The fetch-execute cycle</h2>
+<pre><code class="language-text">  CPU STATE:
+    PC     program counter - address of the NEXT instruction
+    IR     instruction register - the instruction being executed
+    FLAGS  condition codes from the last operation
+    GPRs   general purpose registers (rax, rbx, rcx, rdx, rsi, rdi, ...)
+
+  LOOP, forever:
+    1. FETCH     IR &lt;- memory[PC];  PC &lt;- PC + length(instruction)
+    2. DECODE    what operation, which operands, which encoding length
+    3. EXECUTE   perform the operation; update FLAGS
+    4. (repeat)
+
+  Two things follow from this loop and nothing else:
+
+    a) THE CPU ONLY READS BYTES. It has no concept of &quot;a string&quot; or
+       &quot;an integer&quot;. Every data structure is your interpretation layered
+       on a byte stream. Every type confusion bug is this fact exploited.
+
+    b) IT IS DETERMINISTIC. Given the same initial state and the same
+       bytes, it does the same thing. Which is why programs are
+       reproducible, debuggable, and fully reverse-engineerable.
+</code></pre>
+<p>Point (a) is the load-bearing insight. A buffer overflow, a type<br />
+confusion, and a string being "null-terminated" are all the same fact seen<br />
+from different angles: <strong>the CPU has no type system.</strong></p>
+<h2 id="why-this-makes-reverse-engineering-possible">Why this makes reverse engineering possible</h2>
+<pre><code class="language-text">  A binary is a file of bytes.
+    - the .text section is a sequence of instruction bytes
+    - the .rodata section is a sequence of constants
+    - the .data/.bss sections are a sequence of variables
+
+  If instruction encodings are regular (and on x86-64 they are, once you
+  know the prefixes), a disassembler can recover the instructions from
+  bytes alone. There is no source. There is no metadata. The bytes are
+  the program.
+
+  That is why x86 disassembles well and Python bytecode does not: Python
+  has a data-driven opcode table, x86 has a mostly fixed-width structure.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Bit / byte</strong></td>
+<td>1 bit / 8 bits</td>
+</tr>
+<tr>
+<td><strong>Nibble</strong></td>
+<td>4 bits, one hex digit</td>
+</tr>
+<tr>
+<td><strong>Hex</strong></td>
+<td>Base 16 display of binary</td>
+</tr>
+<tr>
+<td><strong>Two's complement</strong></td>
+<td>Signed integer representation</td>
+</tr>
+<tr>
+<td><strong>Little endian</strong></td>
+<td>Least significant byte first (x86)</td>
+</tr>
+<tr>
+<td><strong>Big endian</strong></td>
+<td>Most significant byte first (network)</td>
+</tr>
+<tr>
+<td><strong>Byte order / alignment</strong></td>
+<td>How multi-byte values are laid out in memory</td>
+</tr>
+<tr>
+<td><strong>Program counter (PC)</strong></td>
+<td>Address of the next instruction</td>
+</tr>
+<tr>
+<td><strong>Instruction register (IR)</strong></td>
+<td>The instruction currently executing</td>
+</tr>
+<tr>
+<td><strong>Flags register</strong></td>
+<td>Condition codes set by the last operation</td>
+</tr>
+<tr>
+<td><strong>Register</strong></td>
+<td>CPU's fastest storage, fixed size</td>
+</tr>
+<tr>
+<td><strong>Instruction encoding</strong></td>
+<td>How an instruction maps to bytes</td>
+</tr>
+<tr>
+<td><strong>Disassembly</strong></td>
+<td>Recovering instructions from bytes</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- 1. the conversions, once, permanently ---
+python3 - &lt;&lt;'PY' | tee 01-conversions.txt
+print(&quot;  === hex &lt;-&gt; decimal &lt;-&gt; binary ===&quot;)
+for h in (0x00, 0x41, 0xFF, 0xDEADBEEF):
+    print(f&quot;  0x{h:08X} = {h:&lt;12} = {h:032b}&quot;)
+print()
+print(&quot;  === signed vs unsigned, same bytes ===&quot;)
+import struct
+for v in (-1, 0, 127, -128, 2147483647):
+    b = struct.pack(&quot;&lt;i&quot;, v)
+    print(f&quot;  {v:&gt;12} -&gt; 0x{int.from_bytes(b,'little'):08X}  bytes {b.hex()}&quot;)
+print()
+print(&quot;  === endianness ===&quot;)
+b = struct.pack(&quot;&lt;I&quot;, 0xDEADBEEF)
+print(f&quot;  pack 0xDEADBEEF little-endian -&gt; {b.hex()}&quot;)
+print(f&quot;  read those bytes as big-endian   -&gt; 0x{int.from_bytes(b,'big'):08X}&quot;)
+print(&quot;  the SAME bytes, two different numbers. That is endianness.&quot;)
+PY
+cat 01-conversions.txt
+
+# --- 2. the fetch-execute cycle, runnable ---
+cat &gt; 02-fetch-execute.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Show a CPU actually reading bytes and executing them.
+cat &gt; /tmp/loop.asm &lt;&lt;'ASM'
+global _start
+section .text
+_start:
+    mov     rax, 10            ; SYS_exit
+    mov     rbx, 0             ; exit status
+    mov     rcx, 5             ; a counter
+.loop:
+    dec     rcx                ; the instruction
+    jnz     .loop              ; branch on FLAGS (ZF set when rcx == 0)
+    mov     rax, 60            ; SYS_exit (overwritten: see note)
+    mov     rbx, 0
+    inc     rbx                ; exit code 1, so we can see it worked
+    syscall
+    mov     rax, 60
+    mov     rbx, 0
+    syscall
+ASM
+if ! command -v nasm &gt;/dev/null; then echo &quot;  nasm not installed (apt install nasm)&quot;; exit 0; fi
+nasm -f elf64 /tmp/loop.asm -o /tmp/loop.o &amp;&amp; ld -o /tmp/loop /tmp/loop.o
+echo &quot;  === the machine code the CPU will execute ===&quot;
+xxd /tmp/loop | sed 's/^/  /'
+echo
+echo &quot;  === run it ===&quot;
+/tmp/loop; echo &quot;  exit code: $?  (1 = the loop ran and the syscall worked)&quot;
+rm -f /tmp/loop.asm /tmp/loop.o /tmp/loop
+EOF
+chmod +x 02-fetch-execute.sh
+./02-fetch-execute.sh
+
+# --- 3. the byte stream is the program ---
+{
+  echo &quot;=== a binary is bytes; here is where they live ===&quot;
+  printf '  int main(void){return 0;}\n' &gt; /tmp/tiny.c
+  gcc -O0 -no-pie /tmp/tiny.c -o /tmp/tiny
+  readelf -SW /tmp/tiny | awk 'NR&lt;=5 || /\.text|\.rodata|\.data|\.bss|\.got/' | sed 's/^/  /'
+  echo
+  echo &quot;=== the actual instruction bytes of main ===&quot;
+  objdump -d /tmp/tiny | sed -n '/&lt;main&gt;:/,/^$/p' | sed 's/^/  /'
+  echo
+  echo &quot;=== those are the bytes the CPU fetches, one after another ===&quot;
+  echo &quot;    change one byte and the behaviour changes. There is nothing else.&quot;
+  rm -f /tmp/tiny.c /tmp/tiny
+} 2&gt;&amp;1 | tee 03-bytes.txt
+
+# --- 4. types do not exist at the machine level ---
+python3 - &lt;&lt;'PY' | tee 04-no-types.txt
+import struct
+raw = struct.pack(&quot;&lt;I&quot;, 0x41414141) + struct.pack(&quot;&lt;d&quot;, 1.5)
+print(&quot;  12 bytes of memory, no type information whatsoever:&quot;)
+print(&quot;   &quot;, raw.hex())
+print()
+print(&quot;  read as: uint32 + double -&gt;&quot;, struct.unpack(&quot;&lt;Id&quot;, raw))
+print(&quot;  read as: double + uint32 -&gt;&quot;, struct.unpack(&quot;&lt;dI&quot;, raw))
+print(&quot;  read as: four uint8s     -&gt;&quot;, struct.unpack(&quot;&lt;BBBB&quot;, raw))
+print()
+print(&quot;  Three different, equally valid interpretations of the same 12 bytes.&quot;)
+print(&quot;  The CPU does not know which one the programmer intended.&quot;)
+print(&quot;  Type confusion is simply 'use the wrong interpretation on purpose'.&quot;)
+print()
+print(&quot;  What DOES survive: structure at a known offset, alignment rules,&quot;)
+print(&quot;  and length prefixes. Everything else is a convention between&quot;)
+print(&quot;  programmers that the hardware cannot enforce.&quot;)
+PY
+cat 04-no-types.txt
+
+# --- 5. hex is a first-class skill: xxd and friends ---
+{
+  echo &quot;=== tools for thinking in bytes ===&quot;
+  printf 'AEGIS\x00\x01\x02\xff' &gt; /tmp/sample.bin
+  echo &quot;  --- xxd (the default) ---&quot;
+  xxd /tmp/sample.bin | sed 's/^/  /'
+  echo &quot;  --- xxd with offsets in hex ---&quot;
+  xxd -g1 -c8 /tmp/sample.bin | sed 's/^/  /'
+  echo &quot;  --- a specific offset range ---&quot;
+  xxd -s 5 -l 4 /tmp/sample.bin | sed 's/^/  /'
+  echo &quot;  --- patch a byte in place ---&quot;
+  printf '\x41' | dd of=/tmp/sample.bin bs=1 seek=5 count=1 conv=notrunc 2&gt;/dev/null
+  xxd /tmp/sample.bin | sed 's/^/  after patching offset 5: /'
+  echo
+  echo &quot;  xxd -r reverses it, so you can convert hex &lt;-&gt; binary reliably:&quot;
+  echo &quot;    xxd -r -p 41 47 49 53  &gt; /tmp/back.bin &amp;&amp; xxd /tmp/back.bin&quot;
+  printf '41474953' | xxd -r -p | xxd | sed 's/^/  /'
+  rm -f /tmp/sample.bin /tmp/back.bin
+} 2&gt;&amp;1 | tee 05-hex-tools.txt
+</code></pre>
+<p><strong>Step 4 is the load-bearing demonstration</strong>: the same 12 bytes read as <code>(uint32, double)</code> or<br />
+<code>(double, uint32)</code> give different answers, with no error from either. That is type confusion<br />
+reduced to its essence, and it is why a memory-corruption bug is an <em>interpretation</em> bug<br />
+before it is a <em>control-flow</em> bug.</p>
+<p><strong>Record:</strong> <code>01-conversions.txt</code> and <code>04-no-types.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>How many bits are in a hex digit, and why does that make hex natural?</li>
+<li>Why is <code>-1</code> written <code>0xFFFFFFFF</code> in two's complement?</li>
+<li>State the two practical consequences of endianness.</li>
+<li>Name the CPU state components and the three steps of the loop.</li>
+<li>Why does the CPU having no type system make buffer overflows possible?</li>
+<li>Why is x86 disassemblable from bytes alone in a way Python bytecode is not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Binary Numbering</strong> → <strong>Bit/Byte</strong> → <strong>ELF/PE Format</strong> → <strong>x86 Assembly</strong> →<br />
+<strong>Disassembly</strong> → <strong>Memory Safety</strong>.<br />
+<code>lo-02</code> is where bytes meet the stack.</p>

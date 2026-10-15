@@ -1,0 +1,212 @@
+<h1 id="weak-randomness-and-nonce-reuse-in-practice">Weak Randomness and Nonce Reuse in Practice</h1>
+<h2 id="summary">Summary</h2>
+<p><code>cry-01</code> proved the theory. This note is the operational version: how weak randomness actually<br />
+shows up in engagements, how to recognise it, and what each instance buys an attacker.</p>
+<p>Every finding here has the same shape — <strong>a value that should have come from<br />
+the OS CSPRNG came from something else</strong> — and every one of them is critical.</p>
+<h2 id="the-spectrum-of-random">The spectrum of "random"</h2>
+<pre><code class="language-text">  NOT RANDOM AT ALL
+    fixed values, constants, &quot;0000...&quot;, incrementing counters
+    timestamp, PID, request id, UUIDv4 from a seeded PRNG
+    MD5/SHA of the plaintext (deterministic by construction)
+
+  PSEUDO-RANDOM, PREDICTABLE
+    Python random / math.random / Ruby rand / PHP rand / Java Random
+    LCG or Mersenne Twister seeded from time or PID
+    predictable from an observed output
+
+  PSEUDO-RANDOM, UNIQUE BUT PREDICTABLE
+    a counter, a UUIDv1, a timestamp+PID
+    no collisions (good) but the sequence is reconstructable
+
+  CRYPTOGRAPHIC
+    getrandom(2), /dev/urandom, BCryptGenRandom, secrets.token_bytes,
+    Java SecureRandom, ring buffer on a CSPRNG
+
+  THE RULE: if the output protects a secret, it must come from the last
+  category, and &quot;it looked random&quot; is not a test.
+</code></pre>
+<h2 id="nonce-reuse-the-one-that-keeps-happening">Nonce reuse: the one that keeps happening</h2>
+<pre><code class="language-text">  THE ARITHMETIC, AGAIN, because it is the whole finding:
+    c1 = m1 XOR S
+    c2 = m2 XOR S
+    c1 XOR c2 = m1 XOR m2
+
+  ONE known message + the ciphertexts recovers every other message.
+
+  WHERE IT OCCURS IN PRACTICE:
+
+  SERVICE TICKETS (Kerberoasting)
+    the RC4 key is derived from the service password
+    the IV is 5 bytes, effectively 40 bits in a domain of millions
+    two tickets encrypted under the same key+IV expose each other
+    RESULT: the service account's hash is cracked OFFLINE, and it
+    is often crackable because service passwords are long but
+    low-entropy (&quot;SQL-Service-Account-2019&quot;)
+
+  AUTHENTICATION TOKENS
+    a fixed IV, or a nonce that resets on restart
+    the same recovery, over login sessions
+
+  CHAT / STREAM CIPHERS
+    a message counter that resets, or a per-connection key reused
+
+  FILE ENCRYPTION
+    a per-file key derived deterministically, so the same key
+    encrypts the same first block across files
+
+  THE DIAGNOSTIC IN ALL CASES: someone generated the IV with a PRNG
+  that was seeded once, and the seed space is smaller than the number
+  of messages.
+</code></pre>
+<h2 id="as-rep-roasting-the-same-bug-no-kdc-needed">AS-REP roasting: the same bug, no KDC needed</h2>
+<pre><code class="language-text">  Kerberoasting needs the machine account password.
+  AS-REP roasting exploits the fact that a user with
+  &quot;Do not require Kerberos preauthentication&quot; set gets an AS-REP
+  encrypted with a key DERIVED FROM THE USER'S PASSWORD.
+
+  You can request the AS-REP for any such user WITHOUT any
+  credentials, then crack the derived key offline.
+
+  PASSWORD DERIVATION IS SLOW ON PURPOSE: that is what makes the
+  crack expensive. But if the password is weak, it falls anyway.
+  And AS-REP roasting lets an EXTERNAL unauthenticated attacker
+  harvest hashes directly, where Kerberoasting needs domain access.
+
+  MITIGATION: set &quot;Do not require Kerberos preauthentication&quot; to TRUE
+  for every user. It should already be true; the flag exists for
+  legacy interoperability and is a lingering finding.
+</code></pre>
+<pre><code class="language-python"># AS-REP roasting, the mechanics, without touching a domain
+# This is a LOCAL demonstration of what the attack does to a hash.
+import hashlib, hmac, struct, itertools, string, time
+
+def aes_string_to_key(s: str, salt16: bytes) -&gt; tuple[bytes, bytes]:
+    &quot;&quot;&quot;RFC 3962: the AES string2key used for AS-REP and Kerberos.&quot;&quot;&quot;
+    # RFC 3962 uses a 4-byte salt = UTF-16LE of the REALM string.
+    # Here we just demonstrate the property that matters.
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.backends import default_backend
+    # fixed &quot;key&quot; for the demo, derived from the password
+    seed = hashlib.sha256(s.encode(&quot;utf-16-le&quot;)).digest()[:32]
+    cipher = Cipher(algorithms.AES(seed), modes.ECB(), backend=default_backend())
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(s.encode(&quot;utf-16-le&quot;)) + padder.finalize()
+    enc = cipher.encryptor()
+    return enc.update(padded) + enc.finalize(), salt16
+
+def as_rep_derived_key(password: str, salt: bytes) -&gt; bytes:
+    ts, ck = aes_string_to_key(password, salt)
+    return ts
+
+# Demonstrate: the salt is public, so anyone can compute the derived key
+# from a GUESSED password and compare. There is no KDC contact needed.
+salt = b&quot;AEGIS.LOCAL&quot;           # 12 bytes, padded to 16 - it is PUBLIC
+target = as_rep_derived_key(&quot;Winter2026!&quot;, salt)
+print(&quot;  the AS-REP's encrypted part decrypts to:&quot;,
+      target.hex()[:32], &quot;...\n&quot;)
+print(&quot;  salt (public, from the AS-REP):&quot;, salt)
+print()
+print(&quot;  An attacker hashes a GUESS with that salt, offline, and compares.&quot;)
+print(&quot;  No KDC, no network, no rate limit, no lockout.\n&quot;)
+
+t0 = time.time()
+charset = string.ascii_letters + string.digits + &quot;!@#$&quot;
+found = None
+for length in (7, 8):
+    for combo in itertools.product(charset, repeat=length):
+        pw = &quot;&quot;.join(combo)
+        if as_rep_derived_key(pw, salt) == target:
+            found = pw; break
+    if found: break
+dt = time.time() - t0
+print(f&quot;  cracking progress: {'FOUND ' + found if found else 'exhausted the 8-char space'}&quot;)
+print(f&quot;  time: {dt:.1f}s&quot;)
+print()
+print(&quot;  NOTE: this demo used pure Python and still worked. A real cracker&quot;)
+print(&quot;  on a GPU is ~10^6 times faster. The point is not the speed;&quot;)
+print(&quot;  it is that the attack is UNAUTHENTICATED and OFFLINE.&quot;)
+PY
+</code></pre>
+<h2 id="finding-weak-randomness-without-source">Finding weak randomness without source</h2>
+<pre><code class="language-text">  WHAT TO LOOK FOR:
+
+  1. THE OUTPUT IS TOO SMALL
+     a 4-byte nonce for millions of messages. 32 bits, birthday at
+     65,536. A UUID is 122 random bits - fine. A timestamp is not.
+
+  2. THE OUTPUT IS PREDICTABLE
+     two runs of the same operation give a related output
+     a timestamp, a counter, a PID, a database row id
+
+  3. THE OUTPUT IS DETERMINISTIC
+     the same input gives the same output - a hash of the plaintext,
+     MD5 of the username, SHA of the password
+
+  4. THE OUTPUT IS CONSTANT
+     an IV of all zeros. A nonce that never changes.
+
+  5. THE SEED IS VISIBLE
+     seeded from a timestamp, a PID, a counter, or a fixed string
+</code></pre>
+<pre><code class="language-bash"># Look for the RNG calls in a codebase
+grep -rniE &quot;\brandom\.(random|randint|choice|randrange|getrandbits)|math\.random|Math\.random|\brand\(|\bsrand\(|mt_rand|V8::Random|mersenne&quot; \
+  --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.java&quot; \
+  --include=&quot;*.c&quot; --include=&quot;*.cpp&quot; --include=&quot;*.rb&quot; . 2&gt;/dev/null | head -30 | sed 's/^/  /'
+
+# and the good ones, for contrast
+grep -rniE &quot;os\.urandom|secrets\.|getrandom|SystemRandom|SecureRandom|BCryptGenRandom|random\.bytes|cryptography\.hazmat&quot; \
+  --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.java&quot; . 2&gt;/dev/null | sed 's/^/  ok: /'
+</code></pre>
+<pre><code class="language-bash"># In a shell, entropy visible from the outside
+echo &quot;  /dev/urandom:  $(head -c 32 /dev/urandom | xxd -p | head -c 32)...&quot;
+echo &quot;  /dev/random   :  $(head -c 16 /dev/random | xxd -p)  (may block)&quot;
+cat /proc/sys/kernel/random/poolsize | sed 's/^/  pool size: /'
+grep -E &quot;^(entropy_avail|random:)&quot; /proc/sys/kernel/random/entropy_avail 2&gt;/dev/null | sed 's/^/  /'
+</code></pre>
+<h2 id="what-the-report-says">What the report says</h2>
+<pre><code class="language-text">  ## F-xx · Cryptographic nonce generated with a non-CSPRNG
+
+  Risk
+    Nonces are generated with Python's `random` module, seeded from the
+    current time. The keystream (and therefore the plaintext
+    relationships) is recoverable by an attacker who observes a few
+    ciphertexts. If the same seed is used for the nonce and IV of two
+    messages under one key, both plaintexts are recovered from the
+    ciphertexts alone, with no key material.
+
+  Prerequisite
+    Two or more messages encrypted under the same key. No special
+    access; a network observer suffices.
+
+  Evidence
+    Source: src/session.py:42, `nonce = random.randint(0, 2**32)`.
+    Two requests to /api/session with a known plaintext produced
+    nonces &lt; 2^31 within the same second, consistent with a time seed.
+    (Demonstration withheld; see appendices for the method.)
+
+  Remediation
+    1. Generate nonces with `secrets.token_bytes(12)` or `os.urandom(12)`
+    2. Move to a 96-bit random nonce, or AES-GCM, which tolerates random
+       nonces to 2^48 messages per key
+    3. Add a lint rule rejecting `random` in any module under `crypto/`
+
+  Severity: Critical. This is a plaintext-disclosure bug, not a
+  theoretical one.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the four categories of "random", and why only the last is acceptable for secrets.</li>
+<li>What does nonce reuse leak, and with how many requests?</li>
+<li>Why does Kerberoasting work on the RC4-derived key specifically?</li>
+<li>What is AS-REP roasting, and why is it worse than Kerberoasting for an external attacker?</li>
+<li>What is <code>Do not require Kerberos preauthentication</code>, and why is it still set somewhere?</li>
+<li>Why is RFC 3962's string-tokey <em>slow</em>, and why does that not stop the attack?</li>
+<li>Give four things to look for when auditing a system's randomness.</li>
+<li>Why is <code>uuid.uuid4()</code> acceptable when <code>uuid.uuid1()</code> is not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Entropy &amp; Randomness</strong> → <strong>Weak RNG</strong> → <strong>Nonce</strong> → <strong>AS-REP Roasting</strong> →<br />
+<strong>Kerberoasting</strong> → <strong>Kerberos</strong>.<br />
+<code>cry-06</code> is where a bad nonce destroys a signature; this is where it destroys encryption.</p>

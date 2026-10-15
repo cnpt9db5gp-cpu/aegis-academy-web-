@@ -1,0 +1,605 @@
+<h1 id="malware-triage-static-before-dynamic">Malware Triage: Static Before Dynamic</h1>
+<h2 id="summary">Summary</h2>
+<p>The single most important rule in malware analysis: <strong>look at it before you run it.</strong> Static<br />
+analysis gives you the same answers as dynamic analysis for most samples, without executing a<br />
+single instruction of untrusted code on your machine.</p>
+<p>The framing: <strong>the ratio of effort to information is the entire<br />
+methodology question.</strong> An analyst who runs a sample to answer "what<br />
+does this connect to" when <code>strings</code> would have told them in three<br />
+seconds has made a mistake that costs an organisation.</p>
+<blockquote>
+<p>Companion to <code>for-03</code> (where memory finds the code) and <code>for-06</code> (writing<br />
+a rule for what you find). This note is the analysis of a single file.</p>
+</blockquote>
+<h2 id="the-order">The order</h2>
+<pre><code class="language-text">  1. HASH IT         and check it against a reputation service
+                    before anything else. Everything downstream is
+                    about THIS file, identified by THIS hash.
+
+  2. TYPE IT         PE, ELF, Mach-O, script, document, archive
+                    &quot;not a PE&quot; is a finding, not a failure
+
+  3. STRUCTURE IT    sections, imports, exports, resources, entropy
+                    the imports and the section layout answer most
+                    questions
+
+  4. READ THE STRINGS  including the wide (UTF-16) ones
+
+  5. LOOK FOR THE OVERLAY   a PE with a ZIP or a PDF after the last
+                    section. Very common, and where the real payload
+                    is.
+
+  6. DECODE THE STRINGS   XOR with a single byte, base64, ROT13,
+                    PowerShell -enc, a custom scheme
+
+  7. ONLY THEN consider dynamic analysis, and in a sandbox you built
+
+  THE POINT: steps 1-6 need no execution, take minutes, and answer
+  &quot;what is it, what does it do, who does it talk to&quot; for the majority
+  of samples.
+</code></pre>
+<h2 id="the-four-questions-static-analysis-answers">The four questions static analysis answers</h2>
+<pre><code class="language-text">  1. WHAT IS IT?
+     format, architecture, compiler, packer, build time, signer
+
+  2. WHAT DOES IT DO?
+     the imports and the API calls are the behaviour:
+       CreateRemoteThread / WriteProcessMemory  -&gt; injection
+       VirtualAllocEx / NtUnmapViewOfSection    -&gt; process hollowing
+       RegSetValueEx(HKLM\\...\\Run)             -&gt; persistence
+       InternetOpenA / WinHttpConnect           -&gt; network
+       CryptEncrypt / CryptGenKey               -&gt; ransomware
+       FindFirstFile / CopyFile                 -&gt; staging or copy
+       IsDebuggerPresent / NtQueryInformation   -&gt; anti-analysis
+
+  3. WHO DOES IT TALK TO?
+     URLs, IPs, domains, User-Agent strings, registry paths,
+     mutex names, pipe names, service names.
+     THE MUTEX NAME IS UNIQUELY IDENTIFYING. A single mutex is often
+     enough to find every copy of the family, and to find the report
+     where the actor described it.
+
+  4. IS IT PACKED?
+     section names (UPX, .themida, random), high entropy, few
+     imports, an entry point outside the first section, a tiny import
+     table with LoadLibrary and GetProcAddress.
+</code></pre>
+<h2 id="tools-and-what-each-is-for">Tools, and what each is for</h2>
+<pre><code class="language-text">  HASHING      sha256sum, md5sum, ssdeep (fuzzy matching)
+  TYPE         file, and exiftool for documents
+  PE PARSING   pefile (python), objdump, readpe, diec
+  STRINGS      strings -a (ASCII), strings -el (UTF-16LE)
+  DISASSEMBLY  objdump -d, Ghidra, radare2, Cutter
+  YARA         yara + rules (for-06)
+  SANDBOX      ANY.RUN, Cape, Triage, or your own
+  DECODE       CyberChef, and a Python REPL
+</code></pre>
+<h2 id="self-extracting-and-overlay-analysis">Self-extracting and overlay analysis</h2>
+<pre><code class="language-python"># --- how to tell, without running anything ---
+import hashlib, os, struct, math, collections, sys
+
+def sha256(p):
+    h = hashlib.sha256()
+    with open(p, &quot;rb&quot;) as f:
+        for b in iter(lambda: f.read(65536), b&quot;&quot;): h.update(b)
+    return h.hexdigest()
+
+def entropy(data):
+    if not data: return 0.0
+    c = collections.Counter(data)
+    n = len(data)
+    return -sum((v/n) * math.log2(v/n) for v in c.values())
+
+def is_pe(data):
+    return data[:2] == b&quot;MZ&quot; and data[0x3c:0x40] != b&quot;\x00\x00\x00\x00&quot;
+
+def pe_sections(data):
+    if not is_pe(data): return []
+    e_lfanew = struct.unpack_from(&quot;&lt;I&quot;, data, 0x3c)[0]
+    if data[e_lfanew:e_lfanew+4] != b&quot;PE\x00\x00&quot;: return []
+    coff = e_lfanew + 4
+    nsec = struct.unpack_from(&quot;&lt;H&quot;, data, coff + 2)[0]
+    optsz = struct.unpack_from(&quot;&lt;H&quot;, data, coff + 16)[0]
+    sec = coff + 20 + optsz
+    out = []
+    for i in range(nsec):
+        o = sec + i * 40
+        name = data[o:o+8].rstrip(b&quot;\x00&quot;).decode(&quot;latin-1&quot;)
+        vsize, vaddr, rsize, roff = struct.unpack_from(&quot;&lt;IIII&quot;, data, o + 8)
+        out.append(dict(name=name, vsize=vsize, rawsize=rsize, offset=roff,
+                        entropy=entropy(data[roff:roff+rsize]) if rsize else 0.0))
+    return out
+
+def overlay_offset(data):
+    &quot;&quot;&quot;The first byte past the last section. Everything after this is
+    an overlay: a payload, an archive, or a certificate.&quot;&quot;&quot;
+    secs = pe_sections(data)
+    if not secs: return None
+    return max(s[&quot;offset&quot;] + s[&quot;rawsize&quot;] for s in secs)
+</code></pre>
+<h2 id="the-overlay-technique-concretely">The overlay technique, concretely</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/for-05 &amp;&amp; cd ~/aegis/labs/for-05
+
+# --- a synthetic sample, built here, so nothing is executed ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-sample.txt
+import os, struct, hashlib, math, collections
+
+# A deliberately benign &quot;sample&quot;: a PE-like header with a ZIP overlay.
+# It contains no executable code and will not run. It exists to teach
+# the four questions.
+def build_pe():
+    d = bytearray(b&quot;\x00&quot; * 1024)
+    d[0:2] = b&quot;MZ&quot;
+    struct.pack_into(&quot;&lt;I&quot;, d, 0x3c, 0x80)
+    d[0x80:0x84] = b&quot;PE\x00\x00&quot;
+    struct.pack_into(&quot;&lt;H&quot;, d, 0x84 + 2, 2)      # 2 sections
+    struct.pack_into(&quot;&lt;H&quot;, d, 0x84 + 16, 0xE0)  # optional header size
+    secs = [(b&quot;.text&quot;, 0x400, 0x400, 0x400),
+            (b&quot;.rsrc&quot;, 0x800, 0x200, 0x800)]
+    o = 0x84 + 20 + 0xE0
+    for name, vsize, rsize, roff in secs:
+        struct.pack_into(&quot;&lt;8sIIII&quot;, d, o, name, vsize, 0, rsize, roff); o += 40
+    d[0x400:0x420] = b&quot;\x90&quot; * 32               # .text filler
+    return bytes(d)
+
+pe = build_pe()
+import zipfile, io
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, &quot;w&quot;, zipfile.ZIP_DEFLATED) as z:
+    z.writestr(&quot;stage2.txt&quot;, &quot;SECOND-STAGE-MARKER-4b7e1a9c&quot;)
+    z.writestr(&quot;config.txt&quot;, &quot;c2=https://cdn.example.com/gate.php\ninterval=60\n&quot;)
+sample = pe + buf.getvalue()
+open(&quot;lab-sample.bin&quot;, &quot;wb&quot;).write(sample)
+
+print(&quot;  built lab-sample.bin&quot;)
+print(f&quot;    size            : {len(sample)} bytes&quot;)
+print(f&quot;    PE part         : {len(pe)} bytes&quot;)
+print(f&quot;    overlay         : {len(sample)-len(pe)} bytes  &lt;- the payload&quot;)
+print(f&quot;    sha256          : {hashlib.sha256(sample).hexdigest()}&quot;)
+print()
+print(&quot;  This file contains no executable code. It will not run. It is&quot;)
+print(&quot;  a header plus a ZIP, which is exactly the shape of a real&quot;)
+print(&quot;  self-extracting dropper, and it teaches all four questions.&quot;)
+PY
+cat 01-sample.txt
+
+# --- the four questions ---
+{
+  echo &quot;=== QUESTION 1: WHAT IS IT? ===&quot;
+  echo &quot;  hash:&quot;
+  sha256sum lab-sample.bin | sed 's/^/    /'
+  md5sum lab-sample.bin | sed 's/^/    /'
+  echo &quot;  type:&quot;
+  file lab-sample.bin | sed 's/^/    /'
+  echo &quot;  entropy of the whole file:&quot;
+  python3 -c &quot;
+import math,collections
+d=open('lab-sample.bin','rb').read()
+c=collections.Counter(d); n=len(d)
+print('    %.3f bits/byte' % -sum((v/n)*math.log2(v/n) for v in c.values()))&quot;
+  echo
+  echo &quot;=== QUESTION 2: STRUCTURE ===&quot;
+  objdump -h lab-sample.bin 2&gt;/dev/null | sed 's/^/    /' \
+    || readelf -h lab-sample.bin 2&gt;/dev/null | head -5 | sed 's/^/    /'
+  echo &quot;  ^ sections, and where they end. Everything past the last&quot;
+  echo &quot;    section is an overlay.&quot;
+  echo
+  echo &quot;=== QUESTION 3: STRINGS (ASCII and UTF-16) ===&quot;
+  strings -a -n 5 lab-sample.bin | sed 's/^/    /'
+  echo &quot;  --- and the wide ones ---&quot;
+  strings -a -el -n 5 lab-sample.bin | sed 's/^/    /'
+  echo
+  echo &quot;=== QUESTION 4: THE OVERLAY ===&quot;
+  python3 - &lt;&lt;'PY'
+import struct
+d = open(&quot;lab-sample.bin&quot;,&quot;rb&quot;).read()
+e = struct.unpack_from(&quot;&lt;I&quot;, d, 0x3c)[0]
+nsec = struct.unpack_from(&quot;&lt;H&quot;, d, e+6)[0]
+optsz = struct.unpack_from(&quot;&lt;H&quot;, d, e+20)[0]
+o = e + 24 + optsz
+end = 0
+for i in range(nsec):
+    name = d[o:o+8].rstrip(b&quot;\x00&quot;).decode(&quot;latin-1&quot;)
+    vsize, vaddr, rsize, roff = struct.unpack_from(&quot;&lt;IIII&quot;, d, o+8)
+    end = max(end, roff + rsize)
+    print(f&quot;    {name:&lt;10} raw={rsize:&lt;8} offset={roff:#x} ends at {roff+rsize:#x}&quot;)
+    o += 40
+print(f&quot;\n    PE ends at {end:#x} ({end} bytes)&quot;)
+print(f&quot;    overlay starts at {end:#x}, {len(d)-end} bytes&quot;)
+ov = d[end:]
+print(f&quot;    overlay magic  : {ov[:4]!r}  ({'ZIP' if ov[:2]==b'PK' else 'unknown'})&quot;)
+open(&quot;stage2.zip&quot;,&quot;wb&quot;).write(ov)
+PY
+  echo &quot;  ^ extracted the overlay WITHOUT running anything&quot;
+  unzip -o -q stage2.zip -d stage2/ &amp;&amp; echo &quot;    extracted to stage2/&quot; &amp;&amp; ls stage2/ | sed 's/^/      /'
+  cat stage2/config.txt | sed 's/^/    /'
+} 2&gt;&amp;1 | tee 02-analysis.txt
+
+# --- 2. the decoding toolkit ---
+cat &gt; 03-decode.md &lt;&lt;'EOF'
+# Decoding obfuscated strings
+
+```text
+  MALWARE HIDES ITS CONFIGURATION. The methods, cheapest first:
+
+  1. PLAINTEXT        (many do this, in the .rsrc section or appended)
+     strings -a and read. 30 seconds.
+
+  2. XOR, SINGLE BYTE   the most common obfuscation there is.
+     key is one byte. Brute-force 256 possibilities and score by
+     how much of the result is printable.
+
+  3. XOR, MULTI-BYTE   key length 1-16. Score by printability and
+     known markers (http://, MZ, .dll, kerberos)
+
+  4. BASE64            standard or custom alphabets.
+     Sometimes &quot;base64&quot; then XOR. Sometimes a custom alphabet, which
+     you recover by looking at what characters appear.
+
+  5. RC4 / AES         a key is elsewhere in the binary, or on a
+     server, or derived from the hostname. Needs a key.
+
+  6. POWERSHELL -ENC    base64 UTF-16LE of a -EncodedCommand.
+     Decode it and read the script. This is a presentational
+     obfuscation and it is trivially reversible.
+
+  7. BUILD STRINGS     order-dependent, used to avoid static strings.
+     You need to understand the program's own call sequence.
+
+  8. CUSTOM            everything else. This is where time goes, and
+     it is why dynamic analysis exists.
+EOF
+</code></pre>
+<pre><code class="language-bash"># 2 and 3, the ones you write yourself, in 20 lines each
+python3 - &lt;&lt;'PY'
+import sys, string, itertools
+data = open(&quot;lab-sample.bin&quot;,&quot;rb&quot;).read()
+
+def score(b):
+    printable = sum(1 for c in b if 32 &lt;= c &lt; 127 or c in (9,10,13))
+    return printable / max(len(b), 1)
+
+def xor_decode(blob, key):
+    return bytes(c ^ key[i % len(key)] for i, c in enumerate(blob))
+
+print(&quot;  XOR single-byte, scored by printability (top 5):&quot;)
+scores = []
+for k in range(1, 256):
+    d = xor_decode(data, bytes([k]))
+    scores.append((score(d), k))
+for s, k in sorted(scores, reverse=True)[:5]:
+    print(f&quot;    key 0x{k:02x}: printability {s:.3f}&quot;)
+    # show the most interesting decoded runs
+    runs = re.findall(rb'[\x20-\x7e]{8,}', xor_decode(data, bytes([k]))) if False else []
+print()
+print(&quot;  (in practice you also weight for known markers: 'http', 'MZ',&quot;)
+print(&quot;   '.dll', 'kerberos' - a high-printability XOR with a real URL&quot;)
+print(&quot;   in it is the answer, not just the highest printability.)&quot;)
+PY
+
+# 6, PowerShell -enc, which is the one you will actually meet
+echo
+echo &quot;=== PowerShell -EncodedCommand, decoded ===&quot;
+python3 - &lt;&lt;'PY'
+import base64
+sample = &quot;VwByAGkAdABlAC0AEwBjAHIAaQBwAHQAIABOAG8AdAAgAC0AQQA=&quot;
+try:
+    raw = base64.b64decode(sample + &quot;=&quot; * (-len(sample) % 4))
+    print(f&quot;    base64 -&gt; {raw[:40]!r}&quot;)
+    print(f&quot;    decoded : {raw.decode('utf-16-le', errors='replace')}&quot;)
+    print()
+    print(&quot;  -EncodedCommand is UTF-16LE base64. There is no encryption.&quot;)
+    print(&quot;  It exists to get past naive command-line logging, and it&quot;)
+    print(&quot;  works on exactly that. Decode it before you run anything.&quot;)
+except Exception as e:
+    print(f&quot;    {e}&quot;)
+PY
+</code></pre>
+<h2 id="what-dynamic-analysis-adds-and-when-it-is-worth-it">What dynamic analysis adds, and when it is worth it</h2>
+<pre><code class="language-text">  DYNAMIC ANSWERS, AND ONLY DYNAMIC ANSWERS, CAN:
+    the actual network destinations (DNS, and the order of them)
+    the files written, and the paths
+    the registry keys created
+    the process tree, including who it injects into
+    the mutex created (and its name, for correlation)
+    behaviour that depends on the environment: a sandbox check, a
+    domain-joined check, a date check, a geographic check
+    the decrypted configuration (many families fetch or derive a key)
+
+  DYNAMIC COSTS:
+    execution on your analysis machine (a real risk - not theoretical)
+    time (2-10 minutes of observation, at minimum)
+    infrastructure (a sandbox is a project)
+    the sample's own anti-analysis is now running against you
+
+  THE DECISION:
+    if static analysis told you what it is and what it connects to,
+    do not run it.
+    run it only when you need something only execution can give you:
+      - a C2 domain that is only assembled at runtime
+      - a key that comes from the environment
+      - behaviour that depends on being domain-joined
+      - a determination for the report that you cannot otherwise make
+
+  AND WHEN YOU DO, THE RULES:
+    never on your primary machine
+    a VM snapshot you can revert in one click
+    no shared folders, no clipboard, no host mount
+    outbound traffic through an isolating proxy (INetSim is free)
+    record everything, and account for the sandbox detection in the
+    report (&quot;the sample checks for VMware artefacts and exits&quot;)
+</code></pre>
+<pre><code class="language-bash"># --- the isolation checklist ---
+cat &gt; 04-sandbox.md &lt;&lt;'EOF'
+# Before you execute anything
+
+- [ ] a VM, snapshotted, on a host-only network
+- [ ] NO shared folders with the host
+- [ ] NO clipboard sharing, NO drag-and-drop
+- [ ] NO host mount points inside the guest
+- [ ] outbound traffic through an isolating responder (INetSim) so
+      the sample's domains resolve to *your* sinkhole and it talks to
+      you, not to the real actor
+- [ ] a snapshot taken, and the revert tested BEFORE you run the sample
+- [ ] the sample copied in from a host-only share, then the share
+      removed
+- [ ] a clock note: many samples refuse to run if the date is wrong,
+      so a snapshot's clock matters for reproducibility
+- [ ] your notes open on a DIFFERENT machine
+
+```bash
+# INetSim, if you build a lab properly
+#   docker run -d --name inetsim ghcr.io/inetsim/inetsim:latest
+#   then set the guest's DNS to the INetSim address
+# the sample's domains now resolve to your sinkhole, and every
+# request is logged with the exact hostname and user agent
+
+# verify the isolation before running anything
+ping -c1 8.8.8.8        # must FAIL. if it succeeds, you are exposed.
+nslookup example.com    # must return 192.168.56.100 or similar
+```
+EOF
+cat 04-sandbox.md
+</code></pre>
+<h2 id="the-report-for-a-triage">The report, for a triage</h2>
+<pre><code class="language-text">## Sample triage: &lt;sha256&gt;
+
+**Classification**  &lt;what it is, and what family it belongs to&gt;
+**First seen**      &lt;earliest timestamp you found it, with its source&gt;
+**Locations**       &lt;every path, with the volume&gt;
+
+**Static indicators**
+- mutex:     &lt;name&gt;            &lt;- the best correlator you have
+- User-Agent: &lt;string&gt;
+- PDB path:  &lt;path&gt;            &lt;- leaks the developer's build directory
+- compile:   &lt;timestamp from the PE header, and how confident you are&gt;
+- packer:    &lt;name / section names / entropy per section&gt;
+- campaign:  &lt;the strings that tie it to a known actor, if any&gt;
+
+**Configuration recovered**
+&lt;the decoded config: C2 domains, intervals, the campaign ID, the
+mutex, any key material&gt;
+
+**Network indicators**
+&lt;domains, IPs, URLs, ports, User-Agent, and where each came from&gt;
+&lt;state clearly which are CONFIRMED by dynamic analysis and which are
+ inferred from strings - the client needs to know the difference&gt;
+
+**Behaviour**
+&lt;what it does, in order, with the API call or artefact that proves
+ each step&gt;
+
+**NOT DONE, and why**
+&lt;the analysis you did not perform. &quot;The configuration was recovered
+ statically; the sample was not executed, because the static
+ analysis established the C2 domains and the persistence mechanism
+ without it. The unpacked payload was not analysed.&quot;&gt;
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Static analysis</strong></td>
+<td>Analysis without executing</td>
+</tr>
+<tr>
+<td><strong>Dynamic analysis</strong></td>
+<td>Analysis by running it, in a sandbox</td>
+</tr>
+<tr>
+<td><strong>Triage</strong></td>
+<td>The first-pass classification, before deep analysis</td>
+</tr>
+<tr>
+<td><strong>Overlay</strong></td>
+<td>Data appended past the last PE section</td>
+</tr>
+<tr>
+<td><strong>Entropy</strong></td>
+<td>Shannon entropy; high = compressed, encrypted, or packed</td>
+</tr>
+<tr>
+<td><strong>Import table</strong></td>
+<td>The APIs the binary calls; a behaviour summary</td>
+</tr>
+<tr>
+<td><strong>Packer / crypter</strong></td>
+<td>Compresses or encrypts the payload; unpacks at runtime</td>
+</tr>
+<tr>
+<td><strong>Mutex</strong></td>
+<td>A named kernel object; uniquely identifies a family</td>
+</tr>
+<tr>
+<td><strong>PDB path</strong></td>
+<td>Leaks the developer's build directory</td>
+</tr>
+<tr>
+<td><strong>PDB string</strong></td>
+<td><code>\\Build\Project\release\x64\payload.pdb</code></td>
+</tr>
+<tr>
+<td><strong>Imphash</strong></td>
+<td>A hash of the import table; clusters by capability</td>
+</tr>
+<tr>
+<td><strong>ssdeep</strong></td>
+<td>Fuzzy hash; matches renamed or slightly-modified samples</td>
+</tr>
+<tr>
+<td><strong>XOR key</strong></td>
+<td>The single byte (or few) used to obfuscate strings</td>
+</tr>
+<tr>
+<td><strong>Build strings</strong></td>
+<td>Order-dependent string assembly</td>
+</tr>
+<tr>
+<td><strong>INetSim</strong></td>
+<td>A sinkhole that answers every DNS query locally</td>
+</tr>
+<tr>
+<td><strong>Unpacking</strong></td>
+<td>Dumping the payload from memory at runtime</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- 5. the full triage script ---
+cat &gt; triage.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Static triage. NEVER executes the file.
+F=&quot;${1:?usage: ./triage.sh &lt;file&gt;}&quot;
+[ -f &quot;$F&quot; ] || { echo &quot;no such file&quot;; exit 1; }
+echo &quot;==============================================================&quot;
+echo &quot; STATIC TRIAGE: $F&quot;
+echo &quot; (nothing here executes the file)&quot;
+echo &quot;==============================================================&quot;
+
+echo; echo &quot;=== 1. IDENTITY ===&quot;
+sha256sum &quot;$F&quot; | sed 's/^/  sha256: /'
+sha1sum   &quot;$F&quot; | sed 's/^/  sha1  : /'
+md5sum    &quot;$F&quot; | sed 's/^/  md5   : /'
+ssdeep -b &quot;$F&quot; &quot;$F&quot; 2&gt;/dev/null | tail -1 | sed 's/^/  ssdeep: /' || true
+echo &quot;  size  : $(stat -c%s &quot;$F&quot;) bytes&quot;
+
+echo; echo &quot;=== 2. TYPE ===&quot;
+file &quot;$F&quot; | sed 's/^/  /'
+exiftool -s -s -s &quot;$F&quot; 2&gt;/dev/null | head -15 | sed 's/^/  /'
+
+echo; echo &quot;=== 3. STRUCTURE ===&quot;
+if objdump -x &quot;$F&quot; &gt;/dev/null 2&gt;&amp;1; then
+  objdump -x &quot;$F&quot; 2&gt;/dev/null | grep -A25 &quot;Sections:&quot; | sed 's/^/  /'
+  echo
+  echo &quot;  --- imports: the behaviour, in API names ---&quot;
+  objdump -p &quot;$F&quot; 2&gt;/dev/null | grep -E &quot;DLL Name&quot; | sed 's/^/  /'
+else
+  readelf -h &quot;$F&quot; 2&gt;/dev/null | sed 's/^/  /' || echo &quot;  (not an ELF)&quot;
+fi
+
+echo; echo &quot;=== 4. ENTROPY PER REGION (high = packed) ===&quot;
+python3 - &quot;$F&quot; &lt;&lt;'PY'
+import sys, math, collections
+d = open(sys.argv[1],&quot;rb&quot;).read()
+if not d: sys.exit()
+def ent(b):
+    if not b: return 0.0
+    c = collections.Counter(b); n = len(b)
+    return -sum((v/n)*math.log2(v/n) for v in c.values())
+print(f&quot;  whole file : {ent(d):.3f} / 8.0&quot;)
+for i in range(0, min(len(d), 4*1024*1024), 65536):
+    print(f&quot;  offset {i:#08x}: {ent(d[i:i+65536]):.3f}&quot;)
+PY
+
+echo; echo &quot;=== 5. STRINGS, ASCII then UTF-16 ===&quot;
+strings -a -n 6 &quot;$F&quot; | head -30 | sed 's/^/  /'
+echo &quot;  --- wide ---&quot;
+strings -a -el -n 6 &quot;$F&quot; | head -15 | sed 's/^/  /'
+
+echo; echo &quot;=== 6. INDICATORS, EXTRACTED ===&quot;
+strings -a -n 6 &quot;$F&quot; | grep -oiE &quot;https?://[^\&quot;' ]+&quot; | sort -u | sed 's/^/  url   : /'
+strings -a -el -n 6 &quot;$F&quot; | grep -oiE &quot;https?://[^\&quot;' ]+&quot; | sort -u | sed 's/^/  url(w): /'
+strings -a -n 6 &quot;$F&quot; | grep -oE &quot;\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b&quot; | sort -u | sed 's/^/  ip    : /'
+strings -a -n 6 &quot;$F&quot; | grep -oiE &quot;[a-z0-9-]+\.(com|net|org|ru|cn|io|top|xyz|onion)&quot; | sort -u | sed 's/^/  domain: /'
+strings -a -n 6 &quot;$F&quot; | grep -oE &quot;\\\\[A-Za-z]:\\\\[^ ]*|HK(LM|CU)\\\\[^ ]*&quot; | head -10 | sed 's/^/  path  : /'
+strings -a -n 6 &quot;$F&quot; | grep -oiE &quot;user-agent: *[^\&quot;]*|Mozilla/[0-9.]+&quot; | sort -u | sed 's/^/  ua    : /'
+strings -a -n 6 &quot;$F&quot; | grep -oE &quot;[A-Za-z]:\\\\[^ ]*\.pdb&quot; | sed 's/^/  pdb   : /'
+
+echo; echo &quot;=== 7. THE FIRST QUESTION, ANSWERED ===&quot;
+echo &quot;  What is it, what does it do, who does it talk to.&quot;
+echo &quot;  If all three are answered above, you do not need to run it.&quot;
+EOF
+chmod +x triage.sh
+./triage.sh lab-sample.bin 2&gt;&amp;1 | tee 05-triage.txt
+
+# --- 6. the decision, on the record ---
+cat &gt; 06-decision.md &lt;&lt;'EOF'
+# The decision to execute, on the record
+
+```text
+  Write this BEFORE you run a sample, and put it in the report.
+
+  &quot;Dynamic analysis was performed on &lt;date&gt; in an isolated VM
+   (SNAPSHOT-ID) on a host-only network with DNS redirected to
+   INetSim. No shared folders, no clipboard, no host mounts.
+   Outbound traffic observed:
+     - DNS:  &lt;domains, resolved to the sinkhole&gt;
+     - HTTP: &lt;hosts and paths&gt;
+     - none beyond the above
+   Files written:
+     - &lt;path&gt; (&lt;size&gt;, sha256)
+   Registry keys created:
+     - &lt;key&gt;
+   Mutex: &lt;name&gt;
+   Process tree: &lt;parent&gt; -&gt; &lt;child&gt;
+   The sample checked for &lt;sandbox artefacts&gt; and &lt;behaved as follows&gt;.
+   Reverted to snapshot &lt;ID&gt; at &lt;time&gt;.&quot;
+</code></pre>
+<pre><code class="language-text">  AND WHEN YOU DECIDE NOT TO:
+
+  &quot;Dynamic analysis was NOT performed. Static analysis recovered the
+   C2 domains, the persistence mechanism, and the drop path. The
+   sample's imports are entirely consistent with its strings and
+   section layout, so execution was not required to answer the
+   questions the investigation asked. The unpacked payload was not
+   obtained; if the packer's payload is of interest, the sample
+   should be executed in a properly isolated environment by the
+   client or by a malware analysis service under their own controls.&quot;
+</code></pre>
+<pre><code class="language-bash"># Both of those are defensible. &quot;I ran it on my laptop&quot; is neither.
+</code></pre>
+<p>EOF<br />
+cat 06-decision.md<br />
+rm -f lab-sample.bin stage2.zip; rm -rf stage2<br />
+```</p>
+<p><strong>Step 5 is the deliverable</strong>: <code>triage.sh</code>, a single static triage that extracts hash, type,<br />
+sections, imports, per-region entropy, both ASCII and UTF-16 strings, and then pulls out URLs,<br />
+IPs, domains, registry paths, User-Agents and the PDB string — without executing a byte. It<br />
+closes with the decision rule: <em>if all three questions are answered, you don't need to run it.</em></p>
+<p><strong><code>06-decision.md</code></strong> gives you the paragraph to write either way — including the <strong>not performed</strong><br />
+version, which is a stronger piece of analysis than "I ran it on my laptop" because it states<br />
+what you established, what you did not, and why.</p>
+<p><strong>Record:</strong> <code>02-analysis.txt</code> and <code>05-triage.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the seven static analysis steps, in order.</li>
+<li>What four questions does static analysis answer?</li>
+<li>Why is the mutex name the best correlator you have?</li>
+<li>What is an overlay, and why does the binary put it there?</li>
+<li>How do you tell a file is packed, without running it?</li>
+<li>Name six string obfuscation methods, cheapest first.</li>
+<li>Why is <code>powershell -enc</code> presentational rather than protective?</li>
+<li>Give four things only dynamic analysis can tell you.</li>
+<li>Why is a snapshot revert <em>tested before</em> you run the sample?</li>
+<li>What must a report say when you decide not to execute?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Malware Triage</strong> → <strong>Static Analysis</strong> → <strong>YARA</strong> → <strong>Reverse Engineering</strong> →<br />
+<strong>Incident Response</strong>.<br />
+<code>for-06</code> turns these findings into rules.</p>

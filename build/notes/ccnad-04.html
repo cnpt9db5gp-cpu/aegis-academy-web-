@@ -1,0 +1,214 @@
+<h1 id="wireless-security-and-network-automation">Wireless, Security and Network Automation</h1>
+<h2 id="summary">Summary</h2>
+<p>Wireless changes the threat model entirely: the medium is shared, frames are radio, and "who is<br />
+on this network" becomes a physical-space question. Automation is the other half — modern<br />
+networks are defined in files, which means the configuration is code, and code has bugs.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>WPA3</strong> replaces WPA2's 4-way handshake weakness; enterprise mode (802.1X/RADIUS) is the real<br />
+  answer, not a shared passphrase</li>
+<li><strong>WPA2 personal</strong> uses a 4-way handshake whose MIC can be attacked offline; tools exist</li>
+<li><strong>Evil twin</strong>: a rogue AP with the same SSID. Works because SSIDs are not authenticated</li>
+<li><strong>WPA3-SAE</strong> (Simultaneous Authentication of Equals) resists offline dictionary attacks;<br />
+<strong>dragonfly</strong> is the key derivation</li>
+<li><strong>802.11 management frames</strong> are unauthenticated by design — required for discovery</li>
+<li><strong>Network as code</strong>: Ansible, Terraform, Jinja templates. Review the config, not the device</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SSID</strong></td>
+<td>The network's name; broadcast in plaintext</td>
+</tr>
+<tr>
+<td><strong>BSSID</strong></td>
+<td>The access point's MAC</td>
+</tr>
+<tr>
+<td><strong>Beacon</strong></td>
+<td>Periodic broadcast announcing an AP</td>
+</tr>
+<tr>
+<td><strong>WEP</strong></td>
+<td>Broken; do not deploy</td>
+</tr>
+<tr>
+<td><strong>WPA/WPA2/WPA3</strong></td>
+<td>Successive security standards</td>
+</tr>
+<tr>
+<td><strong>PSK</strong></td>
+<td>Pre-shared key (personal mode)</td>
+</tr>
+<tr>
+<td><strong>802.1X / RADIUS</strong></td>
+<td>Enterprise authentication per-user</td>
+</tr>
+<tr>
+<td><strong>SAE (Dragonfly)</strong></td>
+<td>WPA3's key agreement, resistant to offline attack</td>
+</tr>
+<tr>
+<td><strong>Evil twin</strong></td>
+<td>Rogue AP impersonating a legitimate one</td>
+</tr>
+<tr>
+<td><strong>Deauth</strong></td>
+<td>Management-frame attack forcing a client off an AP</td>
+</tr>
+<tr>
+<td><strong>Network automation</strong></td>
+<td>Config as version-controlled code</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- read this machine's wireless situation ---
+command -v iw iwconfig airmon-ng wpa_supplicant
+iw dev 2&gt;/dev/null
+iw dev 2&gt;/dev/null | grep -E &quot;ssid|channel|type&quot;
+lsmod | grep -E &quot;rtw|ath|iwlwifi|brcm&quot;
+
+# --- your own interface, never anyone else's ---
+# The interface must be in monitor mode to see anything beyond your own AP:
+#   sudo airmon-ng start wlan0
+#   sudo airmon-ng --check
+#   (put it back:  sudo airmon-ng stop wlan0mon)
+
+# --- the wireless security posture of your OWN AP ---
+command -v wpa_passphrase
+cat /etc/wpa_supplicant/wpa_supplicant.conf 2&gt;/dev/null | grep -vE '^\s*(#|$)' | head
+
+# --- network as code ---
+command -v ansible terraform cidr-merge
+ansible --version 2&gt;/dev/null | head -2
+ls /etc/ansible 2&gt;/dev/null
+
+# --- config drift: compare what is running to what is written ---
+diff &lt;(ip -br addr) &lt;(cat /etc/network/interfaces 2&gt;/dev/null) | head -10
+echo &quot;  (differences here are unmanaged configuration = findings)&quot;
+
+# --- hardcoded credentials in config, the automation-era version ---
+grep -rniE &quot;(password|passwd|secret|api_key)[[:space:]]*[=:]&quot; /etc/ansible /etc/netplan 2&gt;/dev/null | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> understand the wireless threat model, and audit your own network configuration<br />
+the way an assessor would.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccnad-04 &amp;&amp; cd ~/aegis/labs/ccnad-04
+
+# --- 1. what your own wireless hardware supports ---
+{
+  echo &quot;=== wireless interfaces ===&quot;
+  iw dev 2&gt;/dev/null || echo &quot;  (iw not installed or no wireless device)&quot;
+  echo
+  echo &quot;=== drivers ===&quot;
+  lsmod | grep -E &quot;rtw|ath|iwlwifi|brcm|mt76&quot; || echo &quot;  (none loaded - possibly a wired-only machine)&quot;
+  echo
+  echo &quot;=== regulatory domain ===&quot;
+  iw reg get 2&gt;/dev/null | head -5
+} 2&gt;&amp;1 | tee 01-wireless.txt
+
+echo
+echo &quot;NOTE: this lab deliberately does not teach scanning of any wireless network&quot;
+echo &quot;other than your own. See docs/RULES-OF-ENGAGEMENT.md - Wi-Fi testing requires&quot;
+echo &quot;written authorisation for the network owner.&quot;
+
+# --- 2. how WPA2's handshake can be attacked, conceptually ---
+cat &gt; 02-wpa2.md &lt;&lt;'EOF'
+# WPA2 and the 4-way handshake
+
+Four messages establish a session key from the PSK:
+
+  AP -&gt; STA   Message 1
+  STA -&gt; AP   Message 2
+  AP -&gt; STA   Message 3   &lt;- carries the MIC, the target of offline attacks
+  STA -&gt; AP   Message 4
+
+The PSK is derived from the SSID and the shared passphrase, both of which are
+broadcast in the clear in every beacon frame. Given a captured handshake, an
+attacker verifies passphrase guesses locally, with no online rate limit.
+
+WPA2-Enterprise removes this entirely: each user has a distinct credential
+verified by RADIUS, so capturing one handshake reveals nothing about any other.
+
+WPA3-Personal replaces the handshake with SAE (Dragonfly), which resists
+offline dictionary attack by design.
+
+**Security takeaway:** the weakness is not in the cipher, it is in the *key
+agreement* and in everyone sharing one secret. That is a recurring pattern
+throughout this course.
+EOF
+cat 02-wpa2.md
+
+# --- 3. the config-drift audit, which applies to every network ---
+cat &gt; 03-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Configuration drift and hygiene audit for your own host.
+set -uo pipefail
+say(){ printf '\n=== %s ===\n' &quot;$*&quot;; }
+
+say &quot;listeners bound beyond loopback&quot;
+ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/ {print &quot;  &quot; $1, $5, $7}'
+
+say &quot;world-reachable services on this LAN (the real risk on a laptop)&quot;
+ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/' | wc -l | xargs echo &quot;  count:&quot;
+
+say &quot;firewall state&quot;
+sudo iptables -S 2&gt;/dev/null | head -10 || echo &quot;  (no iptables access)&quot;
+sudo nft list ruleset 2&gt;/dev/null | head -10 || echo &quot;  (no nft ruleset)&quot;
+
+say &quot;credentials in configuration&quot;
+sudo grep -rniE &quot;(password|secret|api[_-]?key)[[:space:]]*[=:]&quot; \
+     /etc/netplan /etc/NetworkManager /etc/systemd/system 2&gt;/dev/null | head -5
+
+say &quot;listening services with their owning package&quot;
+ss -tulpn | grep -oE 'users:\(\(&quot;[^&quot;]+&quot;' | sort -u | sed 's/users:(//'
+
+say &quot;updates pending&quot;
+apt list --upgradable 2&gt;/dev/null | tail -n +2 | wc -l | xargs echo &quot;  packages:&quot;
+EOF
+chmod +x 03-audit.sh &amp;&amp; ./03-audit.sh 2&gt;&amp;1 | tee 04-audit.txt
+
+# --- 4. the network-as-code lesson ---
+cat &gt; 05-automation.md &lt;&lt;'EOF'
+# Configuration as code: what changes for a security reviewer
+
+**Before**: you read a device's running configuration. What you see is what is applied.
+
+**After**: you read a repository. Several files, possibly templated, several
+people's commits, and the deployed state may or may not match.
+
+New review questions:
+1. Is the config in version control? (history = who changed what, when)
+2. Is it templated? (Jinja variables can inject unexpected values)
+3. Where do secrets come from? (vault, environment variable, committed plaintext?)
+4. Is there a drift check in CI? (config that nobody reviews silently rots)
+5. Does the automation run with sufficient privilege, from where, and as which identity?
+
+The last point is the big one: an automation system is a **privileged
+credential in a script**. Ansible, Terraform and CI runners are targets in
+their own right, and their logs are evidence.
+EOF
+cat 05-automation.md
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong> and applies directly to your Kali laptop: anything listening on<br />
+<code>0.0.0.0</code> is visible to your entire Wi-Fi network right now. Close those before continuing.</p>
+<p><strong>Record:</strong> <code>04-audit.txt</code> and <code>02-wpa2.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is WPA2-Personal vulnerable and WPA2-Enterprise not?</li>
+<li>What is an evil twin, and why does SSID authentication not prevent it?</li>
+<li>What did WPA3 change about the key exchange?</li>
+<li>What is configuration drift and why is it a security finding?</li>
+<li>Why is an automation system itself an attractive target?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Wi-Fi Auditing</strong> → <strong>Evil Twin</strong> → <strong>Rogue DHCP</strong> → <strong>Segmentation</strong> → <strong>Package Management</strong> →<br />
+<strong>Social Engineering</strong>.</p>

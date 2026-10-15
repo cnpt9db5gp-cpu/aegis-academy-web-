@@ -1,0 +1,391 @@
+<h1 id="instructions-registers-and-flags">Instructions, Registers and Flags</h1>
+<h2 id="summary">Summary</h2>
+<p>x86-64 has sixteen 64-bit general purpose registers, a flags register that every arithmetic<br />
+instruction updates, and an instruction set that is far more regular than it first appears.<br />
+Regularity is the reason it can be disassembled, and the reason it can be exploited: the<br />
+instruction set <em>is</em> the attack surface.</p>
+<h2 id="the-registers">The registers</h2>
+<pre><code class="language-text">  64-bit  32-bit  16-bit  8-bit(h) 8-bit(l)
+  rax    eax    ax      al       ah       &lt;- accumulator, return value
+  rbx    ebx    bx      bl       bh       &lt;- callee-saved
+  rcx    ecx    cx      cl       ch       &lt;- shift/loop count
+  rdx    edx    dx      dl       dh       &lt;- 2nd arg, div
+  rsi    esi    si      sil      --       &lt;- 1st source
+  rdi    edi    di      dil      --       &lt;- 1st destination, 1st arg
+  rbp    ebp    bp      bpl      --       &lt;- frame pointer, callee-saved
+  rsp    esp    sp      spl      --       &lt;- stack pointer
+  r8-r15 -&gt; same sub-register names (r8d/r8w/r8b)
+  rip                                      &lt;- instruction pointer
+
+  SPECIAL:
+    rax/rdi  -&gt; sys_write, sys_exit, first arg
+    rax/rcx/rdx -&gt; sys_open
+    rax/rdi/rsi/rdx/r10/r8/r9 -&gt; sys_execve (note: r10, not rcx)
+    rsp      -&gt; always points at the stack
+    rip      -&gt; points at the next instruction
+</code></pre>
+<p>The multi-name trick is why <code>mov al, 0x41</code> followed by <code>mov ah, 0x42</code> produces<br />
+<code>0x4241</code> in <code>ax</code>. Writing a byte register does <strong>not</strong> zero-extend the<br />
+whole register; only 32-bit writes clear the top 32 bits (the<br />
+"zero-extension" behaviour that surprises everyone once).</p>
+<pre><code class="language-bash">cat &gt; /tmp/zext.asm &lt;&lt;'ASM'
+    .text
+    .globl _start
+_start:
+    mov     rax, 0x1122334455667788
+    mov     eax, 0x99             ; 32-bit write ZEROES the top 32 bits
+    mov     rbx, 0x1122334455667788
+    mov     bl,  0x99             ; 8-bit write changes ONE byte
+    mov     rax, 60
+    mov     rdi, 0x11223344556677
+    mov     rdi, 0
+    syscall
+ASM
+nasm -f elf64 /tmp/zext.asm -o /tmp/zext.o 2&gt;/dev/null &amp;&amp; ld -o /tmp/zext /tmp/zext.o
+echo &quot;  rbx = 0x1122334455667788; mov bl, 0x99  -&gt;  rbx = 0x1122334455667799&quot;
+echo &quot;  rax = 0x1122334455667788; mov eax, 0x99 -&gt;  rax = 0x0000000000000099&quot;
+echo &quot;  ^ the 32-bit write cleared everything. gdb on /tmp/zext confirms both.&quot;
+rm -f /tmp/zext.asm /tmp/zext.o /tmp/zext
+</code></pre>
+<h2 id="flags">Flags</h2>
+<pre><code class="language-text">  CF  carry flag          unsigned overflow / borrow
+  ZF  zero flag           result == 0
+  SF  sign flag           result's top bit (negative as signed)
+  OF  overflow flag       signed overflow
+  PF  parity              low byte has even parity
+
+  Set by almost every arithmetic and logic instruction.
+  Read by jcc and setcc.
+
+  THE CLASSIC PAIR:
+    cmp a, b        -&gt; does NOT modify a or b, only the flags
+    je  target      -&gt; jump if ZF  (equal)
+    jne target      -&gt; jump if !ZF (not equal)
+    ja  target      -&gt; jump if CF=0 and ZF=0  (above, unsigned)
+    jb  target      -&gt; jump if CF=1           (below, unsigned)
+    jg  target      -&gt; jump if ZF=0 and SF=OF (greater, signed)
+    jl  target      -&gt; jump if SF != OF       (less, signed)
+
+  CMP is SUB without storing. That is the whole idea, and it is why
+  `cmp` is the instruction you see before almost every branch.
+</code></pre>
+<h2 id="the-instruction-patterns-you-actually-read">The instruction patterns you actually read</h2>
+<pre><code class="language-text">  MOV     dst, src        copy
+  LEA     dst, [expr]      compute an ADDRESS (no memory access!)
+  ADD/SUB r, imm           arithmetic
+  CMP     a, b             set flags, keep both operands
+  TEST    a, b             AND without storing; sets ZF if (a&amp;b)==0
+  PUSH    r                rsp -= 8; [rsp] = r
+  POP     r                r = [rsp]; rsp += 8
+  CALL    target           push return address; jmp target
+  RET                     pop into rip
+  JMP/Jcc target           branch
+  XOR     r, r            zero a register (NOT &quot;toggle&quot; when dst==src)
+  NOP                     padding (multi-byte NOPs exist on x86-64)
+  SYSCALL                 trap to the kernel
+</code></pre>
+<p><strong><code>LEA</code> is the one that confuses beginners.</strong> It computes an address and<br />
+stores it in a register, without reading memory. <code>lea rax, [rbp-8]</code> means<br />
+"put the address <code>rbp-8</code> in <code>rax</code>", which is <em>not</em> "load the value at<br />
+<code>rbp-8</code>" — that is <code>mov rax, [rbp-8]</code>. Reading a disassembly and<br />
+misreading <code>lea</code> as a load is one of the most common early errors.</p>
+<p><strong><code>XOR r, r</code> zeroing</strong> works because <code>a XOR a == 0</code> for any <code>a</code>. It is the<br />
+idiomatic way to clear a register and, unlike <code>mov r, 0</code>, is two bytes<br />
+(<code>31 c0</code>).</p>
+<h2 id="why-the-instruction-set-is-the-attack-surface">Why the instruction set is the attack surface</h2>
+<pre><code class="language-text">  RET pops whatever is at rsp into rip.
+  Therefore: whoever controls [rsp] controls where execution goes.
+
+  CALL pushes a return address.
+  Therefore: whatever is on the stack at the moment of a ret is a target.
+
+  Consequences, in order of importance:
+    1. a stack overflow controls rip -&gt; ROP
+    2. a function pointer you control controls rip -&gt; call to chosen address
+    3. a vtable entry you control controls rip -&gt; same, in C++
+    4. `jmp [rax]` / `call [rax]` -&gt; &quot;indirect&quot;, and everything above
+  There is no instruction that jumps somewhere without something
+  designating the destination. Corrupt the designation, corrupt control flow.
+</code></pre>
+<p>This is why <code>cs161-04</code>'s exploit chain is really a chain of<br />
+<em>register-designation</em> problems.</p>
+<h2 id="encoding-in-the-smallest-useful-amount">Encoding, in the smallest useful amount</h2>
+<pre><code class="language-text">  Instruction bytes contain: opcode, ModR/M byte, SIB, displacement,
+  immediate - in an order that varies.
+
+  Two consequences:
+    - the length of an instruction is NOT fixed (1 to 15 bytes)
+    - you cannot decode starting from a misaligned offset
+
+  That second point is why a disassembler given the wrong entry point
+  produces total garbage, and why the first thing you do when reversing
+  is find a known function entry (a prologue, or a string reference).
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>GPR</strong></td>
+<td>General purpose register</td>
+</tr>
+<tr>
+<td><strong>Zero-extension</strong></td>
+<td>A 32-bit write clears the upper 32 bits</td>
+</tr>
+<tr>
+<td><strong>Flags register</strong></td>
+<td>Condition codes; <code>rflags</code> on x86-64</td>
+</tr>
+<tr>
+<td><strong><code>cmp</code></strong></td>
+<td>Compare without storing; sets flags</td>
+</tr>
+<tr>
+<td><strong><code>test</code></strong></td>
+<td>Bitwise AND without storing</td>
+</tr>
+<tr>
+<td><strong><code>lea</code></strong></td>
+<td>Compute an address; does not read memory</td>
+</tr>
+<tr>
+<td><strong>Prologue</strong></td>
+<td><code>push rbp; mov rbp,rsp</code></td>
+</tr>
+<tr>
+<td><strong>Epilogue</strong></td>
+<td><code>leave</code> (<code>mov rsp,rbp; pop rbp</code>) then <code>ret</code></td>
+</tr>
+<tr>
+<td><strong>ModR/M</strong></td>
+<td>The byte encoding operands</td>
+</tr>
+<tr>
+<td><strong>Instruction length</strong></td>
+<td>Variable, 1–15 bytes</td>
+</tr>
+<tr>
+<td><strong>Indirect branch</strong></td>
+<td><code>call [rax]</code>, <code>jmp [rbp+8]</code></td>
+</tr>
+<tr>
+<td><strong>Gadget</strong></td>
+<td>Any instruction sequence ending in a useful transfer</td>
+</tr>
+<tr>
+<td><strong><code>syscall</code></strong></td>
+<td>The user-to-kernel transition</td>
+</tr>
+<tr>
+<td><strong>Redundant encoding</strong></td>
+<td>Multiple byte sequences for one instruction</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/lo-03 &amp;&amp; cd ~/aegis/labs/lo-03
+
+# --- 1. read a real function and annotate it ---
+cat &gt; ops.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+int classify(int n) {
+    if (n &lt; 0)   return -1;
+    if (n == 0)  return 0;
+    if (n &lt; 10)  return 1;
+    return 2;
+}
+int main(void) {
+    for (int i = -3; i &lt;= 12; i++) printf(&quot;%d -&gt; %d\n&quot;, i, classify(i));
+    return 0;
+}
+EOF
+gcc -g -O0 -no-pie ops.c -o ops
+
+{
+  echo &quot;=== classify() as the CPU will execute it ===&quot;
+  objdump -d --no-show-raw-insn ops | sed -n '/&lt;classify&gt;:/,/^$/p'
+  echo
+  echo &quot;=== ANNOTATION ===&quot;
+  echo &quot;  push rbp / mov rbp,rsp / sub \$0x10,rsp    &lt;- prologue&quot;
+  echo &quot;  mov -0x4(%rbp),%eax                        &lt;- load n&quot;
+  echo &quot;  cmp \$0x0,%eax / jl  ...                    &lt;- n &lt; 0    (SF != OF)&quot;
+  echo &quot;  cmp \$0x0,%eax / je  ...                    &lt;- n == 0   (ZF set)&quot;
+  echo &quot;  cmp \$0x9,%eax / jg  ...                    &lt;- n &gt; 9    (signed)&quot;
+  echo &quot;  mov \$0x2,%eax / jmp leave                  &lt;- default&quot;
+  echo &quot;  leave / ret                                 &lt;- epilogue&quot;
+  echo
+  echo &quot;  Note there is no 'n' register: every branch re-loads from the&quot;
+  echo &quot;  stack slot. That is -O0 behaviour and it is why -O0 output is&quot;
+  echo &quot;  far easier to reverse than optimised output.&quot;
+} 2&gt;&amp;1 | tee 01-classify.txt
+
+{
+  echo &quot;=== the SAME logic in assembly, hand-written ===&quot;
+  echo &quot;  the shape every beginner internalises:&quot;
+  cat &lt;&lt;'ASM'
+    classify:                ; int classify(int n)   n is in edi
+        cmp     edi, 0
+        jl      .neg
+        je      .zero
+        cmp     edi, 9
+        jg      .big
+        mov     eax, 1
+        ret
+    .neg:  mov eax, -1 ; ret
+    .zero: mov eax, 0  ; ret
+    .big:  mov eax, 2  ; ret
+ASM
+  echo
+  echo &quot;  Same branches, same flags, same outcomes. Now you can read either&quot;
+  echo &quot;  direction, which is the actual skill.&quot;
+} 2&gt;&amp;1 | tee 02-asm.txt
+
+# --- 2. LEA is not a load ---
+python3 - &lt;&lt;'PY' | tee 03-lea.txt
+import dis  # not x86, but the same idea: address vs value
+
+# demonstrate the confusion concretely with a C pair that compiles to
+# exactly this distinction
+print(&quot;  C:   int x = arr[i];          -&gt; MOV  eax, [rbp-4+rax*4]   (a LOAD)&quot;)
+print(&quot;  C:   int *p = &amp;arr[i];        -&gt; LEA  rax, [rbp-4+rax*4]   (an ADDRESS)&quot;)
+print()
+print(&quot;  Assembly:&quot;)
+print(&quot;    lea rax, [rbp-8]     ; rax = rbp-8          &lt;- NO memory access&quot;)
+print(&quot;    mov rax, [rbp-8]     ; rax = *(rbp-8)       &lt;- reads memory&quot;)
+print()
+print(&quot;  Read a disassembly and swap these and you will conclude the&quot;)
+print(&quot;  program reads a pointer from the stack when it does not. This is&quot;)
+print(&quot;  the single most common misreading in early RE work.&quot;)
+print()
+print(&quot;  Rule of thumb: LEA's operand is an address expression, and LEA&quot;)
+print(&quot;  never appears with a memory destination on x86-64.&quot;)
+PY
+cat 03-lea.txt
+
+# --- 3. flags, observed directly ---
+cat &gt; 04-flags.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Watch CF/ZF/SF/OF update, using gdb's flag display.
+command -v gdb &gt;/dev/null || { echo &quot;  gdb not installed&quot;; exit 0; }
+cat &gt; /tmp/fl.c &lt;&lt;'C'
+#include &lt;stdio.h&gt;
+int main(void) {
+    int a = 2000000000, b = 2000000000;
+    unsigned u = 4000000000u, v = 4000000000u;
+    printf(&quot;%d\n&quot;, a + b);          /* signed overflow:  OF=1 */
+    printf(&quot;%u\n&quot;, u + v);          /* unsigned:        CF=1 */
+    return 0;
+}
+C
+gcc -O0 -g /tmp/fl.c -o /tmp/fl
+gdb -q -batch /tmp/fl \
+  -ex &quot;break *main+15&quot; -ex run \
+  -ex &quot;printf \&quot;  signed overflow (OF):\n\&quot;&quot; \
+  -ex &quot;stepi&quot; -ex &quot;info flags&quot; \
+  -ex &quot;break *main+22&quot; -ex continue \
+  -ex &quot;printf \&quot;  unsigned overflow (CF):\n\&quot;&quot; \
+  -ex &quot;stepi&quot; -ex &quot;info flags&quot; 2&gt;&amp;1 | grep -E &quot;OF|CF|overflow|^  &quot; | head -20
+rm -f /tmp/fl.c /tmp/fl
+EOF
+chmod +x 04-flags.sh
+./04-flags.sh 2&gt;&amp;1 | tee 05-flags.txt
+
+# --- 4. the gadget inventory: why ret is everything ---
+{
+  echo &quot;=== a gadget is any instruction ending in ret ===&quot;
+  echo &quot;  ROP works because these exist in abundance in every binary.&quot;
+  echo
+  echo &quot;=== search a real binary for usable sequences ===&quot;
+  ROPgadget --binary /usr/bin/id 2&gt;/dev/null | head -20 \
+    || { echo &quot;  ROPgadget not installed (apt install ropper / pipx install ROPgadget)&quot;
+         echo &quot;  falling back to objdump:&quot;
+         objdump -d /usr/bin/id | grep -B1 &quot;ret&quot; | grep -A1 -E &quot;pop|leave&quot; | head -20
+         echo
+         echo &quot;  any 'pop rX ; ret' is a gadget: load rX from the stack, then&quot;
+         echo &quot;  jump to the next address. Chain enough and you control rdi,&quot;
+         echo &quot;  rsi, and where execution goes next.&quot;
+       }
+} 2&gt;&amp;1 | tee 06-gadgets.txt
+
+# --- 5. instruction lengths: why disassembly needs an entry point ---
+python3 - &lt;&lt;'PY' | tee 07-lengths.txt
+print(&quot;  Instruction lengths on x86-64 are variable, 1-15 bytes.&quot;)
+print(&quot;  Examples from real code:&quot;)
+print(&quot;    90                 nop                      1 byte&quot;)
+print(&quot;    48 89 e5           mov rbp, rsp             3 bytes&quot;)
+print(&quot;    0f 85 xx xx xx xx  jne rel32                6 bytes&quot;)
+print(&quot;    48 b8 &lt;8 bytes&gt;    movabs rax, imm64       10 bytes&quot;)
+print()
+print(&quot;  Consequence: you cannot disassemble from an arbitrary byte.&quot;)
+print(&quot;  Start one byte early and every instruction after it is garbage,&quot;)
+print(&quot;  with no error message.&quot;)
+print()
+print(&quot;  This is why RE starts by locating a FUNCTION ENTRY - a push rbp;&quot;)
+print(&quot;  mov rbp,rsp prologue, or a call target, or a string xref - and&quot;)
+print(&quot;  disassembling forward from there.&quot;)
+PY
+cat 07-lengths.txt
+
+# --- 6. write shellcode the hard way, to see every piece ---
+cat &gt; 08-shellcode.S &lt;&lt;'EOF'
+    .intel_syntax noprefix
+    .text
+    .globl _start
+_start:
+    # execve(&quot;/bin/sh&quot;, argv, envp) - no libc, no PLT, just the kernel
+    # rax=59 (sys_execve), rdi=filename, rsi=argv, rdx=envp
+    push    rbx              # preserve callee-saved rbx (we never return,
+    push    r12              #   but this is the discipline)
+    xor     rdx, rdx         # envp = NULL
+    xor     rsi, rsi         # argv = NULL  (not strictly needed)
+    mov     rdi, 0x68732f6e69622f   # &quot;//bin/sh&quot; little-endian
+    push    rdi              # ...on the stack, NULL-terminated
+    mov     rdi, rsp         # rdi = pointer to it
+    mov     rax, 59          # SYS_execve
+    syscall
+    pop     r12
+    pop     rbx
+EOF
+{
+  echo &quot;=== the classic execve shellcode, written instruction by instruction ===&quot;
+  cat 08-shellcode.S
+  echo
+  echo &quot;=== assembled, and here are its bytes ===&quot;
+  nasm -f bin 08-shellcode.S -o shellcode.bin 2&gt;/dev/null \
+    &amp;&amp; { wc -c &lt; shellcode.bin | xargs echo &quot;  size:&quot;; xxd shellcode.bin | sed 's/^/  /' ; }
+  echo
+  echo &quot;  Note what this is NOT: it does not call libc, does not need the&quot;
+  echo &quot;  stack to be executable, and does not need any address to be&quot;
+  echo &quot;  known. That is why it still works. NX does not stop this.&quot;
+  echo &quot;  NX only stops code ON the stack - and this code never was.&quot;
+} 2&gt;&amp;1 | tee 09-shellcode.txt
+rm -f ops.c ops 08-shellcode.S shellcode.bin 02-asm.txt
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: a gadget inventory from a real system binary. Every <code>pop rX;
+ret</code> you find is a rung on the ladder — and finding them is what turns "I can control the<br />
+return address" into "I can control rdi, rsi, and rdx."</p>
+<p><strong>Step 6</strong> writes <code>execve("/bin/sh")</code> in raw assembly with no libc. It is 23 bytes, needs<br />
+no stack execution, and needs no leaked addresses. That's the baseline every later technique<br />
+is measured against, and the thing NX does not stop.</p>
+<p><strong>Record:</strong> <code>01-classify.txt</code> and <code>09-shellcode.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>List the first four System V argument registers, in order.</li>
+<li>What happens to the upper 32 bits when you write <code>eax</code>?</li>
+<li>What is the difference between <code>lea rax, [rbp-8]</code> and <code>mov rax, [rbp-8]</code>?</li>
+<li>What does <code>cmp</code> do that <code>sub</code> does not?</li>
+<li>Why does <code>xor rax, rax</code> zero a register?</li>
+<li>Explain why controlling <code>[rsp]</code> controls control flow.</li>
+<li>What is a gadget, and why do so many of them exist?</li>
+<li>Why must a disassembler start at a known entry point?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Register Model</strong> → <strong>x86 Assembly</strong> → <strong>Disassembly</strong> → <strong>ROP</strong> → <strong>Flags</strong> →<br />
+<strong>Shellcode</strong>.<br />
+Pairs with <code>lo-02</code> for the stack and <code>lo-05</code> for the debugger.</p>

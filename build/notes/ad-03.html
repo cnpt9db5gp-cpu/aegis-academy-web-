@@ -1,0 +1,597 @@
+<h1 id="ldap-enumeration-and-bloodhound-graph-analysis">LDAP Enumeration and BloodHound Graph Analysis</h1>
+<h2 id="summary">Summary</h2>
+<p>LDAP is the interface to the directory, and it is almost entirely <strong>unauthenticated-readable by<br />
+default</strong>. That is the single most important fact about AD reconnaissance: the majority of the<br />
+attack surface can be enumerated with no credentials at all.</p>
+<p>The lecture's structure: what LDAP lets you ask anonymously, what it lets<br />
+you ask with a user, and why the graph derived from those answers is<br />
+what makes AD attacks tractable at all.</p>
+<h2 id="ldap-as-a-query-language">LDAP as a query language</h2>
+<pre><code class="language-text">  EVERY OBJECT has a DN, a set of attributes, and a class.
+
+  FILTER syntax (RFC 4515):
+    (&amp;(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=512))
+      AND   objectClass=user
+      AND   userAccountControl has bit 512 set (normal account)
+              ^ &quot;userAccountControl:1.2.840.113556.1.4.803&quot; is the
+                extensible match for &quot;bitwise AND contains value&quot;
+
+  KEY BIT VALUES in userAccountControl - you will see these constantly:
+    0x0002  ACCOUNTDISABLE
+    0x0001  SCRIPT                      (password need not change)
+    0x0040  DONT_EXPIRE_PASSWORD
+    0x0100  HOMEDIR_REQUIRED
+    0x0200  LOCKOUT
+    0x0400  PASSWD_NOTREQD
+    0x0800  PASSWD_CANT_CHANGE
+    0x1000  ENCRYPTED_TEXT_PASSWORD_PWD
+    0x2000  TEMP_DUPLICATE_ACCOUNT
+    0x4000  NORMAL_ACCOUNT
+    0x8000  INTERDOMAIN_TRUST_ACCOUNT
+    0x100000 DONT_REQ_PREAUTH          &lt;- AS-REP roastable (ad-04)
+    0x200000 TRUSTED_FOR_DELEGATION
+    0x400000 PARTIAL_SECRETS_ACCOUNT
+    0x800000 AS_REQ_WRITEABLE          &lt;- SipHash-2-4, below
+
+  THE TWO HIGH-VALUE BITS:
+    0x100000  DONT_REQ_PREAUTH      -&gt; AS-REP roastable. A finding.
+    0x200000  TRUSTED_FOR_DELEGATION -&gt; the account can request
+                                       tickets for any user (unconstrained
+                                       delegation, ad-02)
+</code></pre>
+<h2 id="what-you-can-ask-without-credentials">What you can ask without credentials</h2>
+<pre><code class="language-text">  THE ANONYMOUS SURFACE, and it is often still open:
+
+    rootDSE                     naming contexts, DNS host, functional level
+    base object                 the domain's attributes
+    configuration container     the forest schema. The whole class list.
+    CN=Users / OU=Users         every user object, with attributes
+    computer objects            every machine account
+    domainDNS objects           dnsHostName, distinguishedName, dc
+    SPN attributes              servicePrincipalName on every object
+    group memberships           msMemberOf
+    the Global Catalog (3268)   a forest-wide copy: every object in every
+                                domain, with fewer attributes
+
+  THE ONE THAT MATTERS MOST:
+    EVERY OBJECT's msDS-SupportedEncryptionTypes is readable anonymously.
+    This tells you, without any credentials, WHICH ACCOUNTS ARE
+    KERBEROASTABLE. No SPN enumeration needed for the RC4 ones -
+    AES support is visible on the object.
+
+  THE &quot;MIT KERBERO5&quot; SITUATION:
+    Modern Windows Server 2022 defaults to AES-only, which removes the
+    automatic RC4 service tickets that made roasting trivial.
+    To find the exception, query for accounts that still have RC4
+    support. Those are the findings.
+</code></pre>
+<h2 id="what-a-user-can-read-beyond-that">What a user can read beyond that</h2>
+<pre><code class="language-text">  AN AUTHENTICATED USER can additionally:
+    - read the members of most groups (msMemberOf is not write-protected
+      for reading)
+    - read the ACL of most objects (READ_CONTROL is granted to
+      Authenticated Users on most objects by default)
+    - read the domain controllers list
+    - read userAccountControl, pwdLastSet, lastLogonTimestamp for
+      everyone -&gt; a dormant-account map
+
+  THE CONSEQUENCE:
+    you can build the ENTIRE AD graph, including every ACL edge,
+    as a normal user. BloodHound (bh-01, bh-02) does exactly this.
+
+  THE QUESTION THIS RAISES IN AN ASSESSMENT:
+    &quot;can a standard user enumerate the entire privilege graph?&quot;
+    If yes, that is a Medium finding in its own right, because it
+    means an attacker knows exactly which single misconfiguration
+    to look for before touching the domain.
+</code></pre>
+<h2 id="the-graph-why-the-graph-not-the-list">The Graph: why the graph, not the list</h2>
+<pre><code class="language-text">  A LIST OF ACCOUNTS tells you who exists.
+  A LIST OF ACCOUNTS AND GROUPS tells you who is in what.
+  A GRAPH tells you who CAN REACH WHAT, and by how few steps.
+
+  THE THREE EDGE TYPES in a BloodHound graph:
+
+    ALLOW      principal --(HasSession/AddKeyCredentialLink)--&gt; object
+               or principal --(GenericAll/WriteDACL)--&gt; object
+               &quot;this principal can become / act as that object&quot;
+
+    SESSION    user --HasSession--&gt; computer
+               &quot;this user is authenticated to that machine right now&quot;
+               The most immediately exploitable edge in AD.
+               (imp-03 is exactly this: relay a session.)
+
+    GROUP      user --MemberOf--&gt; group --GenericAll--&gt; Domain Admins
+               The one everyone starts with. Usually longer than 1 hop.
+
+  THE POWER OF THE GRAPH:
+    it is the answer to &quot;what is the SHORTEST path from a normal
+    user to Domain Admin&quot;, which is the only question that matters.
+    Two accounts are in a group nobody has heard of, that group has
+    GenericAll on a service account, and that service account has
+    WriteDACL on the Domain object. Nobody finds that by reading.
+    The graph finds it in one query.
+</code></pre>
+<h2 id="the-queries-that-matter">The queries that matter</h2>
+<pre><code class="language-text">  THE THREE THAT MATTER
+
+  1. Shortest path from any principal to Domain Admins
+       &quot;WHERE can this domain admin exposure come from?&quot;
+       Usually one of:
+         - a user with an admin-equivalent ACE
+         - a service account in Domain Admins
+         - a group with GenericAll on a privileged group
+         - a computer account with GenericAll (a SHORTCUT: you can
+           read a computer's hash and get its privileges)
+
+  2. Shortest path to DOMAIN ADMIN, including DCSync
+       &quot;-Edge DCSync&quot; gives every principal that can replicate the
+       directory. This is separate from Domain Admin membership and
+       is usually the more surprising finding.
+
+  3. All principals with SPNs, or with delegation, or preauth disabled
+       &quot;where should I spend my cracking time?&quot;
+       These are the objects that pay off.
+
+  THE OTHERS WORTH LEARNING
+    - paths to a specific high-value target (a SQL admin, a backup
+      administrator, an Exchange admin)
+    - &quot;all sessions&quot; -&gt; who is authenticated where, right now
+    - &quot;shortest path to DCSync via ACL&quot; -&gt; the LDAP/SMB relay surface
+    - &quot;owned&quot; -&gt; what your own compromised principal can reach
+</code></pre>
+<h2 id="tools-and-what-each-one-actually-collects">Tools, and what each one actually collects</h2>
+<pre><code class="language-text">  BLOODHOUND / SHARPHOUND
+    the graph. SharpHound (C#, Windows, runs as a domain user),
+    SharpHoundPython (Linux, uses ldap + smb), or
+    bloodhound-python (Linux, all-ldap / all-bloodhound / all-smbsession)
+    Output: a zip containing a .sqlite database and a .json ingest file
+
+  LDAPSEARCH
+    the raw queries. No graph. Best for scripted, narrow enumeration.
+
+  NETEXEC / CRACKMAPEXEC
+    module collection: SMB signing, LDAP signing, users, groups, shares,
+    sessions, delegation, vuln checks. Fast, opinionated, noisy.
+    (netexec is the maintained successor to crackmapexec.)
+
+  IMPACKET (imp-01..imp-04)
+    the protocol-level work: shares, hashes, tickets, relay.
+
+  THE DIVISION OF LABOUR:
+    BloodHound tells you WHERE. Impacket and netexec let you GO there.
+    Doing the second without the first means scanning for hours
+    to find something the graph would have given you in seconds.
+</code></pre>
+<h2 id="collection-discipline">Collection discipline</h2>
+<pre><code class="language-text">  COLLECTION IS ACTIVE ENUMERATION. It generates traffic. It can trip
+  detection. So:
+
+    - confirm in the ROE that AD enumeration is in scope, and note the
+      source IPs you will use so the client's SIEM can attribute it
+    - collect from ONE host, not a spray. Twenty queries from one box
+      is 1/20th of the traffic of 20 boxes
+    - prefer LDAP (port 389) over RPC (port 49152+) where possible;
+      LDAP is rate-limited and logged, RPC is neither
+    - do not run &quot;all-bloodhound&quot; against production on a Friday
+    - store the collection securely. SharpHound output contains the
+      group memberships of the entire domain and an offline copy of
+      every hash it can read.
+
+  WHAT A COLLECTION CONTAINS, AND WHY IT IS SENSITIVE:
+    every user, every group membership, every session, every ACL edge,
+    and possibly every machine account hash (with -CollectionMethod
+    SessionLoop). That last one is a full hash dump, and it is in the
+    zip file sitting on your laptop.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>LDAP</strong></td>
+<td>The directory query protocol; tree-structured, DN-addressed</td>
+</tr>
+<tr>
+<td><strong>DN</strong></td>
+<td>Distinguished name; the LDAP path of an object</td>
+</tr>
+<tr>
+<td><strong>Filter</strong></td>
+<td>RFC 4515 query syntax, with <code>&amp;</code>, <code>|</code>, <code>!</code>, and matches</td>
+</tr>
+<tr>
+<td><strong>Extensible match</strong></td>
+<td><code>attr:1.2.840.113556.1.4.803:=value</code> for bit tests</td>
+</tr>
+<tr>
+<td><strong><code>userAccountControl</code></strong></td>
+<td>The account flags bitfield</td>
+</tr>
+<tr>
+<td><strong>DONT_REQ_PREAUTH (0x100000)</strong></td>
+<td>AS-REP roastable</td>
+</tr>
+<tr>
+<td><strong>TRUSTED_FOR_DELEGATION (0x200000)</strong></td>
+<td>Unconstrained delegation</td>
+</tr>
+<tr>
+<td><strong>AS_REQ_WRITEABLE (0x800000)</strong></td>
+<td>SipHash-2-4 (2018 patch, enabled by default since 2019)</td>
+</tr>
+<tr>
+<td><strong>RootDSE</strong></td>
+<td>The directory's own object; <code>ldapsearch -b "" -s base</code></td>
+</tr>
+<tr>
+<td><strong>Global Catalog (3268)</strong></td>
+<td>Forest-wide read-only copy</td>
+</tr>
+<tr>
+<td><strong>msDS-SupportedEncryptionTypes</strong></td>
+<td>Which Kerberos encryption an account supports</td>
+</tr>
+<tr>
+<td><strong>msMemberOf</strong></td>
+<td>The group memberships of an object</td>
+</tr>
+<tr>
+<td><strong>Graph</strong></td>
+<td>Principals, groups, sessions and ACLs as edges</td>
+</tr>
+<tr>
+<td><strong>HasSession</strong></td>
+<td>A user is authenticated to a machine now</td>
+</tr>
+<tr>
+<td><strong>DCSync edge</strong></td>
+<td>A principal that can replicate the directory</td>
+</tr>
+<tr>
+<td><strong>SharpHound</strong></td>
+<td>C# collector; <code>bloodhound-python</code> is the Linux one</td>
+</tr>
+<tr>
+<td><strong>netexec</strong></td>
+<td>The maintained fork of crackmapexec</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ad-03 &amp;&amp; cd ~/aegis/labs/ad-03
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. install and verify the tooling ---
+{
+  echo &quot;=== AD tooling ===&quot;
+  sudo apt install -y samba-common-bin smbclient krb5-user ldap-utils 2&gt;/dev/null | tail -2
+  pipx install impacket-toolkit 2&gt;/dev/null &amp;&amp; echo &quot;  impacket-toolkit installed via pipx&quot; \
+    || echo &quot;  impacket: pipx install impacket-toolkit&quot;
+  pipx install bloodhound-python 2&gt;/dev/null &amp;&amp; echo &quot;  bloodhound-python installed&quot; \
+    || echo &quot;  bloodhound-python: pipx install bloodhound-python&quot;
+  echo
+  echo &quot;=== installed ===&quot;
+  for t in ldapsearch ldapwhoami kinit klist smbclient rpcclient \
+           bloodhound-python netexec; do
+    command -v &quot;$t&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; printf &quot;  %-22s %s\n&quot; &quot;$t&quot; &quot;$(command -v $t)&quot; \
+                               || printf &quot;  %-22s missing\n&quot; &quot;$t&quot;
+  done
+} 2&gt;&amp;1 | tee 01-tooling.txt
+
+# --- 2. the anonymous enumeration, as commands (lab DC only) ---
+cat &gt; 02-anonymous.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# ANONYMOUS LDAP enumeration. Read-only, no credentials.
+# Requires an explicit DC inside the lab range. There is no default target.
+DC=&quot;${1:?usage: ./02-anonymous.sh 192.168.56.10}&quot;
+b=$(echo &quot;$DC&quot; | cut -d. -f1)
+case &quot;$b&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DC is outside the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+
+echo &quot;[scope] $DC in range; every query below is ANONYMOUS and read-only&quot;
+echo
+
+echo &quot;=== 1. rootDSE: what does this DC tell a stranger? ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base \
+  namingContexts defaultNamingContext \
+  supportedLDAPVersion supportedControl supportedExtension \
+  dnsHostName forestFunctionalityLevel domainFunctionalityLevel \
+  2&gt;/dev/null | grep -E &quot;^[a-zA-Z]+:&quot; | sed 's/^/  /'
+echo &quot;  ^ if this returns data, anonymous bind is OPEN. Record it.&quot;
+
+NC=$(ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base defaultNamingContext \
+     2&gt;/dev/null | grep -m1 &quot;^defaultNamingContext:&quot; | awk '{print $2}')
+echo &quot;  naming context: ${NC:-unknown}&quot;
+echo
+
+echo &quot;=== 2. the domain object: functional level, netBIOS name ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; -s base \
+  dc netbiosname whenCreated objectSid 2&gt;/dev/null | grep -E &quot;^[a-zA-Z]+:&quot; | sed 's/^/  /'
+echo
+
+echo &quot;=== 3. the configuration container: the forest schema ===&quot;
+echo &quot;  (huge. Just count the classes - it is the schema for everything.)&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;CN=Configuration,${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(objectClass=subSchemaSubentry)&quot; dn 2&gt;/dev/null | grep -c &quot;^dn:&quot; \
+  | xargs echo &quot;  attributeSchema classes:&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;CN=Configuration,${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(objectClass=subSchemaSubentry)&quot; dn 2&gt;/dev/null | grep -c &quot;^dn:&quot; \
+  | xargs echo &quot;  classSchema classes:&quot;
+echo
+
+echo &quot;=== 4. enabled users, no password - visible anonymously ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(&amp;(objectCategory=person)(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=512))&quot; \
+  sAMAccountName userPrincipalName memberOf 2&gt;/dev/null \
+  | grep -E &quot;^(sAMAccountName|memberOf):&quot; | sed 's/^/  /' | head -40
+echo &quot;  ^ userAccountControl bit 512 = ACCOUNTDISABLE clear = ENABLED&quot;
+echo &quot;    That bitwise filter is the one you will type most often.&quot;
+echo
+
+echo &quot;=== 5. COMPUTERS: the graph's most important edge type ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(objectCategory=computer)&quot; dNSHostName operatingSystem sPN 2&gt;/dev/null \
+  | grep -E &quot;^(dNSHostName|operatingSystem|sPN):&quot; | sed 's/^/  /'
+echo &quot;  ^ the SPNs here are what Kerberoasting targets (ad-04)&quot;
+echo
+
+echo &quot;=== 6. GROUP MEMBERSHIPS: the whole map, anonymously ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(objectCategory=group)&quot; sAMAccountName member 2&gt;/dev/null \
+  | grep -E &quot;^(sAMAccountName|member):&quot; | sed 's/^/  /' | head -40
+echo
+
+echo &quot;=== 7. the ROASTABLE ACCOUNTS, found with no credentials at all ===&quot;
+echo &quot;    msDS-SupportedEncryptionTypes is readable anonymously.&quot;
+echo &quot;    RC4 support = the value 4, or the absence of the attribute.&quot;
+echo
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(userAccountControl:1.2.840.113556.1.4.803:=512)&quot; \
+  sAMAccountName msDS-SupportedEncryptionTypes servicePrincipalName 2&gt;/dev/null \
+  | paste - - - 2&gt;/dev/null | grep -viE &quot;msDS-SupportedEncryptionTypes: 18|^-&quot; | head -12 | sed 's/^/  /'
+echo &quot;  (18 = 0x12 = AES128 + AES256. Anything else, or nothing, = roastable)&quot;
+echo
+
+echo &quot;=== 8. ACCOUNTS THAT DO NOT REQUIRE PREAUTH ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(userAccountControl:1.2.840.113556.1.4.803:=1048576)&quot; \
+  sAMAccountName 2&gt;/dev/null | grep &quot;^sAMAccountName:&quot; | sed 's/^/  /'
+echo &quot;  ^ bit 1048576 = DONT_REQ_PREAUTH. These are AS-REP roastable.&quot;
+echo &quot;    Every one of them is a finding: this flag is a legacy&quot;
+echo &quot;    interoperability exception that nobody retires.&quot;
+echo
+
+echo &quot;=== 9. ACCOUNT NAMES AND ACCOUNTS THAT NEVER LOG IN ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(objectCategory=person)(objectClass=user)&quot; \
+  sAMAccountName pwdLastSet lastLogonTimestamp 2&gt;/dev/null \
+  | grep -E &quot;^(sAMAccountName|lastLogonTimestamp):&quot; | paste - - 2&gt;/dev/null \
+  | grep -iE &quot;1601|0001&quot; | head -8 | sed 's/^/  /'
+echo &quot;  ^ accounts whose lastLogonTimestamp is 1601/0001 NEVER LOGGED ON.&quot;
+echo &quot;    Dormant and service accounts are the ones with stale passwords.&quot;
+echo &quot;    Some of them still have Domain Admin. That is the finding.&quot;
+echo
+
+echo &quot;=== 10. the GLOBAL CATALOG on 3268: the forest, for free ===&quot;
+ldapsearch -x -H &quot;ldap://$DC:3268&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  -s base &quot;(objectClass=domainDNS)&quot; dc dnsHostName 2&gt;/dev/null \
+  | grep -E &quot;^[a-zA-Z]+:&quot; | sed 's/^/  /'
+echo &quot;  ^ 3268 is forest-wide. If it answers anonymously, every domain in&quot;
+echo &quot;    the forest is readable from one unauthenticated TCP connection.&quot;
+EOF
+chmod +x 02-anonymous.sh
+
+# --- 3. offline: the flag arithmetic, which is the part that confuses people ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-flags.txt
+print(&quot;  === userAccountControl: the bit arithmetic, decoded ===\n&quot;)
+FLAGS = [
+ (0x0001, &quot;SCRIPT&quot;,                     &quot;password need not change&quot;),
+ (0x0002, &quot;ACCOUNTDISABLE&quot;,              &quot;account is disabled&quot;),
+ (0x0004, &quot;HOMEDIR_REQUIRED&quot;,           &quot;home directory required&quot;),
+ (0x0008, &quot;LOCKOUT&quot;,                    &quot;locked out&quot;),
+ (0x0010, &quot;PASSWD_NOTREQD&quot;,             &quot;blank password allowed&quot;),
+ (0x0020, &quot;PASSWD_CANT_CHANGE&quot;,         &quot;user cannot change password&quot;),
+ (0x0040, &quot;USE_DES_KEY&quot;,                &quot;DES-allowed RC4 (roastable)&quot;),
+ (0x0080, &quot;DONT_EXPIRE_PASSWORD&quot;,       &quot;password never expires&quot;),
+ (0x0100, &quot;PASSWD_NOTINTERACTIVE_CHANGE&quot;,&quot;interactively-changed only&quot;),
+ (0x0200, &quot;ENCRYPTED_TEXT_PWD_ALLOWED&quot;, &quot;stores reversible password&quot;),
+ (0x0400, &quot;TEMP_DUPLICATE_ACCOUNT&quot;,     &quot;sacrificial / clone account&quot;),
+ (0x0800, &quot;ENCRYPTED_TEXT_PASSWORD_USER&quot;,&quot;password from user&quot;),
+ (0x1000, &quot;NORMAL_ACCOUNT&quot;,             &quot;a normal user account&quot;),
+ (0x2000, &quot;INTERDOMAIN_TRUST_ACCOUNT&quot;,  &quot;a trust account&quot;),
+ (0x100000, &quot;DONT_REQ_PREAUTH&quot;,         &quot;AS-REP ROASTABLE&quot;),
+ (0x200000, &quot;TRUSTED_FOR_DELEGATION&quot;,   &quot;unconstrained delegation&quot;),
+ (0x400000, &quot;PARTIAL_SECRETS_ACCOUNT&quot;,  &quot;not a full domain principal&quot;),
+ (0x800000, &quot;AS_REQ_WRITEABLE&quot;,         &quot;SipHash-2-4 (2018)&quot;),
+ (0x1000000, &quot;DONT_DISPLAY_IN_UAC&quot;,     &quot;no UAC consent prompt&quot;),
+]
+print(f&quot;  {'value':&lt;12} {'hex':&lt;10} name&quot;)
+print(&quot;  &quot; + &quot;-&quot;*62)
+for v, name, note in FLAGS:
+    print(f&quot;  {v:&lt;12} {hex(v):&lt;10} {name:&lt;28} {note}&quot;)
+print()
+print(&quot;  THE TWO FILTERS YOU WILL TYPE CONSTANTLY:&quot;)
+print(&quot;    enabled accounts    : ...:1.2.840.113556.1.4.803:=512&quot;)
+print(&quot;    AS-REP roastable    : ...:1.2.840.113556.1.4.803:=1048576&quot;)
+print(&quot;    delegation          : ...:1.2.840.113556.1.4.803:=2097152&quot;)
+print(&quot;    computers           : (objectCategory=computer)&quot;)
+print(&quot;    domain admins       : (memberOf=CN=Domain Admins,&lt;NC&gt;)&quot;)
+print()
+print(&quot;  THE ARITHMETIC behind 'enabled': ACCOUNTDISABLE (0x2) must be CLEAR,&quot;)
+print(&quot;  so you test bitwise-AND-contains 512 (NORMAL_ACCOUNT, 0x100).&quot;)
+examples = [
+  (0x512, &quot;normal enabled user&quot;),
+  (0x512 | 0x100000, &quot;normal user, DONT_REQ_PREAUTH - AS-REP roastable&quot;),
+  (0x512 | 0x200000, &quot;normal user, TRUSTED_FOR_DELEGATION - unconstrained&quot;),
+  (0x2 | 0x512, &quot;DISABLED user - the filter above must not match this&quot;),
+  (0x512 | 0x100000 | 0x200000, &quot;both: roastable AND unconstrained. Worst.&quot;),
+]
+for v, why in examples:
+    roast = &quot;ROASTABLE&quot; if v &amp; 0x100000 else &quot;&quot;
+    deleg = &quot;DELEGATION&quot; if v &amp; 0x200000 else &quot;&quot;
+    disab = &quot;DISABLED&quot;   if v &amp; 0x2 else &quot;&quot;
+    tags = &quot; &quot;.join(t for t in (disab, roast, deleg) if t)
+    print(f&quot;    {hex(v):&lt;14} {why:&lt;56} {tags}&quot;)
+print()
+print(&quot;  READING A DUMP:&quot;)
+print(&quot;    msDS-SupportedEncryptionTypes = 18 (0x12)&quot;)
+print(&quot;      -&gt; AES128 (0x08) + AES256 (0x10). NOT roastable.&quot;)
+print(&quot;    msDS-SupportedEncryptionTypes = 4 or 0x4&quot;)
+print(&quot;      -&gt; RC4 only. ROASTABLE. Modern DCs will issue RC4 service&quot;)
+print(&quot;         tickets to this account for backwards compatibility.&quot;)
+print(&quot;    attribute absent&quot;)
+print(&quot;      -&gt; defaults to RC4. ROASTABLE.&quot;)
+print()
+print(&quot;  THAT LAST ONE is the finding most often reported: the attribute&quot;)
+print(&quot;  was never set, and the absence means RC4.&quot;)
+PY
+cat 03-flags.txt
+
+# --- 4. the graph model, built offline ---
+cat &gt; 04-graph.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;A miniature AD graph and the queries that matter.
+
+You do not need BloodHound to understand it. Once you can see the
+edges on a 40-node graph, the tool is just this with 40,000 nodes.
+&quot;&quot;&quot;
+from collections import defaultdict, deque
+
+class Graph:
+    def __init__(self):
+        self.out = defaultdict(list)          # principal -&gt; [(kind, target)]
+        self.label = {}
+
+    def add_principal(self, name, kind):
+        self.label[name] = kind
+        self.out.setdefault(name, [])
+
+    def add_edge(self, src, kind, dst):
+        self.out[src].append((kind, dst))
+        self.out.setdefault(dst, [])
+
+    def shortest_path(self, src, dst, max_depth=8):
+        &quot;&quot;&quot;BFS. The FIRST path is what a real attacker tries.&quot;&quot;&quot;
+        q, seen = deque([(src, [])]), {src}
+        while q:
+            node, path = q.popleft()
+            if len(path) &gt; max_depth: continue
+            if node == dst: return path
+            for kind, t in self.out[node]:
+                if t not in seen:
+                    seen.add(t)
+                    q.append((t, path + [(kind, t)]))
+        return None
+
+    def all_shortest_to(self, dst):
+        &quot;&quot;&quot;Every principal that can reach dst, at any depth.&quot;&quot;&quot;
+        back = defaultdict(list)
+        for src, edges in self.out.items():
+            for kind, t in edges:
+                back[t].append((src, kind))
+        reach, q, seen = defaultdict(set), deque([(dst, 0)]), {dst}
+        while q:
+            node, d = q.popleft()
+            if d &gt; 6: continue
+            for src, kind in back[node]:
+                reach[dst].add((src, d, kind))
+                if src not in seen:
+                    seen.add(src); q.append((src, d + 1))
+        return reach[dst]
+
+g = Graph()
+for n, k in [(&quot;alice&quot;,&quot;user&quot;), (&quot;bob&quot;,&quot;user&quot;), (&quot;carol&quot;,&quot;user&quot;),
+             (&quot;erin&quot;,&quot;user&quot;), (&quot;svc-backup&quot;,&quot;user&quot;), (&quot;svc-web&quot;,&quot;user&quot;),
+             (&quot;IT Staff&quot;,&quot;group&quot;), (&quot;Helpdesk&quot;,&quot;group&quot;), (&quot;Domain Admins&quot;,&quot;group&quot;),
+             (&quot;Backup Operators&quot;,&quot;group&quot;), (&quot;WKS01&quot;,&quot;computer&quot;),
+             (&quot;WEB01&quot;,&quot;computer&quot;), (&quot;DC01&quot;,&quot;computer&quot;)]:
+    g.add_principal(n, k)
+
+g.add_edge(&quot;alice&quot;, &quot;MemberOf&quot;, &quot;Helpdesk&quot;)
+g.add_edge(&quot;bob&quot;,   &quot;MemberOf&quot;, &quot;IT Staff&quot;)
+g.add_edge(&quot;erin&quot;,  &quot;MemberOf&quot;, &quot;Domain Admins&quot;)           # too easy; the graph finds it
+g.add_edge(&quot;carol&quot;, &quot;MemberOf&quot;, &quot;Helpdesk&quot;)
+g.add_edge(&quot;svc-web&quot;,&quot;MemberOf&quot;, &quot;Backup Operators&quot;)
+g.add_edge(&quot;IT Staff&quot;, &quot;MemberOf&quot;, &quot;Domain Admins&quot;)
+g.add_edge(&quot;svc-backup&quot;, &quot;GenericAll&quot;, &quot;DC01&quot;)             # the shortcut
+g.add_edge(&quot;bob&quot;, &quot;WriteDACL&quot;, &quot;DC01&quot;)                     # a direct one
+g.add_edge(&quot;alice&quot;, &quot;HasSession&quot;, &quot;WEB01&quot;)
+g.add_edge(&quot;carol&quot;, &quot;HasSession&quot;, &quot;WEB01&quot;)
+g.add_edge(&quot;WEB01&quot;, &quot;GenericWrite&quot;, &quot;svc-web&quot;)            # via delegation path
+g.add_edge(&quot;WKS01&quot;, &quot;DCSync&quot;, &quot;DC01&quot;)
+g.add_edge(&quot;svc-backup&quot;, &quot;DCSync&quot;, &quot;DC01&quot;)
+g.add_edge(&quot;svc-backup&quot;, &quot;MemberOf&quot;, &quot;Domain Admins&quot;)
+
+print(&quot;  THE GRAPH&quot;)
+print(&quot;  &quot; + &quot;=&quot;*66)
+for src in sorted(g.out):
+    for kind, dst in g.out[src]:
+        print(f&quot;    {src:&lt;14} --{kind:&lt;12}--&gt; {dst}&quot;)
+
+print(&quot;\n  SHORTEST PATH: alice -&gt; Domain Admins&quot;)
+p = g.shortest_path(&quot;alice&quot;, &quot;Domain Admins&quot;)
+for kind, n in p or []:
+    print(f&quot;    {n:&lt;16} --{kind}--&gt;&quot;)
+print()
+print(&quot;  alice is a member of Helpdesk. She is not in anything&quot;)
+print(&quot;  privileged. But WEB01 has a session of hers, WEB01 can&quot;)
+print(&quot;  GenericWrite on svc-web, svc-web is in Backup Operators,&quot;)
+print(&quot;  and Backup Operators is in Domain Admins. Five hops, and&quot;)
+print(&quot;  nobody would find that by reading a group list.&quot;)
+
+print(&quot;\n  WHO CAN REACH Domain Admins, AND HOW DEEP&quot;)
+for src, depth, kind in sorted(g.all_shortest_to(&quot;Domain Admins&quot;), key=lambda x: (x[1], x[0])):
+    print(f&quot;    depth {depth}  {src:&lt;14} (last edge: {kind})&quot;)
+
+print(&quot;\n  WHO CAN DCSync - and note it is NOT the same set&quot;)
+for src, depth, kind in sorted(g.all_shortest_to(&quot;DC01&quot;), key=lambda x: (x[1], x[0])):
+    if kind == &quot;DCSync&quot;:
+        print(f&quot;    {src:&lt;14} has DCSync&quot;)
+print()
+print(&quot;  svc-backup is in Domain Admins, so it is not surprising.&quot;)
+print(&quot;  WKS01 is not in any group, and it has DCSync.&quot;)
+print(&quot;  A COMPUTER ACCOUNT with DCSync is a Critical finding that&quot;)
+print(&quot;  most hand audits miss, because nobody reads computer objects.&quot;)
+
+print(&quot;\n  SESSIONS - the edges you can use immediately&quot;)
+for src, edges in g.out.items():
+    for kind, dst in edges:
+        if kind == &quot;HasSession&quot;:
+            print(f&quot;    {src:&lt;14} is authenticated to {dst}&quot;)
+print()
+print(&quot;  BloodHound shows this graph. bloodhound-python collects it.&quot;)
+print(&quot;  netexec can enumerate the session edges too, if you have&quot;)
+print(&quot;  administrative rights to the host in question.&quot;)
+PY
+python3 04-graph.py 2&gt;&amp;1 | tee 05-graph.txt
+rm -f 04-graph.py
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>userAccountControl</code>'s bitfield decoded, the three filters you'll<br />
+type constantly, and the line that matters most — <em>the absence of <code>msDS-SupportedEncryptionTypes</code><br />
+defaults to RC4, which means roastable</em>. That's a finding you can confirm with no credentials at<br />
+all.</p>
+<p><strong>Step 4</strong> builds a 13-node graph with a five-hop path from <code>alice</code> to Domain Admins through a<br />
+session, a <code>GenericWrite</code>, and a group nesting — plus a <strong>computer account with DCSync</strong> that<br />
+appears in no group list. That's the class of finding that only the graph surfaces.</p>
+<p><strong>Record:</strong> <code>03-flags.txt</code> and <code>05-graph.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Write the LDAP filter for enabled accounts, and explain the <code>:1.2.840.113556.1.4.803:=</code> part.</li>
+<li>What does <code>DONT_REQ_PREAUTH</code> (0x100000) enable?</li>
+<li>What does <code>TRUSTED_FOR_DELEGATION</code> (0x200000) enable?</li>
+<li>What is the Global Catalog on 3268, and why is anonymous access to it a finding?</li>
+<li>What three edge types does a BloodHound graph contain, and which is most immediately useful?</li>
+<li>Why is an absent <code>msDS-SupportedEncryptionTypes</code> a problem?</li>
+<li>What can a standard authenticated user read that turns graph collection possible?</li>
+<li>Why does collection discipline (single host, LDAP over RPC, secure storage) matter?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>LDAP</strong> → <strong>Active Directory</strong> → <strong>BloodHound</strong> → <strong>Privilege Escalation (Windows)</strong> →<br />
+<strong>Active Directory Trust Paths</strong> → <strong>DCSync</strong>.<br />
+<code>bh-01</code> and <code>bh-02</code> are the tooling; <code>ad-04</code> is where the graph pays off.</p>

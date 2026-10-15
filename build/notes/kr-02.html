@@ -1,0 +1,226 @@
+<h1 id="installing-kali-live-virtual-machine-or-dual-boot">Installing Kali: Live, Virtual Machine, or Dual Boot</h1>
+<h2 id="summary">Summary</h2>
+<p>Three ways to put Kali on a machine, in increasing order of commitment and decreasing order of<br />
+safety. <strong>Choose the virtual machine.</strong> The rest of this curriculum assumes a Kali VM you can<br />
+throw away and rebuild, because you <em>will</em> break it — probably in the very first privilege<br />
+escalation lab, by <code>rm -rf</code>-ing something you meant to <code>rm</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Survives reboot</th>
+<th>Risk to your main OS</th>
+<th>Right for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Live USB</strong></td>
+<td>No</td>
+<td>None</td>
+<td>Trying Kali for the first time, or a machine you do not own</td>
+</tr>
+<tr>
+<td><strong>VM (recommended)</strong></td>
+<td>Yes, as a file</td>
+<td>None</td>
+<td>Everything in this curriculum</td>
+</tr>
+<tr>
+<td><strong>Dual boot</strong></td>
+<td>Yes</td>
+<td>Bootloader conflicts</td>
+<td>If you genuinely want Kali as a primary OS</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-single-decision-that-matters">The single decision that matters</h2>
+<p><strong>Your Kali machine is the attacker and your lab VMs are the targets. Do not run intentionally<br />
+vulnerable services on Kali itself.</strong></p>
+<p>This is not superstition. The moment your practice target has a working shell as root, you have<br />
+a root shell on the box that also holds your SSH keys, your browser session, your API tokens and<br />
+your progress history. Learners have genuinely compromised their own attacker machine by<br />
+pivoting out of a lab exercise. Keep them separate. See <code>docs/LAB-SETUP.md</code>.</p>
+<h2 id="virtualbox-on-kali">VirtualBox on Kali</h2>
+<p>Kali ships VirtualBox by default. If it is missing:</p>
+<pre><code class="language-bash">sudo apt update &amp;&amp; sudo apt install virtualbox
+</code></pre>
+<p>A Kali VM you will actually want to use needs:</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Minimum</th>
+<th>Recommended</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RAM</td>
+<td>2048 MB</td>
+<td>4096 MB</td>
+</tr>
+<tr>
+<td>vCPU</td>
+<td>2</td>
+<td>4</td>
+</tr>
+<tr>
+<td>Disk</td>
+<td>40 GB</td>
+<td>80 GB SSD</td>
+</tr>
+<tr>
+<td>Video</td>
+<td>128 MB, 3D off</td>
+<td>256 MB</td>
+</tr>
+<tr>
+<td>Network</td>
+<td><strong>2 adapters</strong></td>
+<td>2 adapters</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Two network adapters, always.</strong> Adapter 1: NAT (for updates and package installs).<br />
+Adapter 2: <strong>Host-only</strong> (for your lab range — this is the isolated network your targets live on<br />
+and it is what makes scanning them legal and invisible to your real network).</p>
+<h3 id="installer-notes">Installer notes</h3>
+<ul>
+<li>Choose <strong>Graphical installer</strong> unless you want a typing exercise.</li>
+<li>Pick your keyboard layout properly; a wrong layout makes <code>~</code> and backtick unreachable, and you<br />
+  will need those constantly in shell scripting.</li>
+<li><strong>Do not install a bootloader.</strong> You are a guest, not a dual-boot user.</li>
+<li>Enable <strong>Shared clipboard</strong> and <strong>Shared folder</strong> — shared clipboard makes copying commands<br />
+  out of these notes into the VM trivial.</li>
+<li>Consider a snapshot immediately after install.</li>
+</ul>
+<h2 id="dual-boot-honestly">Dual boot, honestly</h2>
+<p>Dual boot means Kali can write to the partition table. Kali's rolling nature means you will<br />
+occasionally have a kernel that will not boot, or a broken graphics driver, and the fix requires<br />
+booting something else. The recovery options are:</p>
+<ul>
+<li>A live USB (you would need one)</li>
+<li>A separate USB with <code>chroot</code>/<code>grub-install</code> tooling</li>
+<li>Windows putting itself back in charge</li>
+</ul>
+<p>That is a real cost, and it is why dual boot is last on the list. If you already run Linux and<br />
+understand partition management, it is a legitimate choice — just make a backup of anything you<br />
+cannot replace.</p>
+<h2 id="live-usb">Live USB</h2>
+<p>Worth twenty minutes to see the environment before committing:</p>
+<pre><code class="language-bash"># from a Linux box, or use balenaEtcher on Windows/Mac
+lsblk                                   # find the USB device - double check the size
+sudo dd if=kali-linux-*.iso of=/dev/sdX bs=4M status=progress conv=fdatasync sync
+</code></pre>
+<p>Boot it and choose "Try Kali" (not "Install"). Live is ephemeral: nothing persists between boots<br />
+unless you create a persistence partition. Useful for a quick look, useless for this curriculum.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>VM / guest</strong></td>
+<td>The virtual machine; from Kali's perspective it thinks it is real hardware</td>
+</tr>
+<tr>
+<td><strong>Host</strong></td>
+<td>The physical machine running the hypervisor</td>
+</tr>
+<tr>
+<td><strong>Hypervisor / VirtualBox</strong></td>
+<td>The layer that presents fake hardware to the guest</td>
+</tr>
+<tr>
+<td><strong>NAT adapter</strong></td>
+<td>Guest traffic appears to come from the host; outbound works, inbound does not</td>
+</tr>
+<tr>
+<td><strong>Host-only adapter</strong></td>
+<td>A private network between host and guests, no internet, <strong>no route to your LAN</strong></td>
+</tr>
+<tr>
+<td><strong>Bridged adapter</strong></td>
+<td>Guest appears on your physical network — <strong>do not use this for lab targets</strong></td>
+</tr>
+<tr>
+<td><strong>Snapshot</strong></td>
+<td>A frozen copy of VM state; the cheapest undo in computing</td>
+</tr>
+<tr>
+<td><strong>vCPU / vRAM</strong></td>
+<td>Virtual processor cores and virtual RAM</td>
+</tr>
+<tr>
+<td><strong>Shared folder</strong></td>
+<td>A host directory exposed inside the guest (VirtualBox feature, needs Guest Additions)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># Is this a VM, and which hypervisor? (works on the guest)
+sudo dmidecode -s system-manufacturer
+systemd-detect-virt
+hostnamectl | grep -i virtualization
+
+# What network interfaces do I have, and which is which?
+ip -br addr
+ip route
+nmcli device status 2&gt;/dev/null | head
+
+# Confirm the host-only interface exists (vboxnet0 typically)
+ip -br addr | grep -E 'vboxnet|virbr'
+
+# CPU / memory / disk reality check
+lscpu | grep -E 'Model name|^CPU\(s\)'
+free -h
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+df -h /
+
+# Disk usage of Kali's tool data - useful before you fill the disk with captures
+du -sh /usr/share/* 2&gt;/dev/null | sort -h | tail -15
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build the VM this curriculum assumes, and prove the two-adapter isolation works.</p>
+<pre><code class="language-bash"># On the HOST (your Kali laptop)
+VBoxManage list vms
+VBoxManage list hostonlyifs
+
+# Create the isolated lab network if it does not exist
+VBoxManage hostonlyif create
+VBoxManage hostonlyif ipaddr vboxnet0 192.168.56.1
+
+# Configure your Kali VM
+VM=YourVMName
+VBoxManage modifyvm $VM --memory 4096 --cpus 4
+VBoxManage modifyvm $VM --nic1 nat --nic2 hostonly --hostonlyif2 vboxnet0
+VBoxManage modifyvm $VM --clipboard-mode bidirectional
+VBoxManage sharedfolder add $VM labshare --hostpath ~/aegis --name labshare
+
+# Snapshot immediately
+VBoxManage snapshot $VM take &quot;pristine&quot; --description &quot;fresh install&quot;
+
+# INSIDE the guest, prove you are isolated from your real LAN
+ip -br addr
+ip route
+# You should see vboxnet0 (192.168.56.x) and NOT your home router's subnet
+</code></pre>
+<p><strong>The check that matters:</strong> inside the guest, <code>ip route</code> must show <code>192.168.56.0/24</code> via the<br />
+host-only adapter and nothing resembling your real home LAN (<code>192.168.1.0/24</code> in my case). If<br />
+you see your home LAN, you have bridged something by accident — fix it before scanning anything.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why must a lab VM have two network adapters rather than one?</li>
+<li>What is the specific danger of running intentionally vulnerable services on your Kali host?</li>
+<li>Your VM will not boot after a Kali update. Name two recovery options.</li>
+<li>Why does <code>systemd-detect-virt</code> matter during an engagement?</li>
+<li>When would host-only be wrong, and what would you use instead?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Virtualization</strong> → <strong>Lab Snapshots</strong> → <strong>Practice Range</strong> → <strong>Rules of Engagement</strong>.<br />
+This lecture is why every other lab in AEGIS can say "localhost only" and mean it.</p>

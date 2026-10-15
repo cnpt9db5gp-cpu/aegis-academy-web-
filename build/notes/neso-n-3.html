@@ -1,0 +1,222 @@
+<h1 id="mac-protocols-csmacd-and-switching">MAC Protocols, CSMA/CD and Switching</h1>
+<h2 id="summary">Summary</h2>
+<p>How a shared medium became a switched one, and the attack surface each stage introduced.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>CSMA/CD</strong>: listen, transmit, detect collision, back off exponentially. Historical — switched<br />
+  Ethernet made it unnecessary</li>
+<li><strong>Collision domain</strong>: a hub shares one; a switch gives one per port; full duplex removes it</li>
+<li><strong>Broadcast domain</strong>: unchanged by switching; only routers and VLANs split it</li>
+<li><strong>Store-and-forward vs cut-through</strong> trade latency for reliability</li>
+<li><strong>STP/RSTP</strong> prevents loops, and its own design creates a well-known hijack opportunity</li>
+<li><strong>Port security</strong>, MAC limits and DHCP snooping exist because the Layer 2 threat model is weak</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>CSMA/CD</strong></td>
+<td>Carrier sense multiple access with collision detection</td>
+</tr>
+<tr>
+<td><strong>Backoff</strong></td>
+<td>Exponential random wait after a collision</td>
+</tr>
+<tr>
+<td><strong>Collision domain</strong></td>
+<td>Where frames can collide</td>
+</tr>
+<tr>
+<td><strong>Broadcast domain</strong></td>
+<td>Where broadcasts propagate</td>
+</tr>
+<tr>
+<td><strong>Store-and-forward</strong></td>
+<td>Buffer the whole frame before forwarding</td>
+</tr>
+<tr>
+<td><strong>Cut-through</strong></td>
+<td>Forward as soon as the destination is known</td>
+</tr>
+<tr>
+<td><strong>STP / RSTP</strong></td>
+<td>Spanning tree; prevents switching loops</td>
+</tr>
+<tr>
+<td><strong>BPDU</strong></td>
+<td>Bridge protocol data unit</td>
+</tr>
+<tr>
+<td><strong>Root bridge</strong></td>
+<td>The elected STP reference</td>
+</tr>
+<tr>
+<td><strong>Port security</strong></td>
+<td>Limit MAC addresses per port</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- switching on this host ---
+ip link show type bridge 2&gt;/dev/null
+lsmod | grep bridge
+ls /sys/class/net/*/bridge/ 2&gt;/dev/null | head
+ls /sys/class/net/*/brif/ 2&gt;/dev/null | head
+
+# --- what a bridge would learn (its forwarding table) ---
+bridge fdb show 2&gt;/dev/null || echo &quot;(needs a bridge interface)&quot;
+ip neigh show
+
+# --- STP on the wire: BPDUs are sent to a reserved multicast address ---
+command -v tcptdump
+sudo timeout 10 tcpdump -i any -n -e &quot;ether proto 0x0800 and ether dst 01:80:c2:00:00:00&quot; 2&gt;/dev/null | head -5
+echo &quot;  (STP BPDUs use destination 01:80:c2:00:00:00)&quot;
+
+# --- the hub-vs-switch distinction, visible in error counters ---
+cat /sys/class/net/*/statistics/collisions 2&gt;/dev/null
+ip -s link | grep -A4 -E &quot;^[0-9]+: (lo|eth)&quot; | head -20
+
+# --- flow control at layer 2 ---
+ip link show eth0 2&gt;/dev/null | grep -oE &quot;txqueuelen [0-9]+&quot;
+tc -s qdisc show 2&gt;/dev/null | head -5
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> observe switching behaviour on your own host, and understand STP's role and risk.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-n-3 &amp;&amp; cd ~/aegis/labs/neso-n-3
+
+# --- 1. build a real bridge on this machine and learn from it ---
+sudo bash -c '
+  set -e
+  ip link add br-aegis type bridge 2&gt;/dev/null || { echo &quot;cannot create bridge&quot;; exit 1; }
+  ip link set br-aegis up
+  echo &quot;=== the bridge exists ===&quot;
+  ip -d link show br-aegis
+  echo
+  echo &quot;=== its forwarding database (empty until traffic flows) ===&quot;
+  bridge fdb show br-aegis 2&gt;/dev/null | head
+  echo
+  echo &quot;=== bridge link state ===&quot;
+  bridge link show 2&gt;/dev/null | head
+  ip link del br-aegis
+  echo &quot;(removed)&quot;
+' 2&gt;&amp;1 | tee 01-bridge.txt
+
+# --- 2. the switch learning algorithm, run by hand ---
+python3 - &lt;&lt;'PY' | tee 02-learning.txt
+MAC_TABLE = {}      # mac -&gt; port
+
+def switch_receive(frame_src, dst, ingress_port):
+    &quot;&quot;&quot;Learn from the SOURCE. Forward based on the DESTINATION.&quot;&quot;&quot;
+    if frame_src not in MAC_TABLE:
+        action = &quot;LEARN (new entry)&quot;
+    else:
+        action = f&quot;known -&gt; port {MAC_TABLE[frame_src]}&quot;
+    MAC_TABLE[frame_src] = ingress_port
+
+    if dst in MAC_TABLE:
+        out = f&quot;forward to port {MAC_TABLE[dst]}&quot;
+    elif dst == &quot;ff:ff:ff:ff:ff:ff&quot;:
+        out = &quot;FLOOD to every other port  &lt;- broadcasts are never controlled&quot;
+    else:
+        out = &quot;FLOOD (destination not yet known)&quot;
+    print(f&quot;  src={frame_src} dst={dst} in=port{ingress_port}  {action}; {out}&quot;)
+
+print(&quot;=== normal traffic ===&quot;)
+switch_receive(&quot;aa:bb:cc:00:00:01&quot;, &quot;aa:bb:cc:00:00:02&quot;, 1)
+switch_receive(&quot;aa:bb:cc:00:00:02&quot;, &quot;aa:bb:cc:00:00:01&quot;, 2)
+print()
+print(&quot;=== an unknown unicast, then a broadcast ===&quot;)
+switch_receive(&quot;aa:bb:cc:00:00:03&quot;, &quot;aa:bb:cc:00:00:09&quot;, 3)
+switch_receive(&quot;aa:bb:cc:00:00:03&quot;, &quot;ff:ff:ff:ff:ff:ff&quot;, 3)
+print()
+print(&quot;=== the security consequences, mechanically ===&quot;)
+print(&quot;1. Learning is from the SOURCE and is unauthenticated -&gt; forge the source, own the table.&quot;)
+print(&quot;2. Flooding happens for unknown destinations -&gt; MAC flood forces everything to flood.&quot;)
+print(&quot;3. Broadcasts always flood -&gt; ARP poisoning reaches every host in the domain.&quot;)
+PY
+
+# --- 3. MAC flooding, conceptually, and why STP exists ---
+cat &gt; 03-macflood.md &lt;&lt;'EOF'
+# MAC flooding and why STP exists
+
+## Loops are fatal without a control protocol
+Two switches connected by two cables, each forwarding a broadcast, form a loop.
+Frames multiply without bound until the link saturates. Real networks need
+Spanning Tree to disable redundant paths.
+
+## MAC flooding attacks the other side of that same trade
+A switch has a fixed-size CAM table. Filling it with thousands of fake source
+addresses makes it unable to learn, so it falls back to flooding unknown
+destinations - and everything the attacker sends becomes visible to everything.
+
+**Lab-only demonstration:** tools exist for this (`yersinia -p dos`).
+Only ever against hardware you own.
+
+## The defensive side
+- Port security: cap the MAC count per port
+- DHCP snooping: bind IP-to-MAC to a port
+- Dynamic ARP inspection: reject ARP whose source MAC does not match the port
+- Monitor for a sudden drop in switch CPU or a CAM table that never fills
+EOF
+cat 03-macflood.md
+
+# --- 4. STP BPDUs, and the reason STP is a security concern ---
+cat &gt; 04-stp.md &lt;&lt;'EOF'
+# Spanning Tree Protocol as an attack surface
+
+STP elects a root bridge using BPDUs sent to the reserved multicast address
+01:80:c2:00:00:00, from the bridge ID (priority + MAC), with a path cost
+and a timer set by the root.
+
+**The attack is structural, not a bug:** BPDUs are unauthenticated and
+unencrypted, so anything that can speak on the segment can participate.
+
+Consequences:
+1. Claim a lower bridge ID and become root -&gt; dictate the topology.
+2. Claim lower cost paths -&gt; redirect traffic through the attacker.
+3. Send BPDUs continuously -&gt; force constant topology reconvergence (DoS).
+
+Mitigations: BPDU Guard, Root Guard, PortFast on edge ports, and
+authentication where the platform supports it.
+
+**General lesson:** any protocol in which participation is discovered by
+broadcasting is trusting whoever answers first. That is the same shape as
+rogue DHCP and evil-twin WiFi.
+EOF
+cat 04-stp.md
+
+# --- 5. collision and error counters on this host ---
+{
+  echo &quot;=== interface statistics ===&quot;
+  ip -s link | head -20
+  echo
+  echo &quot;=== collisions, if reported ===&quot;
+  for i in /sys/class/net/*/statistics; do
+    n=$(basename $(dirname $i))
+    printf &quot;  %-8s collisions=%s carrier_errors=%s rx_errors=%s\n&quot; &quot;$n&quot; \
+      &quot;$(cat $i/collisions 2&gt;/dev/null || echo n/a)&quot; \
+      &quot;$(cat $i/carrier_errors 2&gt;/dev/null || echo n/a)&quot; \
+      &quot;$(cat $i/rx_errors 2&gt;/dev/null || echo n/a)&quot;
+  done
+} 2&gt;&amp;1 | tee 05-counters.txt
+</code></pre>
+<p><strong>Step 2 is the key insight delivered mechanically</strong> — switching's behaviour produces the<br />
+vulnerability, and the code shows exactly why.</p>
+<p><strong>Record:</strong> <code>02-learning.txt</code> and <code>03-macflood.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What problem did CSMA/CD solve, and why is it obsolete?</li>
+<li>What is the difference between a collision domain and a broadcast domain?</li>
+<li>Store-and-forward versus cut-through — what is traded?</li>
+<li>Why does a switch flood frames with an unknown destination?</li>
+<li>What is the security weakness in STP, stated in one sentence?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Switching</strong> → <strong>MAC Table</strong> → <strong>MAC Flooding</strong> → <strong>Broadcast Domain</strong> → <strong>Segmentation</strong> →<br />
+<strong>Rogue DHCP</strong>.</p>

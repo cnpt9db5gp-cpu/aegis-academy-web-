@@ -1,0 +1,223 @@
+<h1 id="your-first-session-terminal-user-and-home">Your First Session: Terminal, User, and HOME</h1>
+<h2 id="summary">Summary</h2>
+<p>Your first interactive session on a Linux machine is a conversation between three parties: <strong>you</strong><br />
+(the shell, reading what you type), the <strong>shell</strong> (a program that interprets your line and asks<br />
+the kernel to do things), and the <strong>kernel</strong> (which owns the hardware and decides what is allowed).</p>
+<p>Almost every "this doesn't work" moment on a new Linux install traces back to a misunderstanding<br />
+about which of those three is responsible for what.</p>
+<h2 id="the-three-layer-model">The three-layer model</h2>
+<pre><code>   you type:  ls -la /etc
+        ↓
+   SHELL      reads the line, splits it into words, expands globs and variables,
+              finds `ls` on PATH, waits for it to finish
+        ↓
+   KERNEL     resolves the path, opens files, reads directories, enforces permissions
+        ↓
+   HARDWARE   the disk
+</code></pre>
+<p>The practical consequence: <strong>when a command does not exist, that is the shell's problem. When a<br />
+command runs and gives "Permission denied", that is the kernel's problem.</strong> Knowing which layer<br />
+is complaining tells you where to look.</p>
+<h2 id="your-identity-on-the-machine">Your identity on the machine</h2>
+<pre><code class="language-bash">whoami        # nwpcs
+id            # uid=1000(nwpcs) gid=1000(nwpcs) groups=1000(nwpcs),27(sudo),...
+echo $HOME    # /home/nwpcs
+echo $USER    # nwpcs
+</code></pre>
+<p>Note <code>groups=</code> above. Being in the <code>sudo</code> group is what lets you become root <em>temporarily</em>. On<br />
+Kali your default user is a <strong>non-root user with sudo</strong> — this is correct and deliberate. A<br />
+terminal where the prompt is <code>root@kali</code> all the time is a machine that will lose data.</p>
+<h2 id="prompt-anatomy">Prompt anatomy</h2>
+<pre><code>nwpcs@kali:/home/nwpcs$ █
+ └──┬──┘ └┬┘ └──────┬─────┘ └┬┘
+   user   host      cwd      prompt
+</code></pre>
+<ul>
+<li><code>user</code> — who the shell thinks you are</li>
+<li><code>host</code> — the machine name</li>
+<li><code>cwd</code> — your <strong>working directory</strong>, where relative paths resolve</li>
+<li><code>$</code> — you are unprivileged. <code>#</code> would mean root.</li>
+</ul>
+<p>The cwd is the piece beginners misread most. <code>cat /etc/passwd</code> works from anywhere (absolute<br />
+path). <code>cat passwd</code> only works if there happens to be a <code>passwd</code> in your <em>current directory</em>.</p>
+<h2 id="getting-oriented-in-ten-commands">Getting oriented in ten commands</h2>
+<pre><code class="language-bash">pwd              # where am I
+whoami           # who am I
+uname -a         # what machine
+cat /etc/os-release   # what distribution
+ls -la            # what's here (all files, long)
+df -h .           # how much space is left on this filesystem
+free -h           # how much memory
+ps aux | head     # what is running
+ss -tulpn         # what is listening on the network
+history | tail    # what did I just do
+</code></pre>
+<h2 id="the-ten-commands-you-will-use-every-single-day">The ten commands you will use every single day</h2>
+<pre><code class="language-bash"># 1. Where am I?
+pwd
+
+# 2. What's in here?
+ls -la
+
+# 3. Change directory (absolute or relative)
+cd /etc
+cd ..
+cd -
+
+# 4. Make and remove
+mkdir -p ~/aegis/labs/tier0
+touch notes.txt
+rm notes.txt
+rm -r ~/aegis/labs/scratch        # -r recursive. ALWAYS read the path twice.
+
+# 5. Read a file
+cat /etc/passwd
+less /etc/passwd                 # q to quit, / to search
+head -20 /etc/passwd
+tail -f /var/log/syslog          # follow, live. Ctrl+C to stop
+
+# 6. Copy and move
+cp file.txt file.bak
+cp -r dir/ dir-copy/
+mv old new
+
+# 7. Find
+find . -name &quot;*.conf&quot;
+find / -perm -4000 -type f 2&gt;/dev/null      # SUID files
+which nmap; command -v nmap                 # where is this tool?
+
+# 8. File permissions
+chmod +x script.sh
+chmod 600 secrets.txt
+ls -l secrets.txt
+
+# 9. Disk and users
+df -h
+du -sh ~/Downloads
+sudo chown -R nwpcs:nwpcs ~/aegis
+
+# 10. Pipes - the real power of a shell
+ps aux | grep -v grep | grep systemd
+cat /etc/passwd | cut -d: -f1
+ls -la ~/aegis/labs/kr-01 | wc -l
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Shell</strong></td>
+<td>The command interpreter: <code>bash</code>, <code>zsh</code>, <code>fish</code></td>
+</tr>
+<tr>
+<td><strong>Terminal (TTY)</strong></td>
+<td>The character-device interface giving you a line-oriented session</td>
+</tr>
+<tr>
+<td><strong>Kernel</strong></td>
+<td>Owns hardware, memory and permissions; the only privileged layer</td>
+</tr>
+<tr>
+<td><strong>Userspace</strong></td>
+<td>Everything that is not the kernel — your programs</td>
+</tr>
+<tr>
+<td><strong>UID 0</strong></td>
+<td>root; the identity with no restriction</td>
+</tr>
+<tr>
+<td><strong><code>sudo</code></strong></td>
+<td>Run one command as another user, with the group membership as the gate</td>
+</tr>
+<tr>
+<td><strong>PATH</strong></td>
+<td>The ordered list of directories searched for an executable</td>
+</tr>
+<tr>
+<td><strong>Process</strong></td>
+<td>A running program, with a PID and an owner</td>
+</tr>
+<tr>
+<td><strong>stdin / stdout / stderr</strong></td>
+<td>File descriptor 0 / 1 / 2</td>
+</tr>
+<tr>
+<td><strong>Exit code</strong></td>
+<td>0 means success; anything else means failure. Scripts depend on this.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> become fluent with orientation, paths, permissions and pipes — and produce a map<br />
+of your own machine.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/kr-03 &amp;&amp; cd ~/aegis/labs/kr-03
+
+# --- Identity and location ---
+{
+  echo &quot;=== IDENTITY ===&quot;
+  whoami; id; echo &quot;HOME=$HOME&quot;; echo &quot;SHELL=$SHELL&quot;
+  echo
+  echo &quot;=== SYSTEM ===&quot;
+  uname -a
+  cat /etc/os-release | head -3
+  echo
+  echo &quot;=== PATH ===&quot;
+  echo $PATH | tr ':' '\n'
+} | tee 01-orientation.txt
+
+# --- Prove cwd matters ---
+cd /tmp
+echo &quot;now in: $(pwd)&quot;
+ls passwd          # will fail: no passwd in /tmp
+cat /etc/passwd | head -2   # absolute path always works
+cd ~/aegis/labs/kr-03
+
+# --- Permissions, hands on ---
+echo &quot;secret&quot; &gt; secret.txt
+ls -l secret.txt             # -rw-r--r--
+chmod 600 secret.txt
+ls -l secret.txt             # -rw-------
+chmod 644 secret.txt
+
+# --- The 20 most recent sudo uses: a real forensic finding on your own box ---
+sudo -l
+sudo grep -i &quot;authentication failure&quot; /var/log/auth.log 2&gt;/dev/null | tail -20 \
+  &gt; 02-auth-failures.txt || echo &quot;(auth.log not readable or empty)&quot; &gt; 02-auth-failures.txt
+wc -l 02-auth-failures.txt
+
+# --- What is listening right now? ---
+ss -tulpn | tee 03-listening.txt
+# Read it: which of these ports do you recognise? Which are 0.0.0.0 (world-reachable)?
+
+# --- Pipes: extract structured data ---
+ps -eo user,pid,comm --sort=-pid | head -15 | tee 04-processes.txt
+cat /etc/passwd | cut -d: -f1,7 | grep -v nologin | grep -v false | head -20
+
+# --- A real enumeration habit: find everything SUID ---
+find / -perm -4000 -type f 2&gt;/dev/null | tee 05-suid.txt
+wc -l 05-suid.txt
+echo &quot;Read these. Every one is a privilege-escalation candidate on a real target.&quot;
+</code></pre>
+<p><strong>Do not skip <code>05-suid.txt</code>.</strong> You will run the identical command in <code>pr-02</code> against your lab<br />
+VM and it is how real escalation works.</p>
+<p><strong>Record:</strong> in your scratchpad, note the listening ports you did not recognise, and the first<br />
+three SUID binaries. Both become relevant in Tier 1 and Tier 3.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>A command prints <code>bash: foo: command not found</code>. Which layer is complaining, and how do you<br />
+   check whether <code>foo</code> exists?</li>
+<li>Why does <code>cat passwd</code> fail in <code>/tmp</code> but <code>cat /etc/passwd</code> work?</li>
+<li>What is the difference between <code>$</code> and <code>#</code> in a shell prompt, and what does it tell you?</li>
+<li>Why does <code>rm -r</code> deserve more respect than <code>rm</code>?</li>
+<li>You ran <code>tail -f /var/log/syslog</code> and cannot get your prompt back. What did you do to cause<br />
+   this and how do you exit?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Shell</strong> → <strong>Terminal &amp; TTY</strong> → <strong>File Descriptors</strong> → <strong>Pipes &amp; Redirection</strong>.<br />
+The last two are what make <code>cat x | grep y | awk '{print $1}'</code> work — and the same mechanism is<br />
+how an attacker chains tools together.</p>

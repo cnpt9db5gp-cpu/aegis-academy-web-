@@ -1,0 +1,295 @@
+<h1 id="lists-dictionaries-and-tuples">Lists, Dictionaries and Tuples</h1>
+<h2 id="summary">Summary</h2>
+<p>Two structures cover most of what you will write:</p>
+<ul>
+<li><strong>List</strong> — ordered, mutable sequence. For anything you iterate, sort or filter.</li>
+<li><strong>Dict</strong> — key→value mapping. For structured records and for counting.</li>
+</ul>
+<p>A <strong>tuple</strong> is an immutable sequence, used for records and as dict keys.</p>
+<p>For security, dicts represent a single finding and lists of dicts represent a scan result. Getting<br />
+that shape right early saves refactoring later.</p>
+<h2 id="lists">Lists</h2>
+<pre><code class="language-python">ports = [22, 80, 443]
+ports.append(8080)
+ports.insert(0, 21)
+ports.remove(80)
+del ports[0]
+ports.extend([8081, 9000])
+popped = ports.pop()               # removes and returns
+ports.sort()
+ports.sort(reverse=True)
+sliced = ports[1:3]
+found = 8080 in ports
+index = ports.index(443)           # ValueError if absent
+
+# comprehensions
+open_ports = [p for p in ports if 1 &lt;= p &lt;= 1024]
+labels    = [f&quot;{p}/tcp&quot; for p in ports]
+active    = [h for h in hosts if h[&quot;state&quot;] == &quot;open&quot;]
+</code></pre>
+<h2 id="dicts">Dicts</h2>
+<pre><code class="language-python">finding = {
+    &quot;host&quot;: &quot;10.0.0.5&quot;, &quot;port&quot;: 445, &quot;service&quot;: &quot;smb&quot;,
+    &quot;version&quot;: &quot;Samba 4.6.2&quot;, &quot;cve&quot;: [&quot;CVE-2020-27840&quot;],
+}
+
+finding[&quot;port&quot;]                     # KeyError if missing
+finding.get(&quot;cve&quot;, [])              # safe default
+finding.setdefault(&quot;cvss&quot;, 0.0)      # set only if absent
+&quot;host&quot; in finding                   # membership (NOT in finding.values())
+del finding[&quot;cvss&quot;]
+finding.update({&quot;exploitable&quot;: True})
+
+for key, value in finding.items(): ...
+for key in finding: ...
+list(finding.keys())
+list(finding.values())
+</code></pre>
+<h3 id="counting-the-most-common-dict-use">Counting — the most common dict use</h3>
+<pre><code class="language-python">counts = {}
+for line in open(&quot;log.txt&quot;, errors=&quot;replace&quot;):
+    ip = line.split()[-1]
+    counts[ip] = counts.get(ip, 0) + 1
+</code></pre>
+<p><code>collections.Counter</code> does it properly:</p>
+<pre><code class="language-python">from collections import Counter, defaultdict
+
+counts = Counter()
+with open(&quot;log.txt&quot;, errors=&quot;replace&quot;) as f:
+    for line in f:
+        counts[line.split()[-1]] += 1
+counts.most_common(10)
+
+hosts = Counter(h for h in open(&quot;hosts.txt&quot;) if h.strip())
+
+attempts = defaultdict(list)
+attempts[&quot;10.0.0.5&quot;].append(&quot;ssh&quot;)      # no KeyError even on first use
+</code></pre>
+<h2 id="tuples">Tuples</h2>
+<pre><code class="language-python">target = (&quot;10.0.0.5&quot;, 445)      # a record that must not change
+port, proto = target           # unpacking
+
+a, b = 1, 2
+a, b = b, a                   # swap
+
+seen = {}
+seen[(&quot;10.0.0.5&quot;, 445)] = {&quot;version&quot;: &quot;Samba 4.6.2&quot;, &quot;state&quot;: &quot;open&quot;}
+</code></pre>
+<p>Tuples are hashable, so they work as dict keys — which is exactly how you key a finding by<br />
+host+port.</p>
+<h2 id="the-shape-of-a-real-result">The shape of a real result</h2>
+<pre><code class="language-python">findings = [
+    {&quot;host&quot;: &quot;127.0.0.1&quot;, &quot;port&quot;: 22,  &quot;service&quot;: &quot;ssh&quot;,  &quot;state&quot;: &quot;open&quot;},
+    {&quot;host&quot;: &quot;127.0.0.1&quot;, &quot;port&quot;: 80,  &quot;service&quot;: &quot;http&quot;, &quot;state&quot;: &quot;open&quot;},
+    {&quot;host&quot;: &quot;127.0.0.1&quot;, &quot;port&quot;: 443, &quot;service&quot;: &quot;ssl&quot;,  &quot;state&quot;: &quot;closed&quot;},
+]
+
+open_findings = [f for f in findings if f[&quot;state&quot;] == &quot;open&quot;]
+
+by_host = {}
+for f in findings:
+    by_host.setdefault(f[&quot;host&quot;], []).append(f)
+
+summary = {
+    &quot;total_ports&quot;: len(findings),
+    &quot;open_ports&quot;: len(open_findings),
+    &quot;services&quot;: sorted({f[&quot;service&quot;] for f in open_findings}),
+}
+</code></pre>
+<h2 id="mutability-traps">Mutability traps</h2>
+<pre><code class="language-python">a = [1, 2, 3]
+b = a            # another NAME for the same list
+b.append(4)
+print(a)         # [1, 2, 3, 4]  &lt;- surprise
+
+b = a.copy()     # or list(a), or a[:]
+b.append(5)
+print(a)         # [1, 2, 3, 4]
+
+rows = [[] for _ in range(3)]     # correct: three separate lists
+bad  = [[]] * 3                   # WRONG: three references to one list
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>List</strong></td>
+<td>Ordered, mutable sequence</td>
+</tr>
+<tr>
+<td><strong>Tuple</strong></td>
+<td>Ordered, immutable sequence</td>
+</tr>
+<tr>
+<td><strong>Dict</strong></td>
+<td>Key→value mapping, insertion ordered</td>
+</tr>
+<tr>
+<td><strong><code>.get()</code></strong></td>
+<td>Safe read with a default</td>
+</tr>
+<tr>
+<td><strong>Comprehension</strong></td>
+<td><code>[expr for x in it if cond]</code></td>
+</tr>
+<tr>
+<td><strong>Aliasing</strong></td>
+<td>Two names pointing at one mutable object</td>
+</tr>
+<tr>
+<td><strong><code>Counter</code></strong></td>
+<td>Purpose-built counting from <code>collections</code></td>
+</tr>
+<tr>
+<td><strong><code>defaultdict</code></strong></td>
+<td>Dict that auto-creates missing keys</td>
+</tr>
+<tr>
+<td><strong>Hashable</strong></td>
+<td>Can be a dict key (tuples, strings; not lists)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- Counter on a real log ---
+python3 - &lt;&lt;'PY'
+from collections import Counter
+import re
+c = Counter()
+with open(&quot;/var/log/auth.log&quot;, errors=&quot;replace&quot;) as f:
+    for line in f:
+        if m := re.search(r&quot;from ([\d.]+)&quot;, line): c[m.group(1)] += 1
+for ip, n in c.most_common(10): print(f&quot;{ip:&lt;20} {n}&quot;)
+PY
+
+# --- aliasing, demonstrated ---
+python3 - &lt;&lt;'PY'
+a=[1,2,3]; b=a; b.append(4); print(&quot;aliased  :&quot;, a)
+c=[1,2,3]; d=c.copy(); d.append(5); print(&quot;copied   :&quot;, c)
+rows=[[] for _ in range(3)]; rows[0].append(1); print(&quot;[[]for_]:&quot;, rows)
+bad=[[]]*3; bad[0].append(1); print(&quot;[[]]*3   :&quot;, bad)
+PY
+
+# --- structured results from a scan ---
+nmap -sV 127.0.0.1 -oG /tmp/s.gnmap 2&gt;/dev/null
+python3 - &lt;&lt;'PY'
+import re
+findings = []
+for line in open(&quot;/tmp/s.gnmap&quot;):
+    m = re.search(r&quot;Host: ([\d.]+).*Ports: (\d+)/(\w+)/(\w+)\s+//(.*)&quot;, line)
+    if m:
+        findings.append({&quot;host&quot;: m.group(1), &quot;port&quot;: int(m.group(2)),
+                         &quot;proto&quot;: m.group(3), &quot;state&quot;: m.group(4),
+                         &quot;service&quot;: m.group(5).split()[0]})
+print(f&quot;{len(findings)} entries&quot;)
+for f in findings: print(f&quot;  {f['port']:&lt;6}{f['proto']:&lt;6}{f['state']:&lt;10}{f['service']}&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a structured finding store and hand it straight into vulnerability research.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/py-04 &amp;&amp; cd ~/aegis/labs/py-04
+
+nmap -sV -sC -p- 127.0.0.1 -oN scan.txt -oG scan.gnmap 2&gt;/dev/null
+
+cat &gt; findings.py &lt;&lt;'PY'
+import re, sys, json, collections
+
+PORT_RE = re.compile(
+    r&quot;^(?P&lt;port&gt;\d+)/(?P&lt;proto&gt;tcp|udp)\s+(?P&lt;state&gt;\S+)\s+(?P&lt;service&gt;\S+)(?:\s+(?P&lt;version&gt;.+))?$&quot;)
+
+def parse_txt(path):
+    findings = []
+    with open(path, errors=&quot;replace&quot;) as f:
+        for line in f:
+            m = PORT_RE.match(line.rstrip())
+            if not m: continue
+            d = m.groupdict()
+            d[&quot;port&quot;] = int(d[&quot;port&quot;])
+            d[&quot;version&quot;] = (d[&quot;version&quot;] or &quot;&quot;).strip()
+            findings.append(d)
+    return findings
+
+def normalise_version(v):
+    # '2.4.49 ((Debian))' -&gt; '2.4.49'
+    m = re.search(r&quot;(\d+(?:\.\d+)+)&quot;, v or &quot;&quot;)
+    return m.group(1) if m else None
+
+def summarise(findings):
+    by_service = collections.defaultdict(list)
+    by_state = collections.Counter()
+    for f in findings:
+        by_service[f[&quot;service&quot;]].append(f)
+        by_state[f[&quot;state&quot;]] += 1
+    versions = {f[&quot;service&quot;]: normalise_version(f[&quot;version&quot;])
+                for f in findings if f[&quot;version&quot;]}
+    notable = [f for f in findings if f[&quot;service&quot;] in
+               (&quot;ftp&quot;,&quot;telnet&quot;,&quot;rlogin&quot;,&quot;vnc&quot;,&quot;mysql&quot;,&quot;redis&quot;,&quot;smb&quot;,&quot;microsoft-ds&quot;)]
+    return {&quot;total_ports&quot;: len(findings), &quot;by_state&quot;: dict(by_state),
+            &quot;versions&quot;: {k: v for k, v in versions.items() if v},
+            &quot;notable&quot;: notable}
+
+if __name__ == &quot;__main__&quot;:
+    f = parse_txt(sys.argv[1] if len(sys.argv) &gt; 1 else &quot;scan.txt&quot;)
+    s = summarise(f)
+    print(json.dumps(s, indent=2))
+    print(&quot;\n=== notable (cleartext / commonly abused) ===&quot;)
+    for r in s[&quot;notable&quot;]:
+        print(f&quot;  {r['port']:&lt;6}{r['service']:&lt;12}{r['version']}&quot;)
+PY
+python3 findings.py scan.txt | tee 01-findings.txt
+
+# --- verify the parse against raw text ---
+echo &quot;raw open lines: $(grep -c open scan.txt)&quot;
+
+# --- feed the versions straight into the offline exploit DB ---
+python3 - &lt;&lt;'PY' | while read -r svc ver; do
+import subprocess, json, re
+out = subprocess.run([&quot;python3&quot;,&quot;findings.py&quot;,&quot;scan.txt&quot;],
+                     capture_output=True,text=True).stdout
+m = re.search(r'&quot;versions&quot;: \{(.*?)\n  \}', out, re.S)
+if m:
+    for line in m.group(1).strip().splitlines():
+        line = line.strip().strip(',').strip('&quot;')
+        if ':' in line:
+            k, v = line.split(':', 1)
+            print(k, v.strip().strip('&quot;'))
+PY
+  hits=$(searchsploit &quot;$svc $ver&quot; 2&gt;/dev/null | grep -c &quot; - &quot;)
+  printf &quot;  %-16s %-12s %s candidate exploits\n&quot; &quot;$svc&quot; &quot;$ver&quot; &quot;$hits&quot;
+done | tee 02-exploit-candidates.txt
+
+# --- Counter on your own auth log ---
+python3 - &lt;&lt;'PY' | tee 03-counter.txt
+from collections import Counter
+import re
+c = Counter()
+try:
+    for line in open(&quot;/var/log/auth.log&quot;, errors=&quot;replace&quot;):
+        if m := re.search(r&quot;Failed password for (?:invalid user )?(\S+) from ([\d.]+)&quot;, line):
+            c[m.group(2)] += 1
+except PermissionError:
+    print(&quot;(needs root for /var/log/auth.log)&quot;)
+for ip, n in c.most_common(10): print(f&quot;{ip:&lt;20} {n}&quot;)
+PY
+</code></pre>
+<p><strong>Step 5 is the whole pipeline.</strong> You scanned a host, structured the results, normalised versions,<br />
+and generated exact <code>searchsploit</code> queries. That is reconnaissance chained directly into<br />
+vulnerability research.</p>
+<p><strong>Record:</strong> <code>findings.py</code> is a keeper. Every later tier reuses its shape.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Difference between <code>a = b</code> and <code>b = a.copy()</code> for lists?</li>
+<li>Why is <code>[[]] * 3</code> wrong, and what is correct?</li>
+<li>When is <code>Counter</code> better than a hand-rolled dict with <code>.get()</code>?</li>
+<li>What does <code>finding["cve"]</code> do if the key is absent, and the safe alternative?</li>
+<li>Why key a dict by <code>("10.0.0.5", 445)</code> rather than a string?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Python Fundamentals</strong> → <strong>Service Fingerprinting</strong> → <strong>CVE</strong> → <strong>searchsploit</strong>.<br />
+This lecture connects scanning to vulnerability research.</p>

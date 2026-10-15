@@ -1,0 +1,118 @@
+<h1 id="lab-range-setup">Lab Range Setup</h1>
+<p>Your practice range is what makes every exercise in AEGIS legal. Build it once, snapshot it, reuse it forever.</p>
+<h2 id="target-topology">Target topology</h2>
+<pre><code>        ┌─────────────────────────────────────────────┐
+        │  host: Kali (this machine)                  │
+        │  runs AEGIS, nmap, metasploit, wireshark     │
+        └───────────────────┬─────────────────────────┘
+                            │  host-only / isolated network
+        ┌───────────────────┴─────────────────────────┐
+        │  VULN-01   Metasploitable3  (Ubuntu)         │  services: ssh, apache,
+        │                                              │  samba, mysql, vsftpd, tomcat
+        │  VULN-02   DVWA / Juice Shop (web targets)    │  http://localhost:8081
+        │  VULN-03   Windows + AD (later, Tier 5)      │  needs 2 vCPU + 4GB each
+        │  VULN-04   Ubuntu + misconfigs (Tier 1 privesc)
+        └─────────────────────────────────────────────┘
+</code></pre>
+<h2 id="requirements">Requirements</h2>
+<ul>
+<li>Kali with enough resources: <strong>8GB RAM minimum</strong>, 16GB comfortable. 4 VMs at 1GB each is fine.</li>
+<li>VirtualBox (already on Kali) or QEMU/KVM.</li>
+<li>Host-only network adapter — <strong>do not bridge these to your LAN or the internet.</strong></li>
+</ul>
+<h2 id="1-create-an-isolated-host-only-network">1. Create an isolated host-only network</h2>
+<pre><code class="language-bash"># list current host-only interfaces
+ip -br addr show | grep vboxnet || true
+
+# VirtualBox GUI: Tools &gt; Manage &gt; Host-only Networks &gt; Create
+# or via CLI:
+VBoxManage hostonlyif create
+VBoxManage hostonlyif ipaddr vboxnet0 192.168.56.1
+</code></pre>
+<p>Assign the second adapter of each VM to <code>vboxnet0</code> (Host-only). Keep the NAT adapter for updates if you want,<br />
+or disconnect it entirely for full isolation.</p>
+<h2 id="2-stand-up-the-vulnerable-hosts">2. Stand up the vulnerable hosts</h2>
+<h3 id="metasploitable3-the-workhorse">Metasploitable3 (the workhorse)</h3>
+<pre><code class="language-bash"># download the OVA/zip from SourceForge, then:
+VBoxManage import &quot;metasploitable3_ubuntu_v4.4.6-64.zip&quot; \
+  --name vuln01 --vsys 0 --register
+VBoxManage modifyvm vuln01 --memory 1024
+VBoxManage modifyvm vuln01 --nic1 hostonly --hostonlyif vboxnet0
+VBoxManage modifyvm vuln01 --natpf1 &quot;web,tcp,,8080,,80&quot;
+</code></pre>
+<p>Start it, find the DHCP address, then:</p>
+<pre><code class="language-bash">ip neigh | grep -i incomplete       # or check the VM console
+nmap -sV -p- 192.168.56.101        # this IS your first reconnaissance exercise
+</code></pre>
+<p><strong>Snapshot immediately once it has booted:</strong></p>
+<pre><code class="language-bash">VBoxManage snapshot vuln01 take &quot;baseline-clean&quot; --description &quot;freshly imported, unpatched&quot;
+</code></pre>
+<p>Reverting is one command, which is the whole point:</p>
+<pre><code class="language-bash">VBoxManage snapshot vuln01 restore &quot;baseline-clean&quot;
+</code></pre>
+<h3 id="web-targets">Web targets</h3>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DVWA</td>
+<td>SQLi, XSS, file upload, command injection with a low skill floor</td>
+</tr>
+<tr>
+<td>OWASP Juice Shop</td>
+<td>Modern SPA stack — DOM XSS, insecure deserialisation, IDOR</td>
+</tr>
+<tr>
+<td>WebGoat</td>
+<td>Guided lessons for the PortSwigger-equivalent web track</td>
+</tr>
+</tbody>
+</table>
+<p>All run in Docker or as small VMs on <code>localhost:8081+</code>.</p>
+<h3 id="tier-1-privilege-escalation-box">Tier 1 privilege-escalation box</h3>
+<p>A plain Ubuntu VM where you intentionally misconfigure it:</p>
+<pre><code class="language-bash">sudo chmod -R 777 /etc/cron.d
+sudo cp /bin/bash /tmp/rootshell &amp;&amp; sudo chmod u+s /tmp/rootshell
+sudo chmod o+w /etc/passwd
+</code></pre>
+<p>Then run the enumeration labs in <code>linux-privesc-doctrine</code> against it. Snapshot when you get a clean run.</p>
+<h3 id="tier-5-domain-lab-later">Tier 5 domain lab (later)</h3>
+<p>Two Windows Server VMs with one promoted to Domain Controller (AD DS + DNS). Install BloodHound, Impacket<br />
+and Resolver on Kali. This is a weekend of setup — defer it until Tier 5.</p>
+<h2 id="3-capture-traffic-from-the-start">3. Capture traffic from the start</h2>
+<pre><code class="language-bash"># on the Kali box, capture everything on the host-only interface
+sudo tcpdump -i vboxnet0 -w ~/labs/captures/session.pcap -s 0
+</code></pre>
+<p>Your Tier 2 packet-analysis labs all point at captures like this.</p>
+<h2 id="4-snapshots-are-your-undo-key">4. Snapshots are your undo key</h2>
+<table>
+<thead>
+<tr>
+<th>Snapshot name</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>baseline-clean</code></td>
+<td>immediately after import, before touching anything</td>
+</tr>
+<tr>
+<td><code>mid-exercise</code></td>
+<td>before a destructive step, so you can rewind</td>
+</tr>
+<tr>
+<td><code>solved</code></td>
+<td>after you successfully complete a lab — the reference you compare against</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-keeping-kali-and-the-range-separate">5. Keeping Kali and the range separate</h2>
+<p>Your Kali host is the <strong>attacker</strong>. The range is the <strong>target</strong>. Do not run intentionally vulnerable<br />
+services on Kali itself — if Kali gets compromised mid-exercise, you lose your toolchain and your progress<br />
+host at the same time.</p>

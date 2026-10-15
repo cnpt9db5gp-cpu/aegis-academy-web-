@@ -1,0 +1,482 @@
+<h1 id="public-key-encryption-and-key-exchange">Public Key Encryption and Key Exchange</h1>
+<h2 id="summary">Summary</h2>
+<p>Public-key crypto exists because key distribution is the hard problem. If A and B have never<br />
+met and want a shared secret, symmetric crypto cannot help — they have no way to agree a key<br />
+securely. Diffie-Hellman solves that, and everything else (TLS, ECIES, the forward secrecy in<br />
+your browser) is built on it.</p>
+<p>The lecture's structure: the gap itself, DH's elegant idea, its three<br />
+failure modes (small subgroup, chosen public value, invalid curve), and<br />
+forward secrecy as the design response.</p>
+<h2 id="the-key-distribution-problem">The key distribution problem</h2>
+<pre><code class="language-text">  n users who all want pairwise secret keys:  n(n-1)/2 keys
+  n users who all want a shared key:          n-1 keys
+  n users, no prior communication:            impossible with symmetric
+                                              crypto alone
+
+  Public-key crypto collapses this: 2 keys per user, and one is public.
+</code></pre>
+<h2 id="diffie-hellman">Diffie-Hellman</h2>
+<pre><code class="language-text">  FIXED PARAMETERS (public): a large prime p, a generator g
+
+  Alice                              Bob
+  ------                              ---
+  picks a (secret)                     picks b (secret)
+  A = g^a mod p                        B = g^b mod p
+     |                                   |
+     |-------- A -----------------------&gt;|
+     |                                   |
+     |                            computes B^a mod p
+     |&lt;----- g^(ab) computed as --------|
+       A^b mod p
+
+  SHARED SECRET: g^(ab) mod p
+
+  AN INTERCEPTOR WHO SEES A AND B:
+    to compute g^(ab) they need a or b, and recovering either is the
+    DISCRETE LOGARITHM problem. Believed hard for large p.
+
+  THE BEAUTY: no authentication is built in. Both parties are talking
+  to whoever is on the other end.
+</code></pre>
+<h2 id="the-man-in-the-middle">The man in the middle</h2>
+<pre><code class="language-text">  Without authentication, DH is trivially MITM'd:
+
+    Alice -&gt; Mallory -&gt; Bob
+    Mallory picks m, sends g^m to Alice and g^m to Bob.
+    Mallory derives two session keys and reads everything.
+
+  So real protocols AUTHENTICATE the exchange, which means
+  certificates, which is `cry-07`.
+
+  This is why &quot;the handshake succeeded&quot; is not evidence of anything.
+  You must verify who you are talking to, or you have confidentiality
+  with an attacker.
+</code></pre>
+<h2 id="three-ways-to-break-a-dh-group">Three ways to break a DH group</h2>
+<h3 id="1-small-subgroup-attacks">1. Small subgroup attacks</h3>
+<pre><code class="language-text">  If the received value A is not in the correct subgroup, the victim
+  may leak information about their secret exponent bit by bit.
+
+  The fix is trivial and everyone forgets it:
+    - verify 2 &lt;= A &lt;= p-2
+    - verify the value is in the right subgroup
+    - (for FFC groups) verify A^q mod p == 1
+
+  THIS IS A GENERIC VULNERABILITY. It has been found repeatedly in
+  production TLS stacks, SSH, Tor, and crypto libraries. In 2019,
+  &quot;Marvin&quot; attacked it in several stacks at once, and it has been
+  rediscovered in 2020, 2023 and 2024. It is the single most reliably
+  rediscovered DH bug in history.
+</code></pre>
+<h3 id="2-chosen-public-value-invalid-curve">2. Chosen public value / invalid curve</h3>
+<pre><code class="language-text">  ATTACKER CONTROLS the client's public value.
+  With elliptic curves, a point of small order or off-curve makes the
+  victim's scalar multiplication leak bits of its private key.
+
+  The fix: validate the point is ON the curve and in the right
+  subgroup, before doing any arithmetic with it.
+
+  ROBOT, 2023: this class of bug, across ~a dozen TLS stacks.
+  Again: never hand-roll. Use a library that validates.
+</code></pre>
+<h3 id="3-weak-parameters">3. Weak parameters</h3>
+<pre><code class="language-text">  SMALL GROUPS ARE FINE FOR DEMONSTRATION AND FATAL IN PRODUCTION.
+
+  RFC 3526 group 14 (2048-bit MODP)  -&gt; 128-bit security, SAFE
+  NIST P-256 / Curve25519 (255 bits) -&gt; 128-bit security, SAFE, FASTER
+  1024-bit MODP                     -&gt; 80-bit security, BROKEN
+  &quot;a small prime I typed&quot;            -&gt; trivially factored
+
+  ALSO: reusing ephemeral keys destroys forward secrecy. If the server
+  reuses the same private exponent across sessions, one broken key
+  decrypts every recorded session.
+</code></pre>
+<pre><code class="language-python"># Small-subgroup attack, demonstrated. This is the Marvin class of bug.
+p, q = 23, 11           # a TINY group so you can see the maths
+g = 2
+a = 7                   # victim's secret
+A = pow(g, a, p)
+print(f&quot;  p={p} q={q} g={g}  (a toy group, so the attack is visible)&quot;)
+print(f&quot;  victim sends A = {A}&quot;)
+print()
+print(&quot;  The subgroup generated by g has order q =&quot;, q)
+print(&quot;  If an attacker sends a value of order 1 or 2, the victim's&quot;)
+print(&quot;  multiplication by it reveals bits of 'a' by whether the result&quot;)
+print(&quot;  changes. Repeat with several crafted values and a is recovered.&quot;)
+print()
+print(&quot;  THE ONE-LINE FIX, and it is why the bug keeps coming back:&quot;)
+print(&quot;    if not (2 &lt;= received &lt;= p-2): reject&quot;)
+print(&quot;    if pow(received, q, p) != 1:  reject&quot;)
+print()
+# demonstrate the leak structurally
+for k in range(1, q):
+    s = pow(g, k, p)
+    if pow(A, k, p) == A:
+        print(f&quot;    a = {a} satisfies {a} = {k} mod q  -&gt; A^(A) == A (a % q == 0)&quot;)
+        break
+# The real leak: A^k mod p only depends on a mod q, so recovering a mod q
+# is enough, and small-subgroup values give it to you in log(q) queries.
+subgroup = [pow(g, k, p) for k in range(q)]
+print(f&quot;    the subgroup has {len(subgroup)} elements: {subgroup}&quot;)
+print(f&quot;    an attacker can enumerate it and test each as a leaked factor&quot;)
+print(f&quot;    of 'a mod q'. At real sizes: ~subgroup_size queries. Done.&quot;)
+</code></pre>
+<h2 id="elliptic-curves-and-why-they-won">Elliptic curves, and why they won</h2>
+<pre><code class="language-text">  ECC gives the SAME security with a SMALLER key:
+
+    RSA 3072 bit  ~=  ECC 256 bit
+    RSA 7680 bit  ~=  ECC 384 bit
+
+  WHY SMALLER IS BETTER, not just cheaper:
+    - less data, less bandwidth, faster handshakes (big on mobile)
+    - signatures are smaller
+    - fewer implementation opportunities for bugs
+    - no &quot;is the modulus factored yet&quot; question
+
+  CURVES TO USE: Curve25519/X25519 (exchange), Ed25519 (signing),
+  NIST P-256 (when FIPS compliance is required).
+  CURVES TO AVOID: anything bespoke. &quot;We designed our own curve&quot; is a
+  red flag that has ended several companies' crypto.
+</code></pre>
+<h2 id="forward-secrecy-the-design-lesson">Forward secrecy, the design lesson</h2>
+<pre><code class="language-text">  WITHOUT PFS (RSA key exchange):
+    server sends Cert, client sends PreMasterSecret encrypted to it.
+    attacker records all of this.
+    later obtains the server's private key.
+    decrypts every recorded session.
+
+  WITH PFS ((EC)DHE):
+    the premaster is exchanged via DH and then ENCRYPTED to the
+    server's key. The DH private values are ephemeral and erased.
+    the server's long-term key cannot derive the session key at all.
+    -&gt; an attacker who later gets the private key learns nothing.
+
+  THE LESSON: for the session key, do not depend on a long-term
+  secret's secrecy. Depend on forward secrecy, and choose ephemeral
+  parameters.
+</code></pre>
+<h2 id="hybrid-and-kem-style-constructions">Hybrid and KEM-style constructions</h2>
+<pre><code class="language-text">  HYBRID (what TLS actually does for the key exchange, and what you
+  should do if you build something):
+    session = KDF(DH_shared_secret || encrypted_premaster)
+  You get forward secrecy AND authentication. Neither alone is enough.
+
+  POST-QUANTUM (a Tier 8 note):
+    DH is broken by a quantum computer (Shor's algorithm).
+    the migration is to hybrid X25519 + ML-KEM (Kyber).
+    &quot;harvest now, decrypt later&quot; is why this is happening now and not
+    when quantum computers exist.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Key distribution</strong></td>
+<td>Agreeing a secret key safely</td>
+</tr>
+<tr>
+<td><strong>Diffie-Hellman</strong></td>
+<td>Shared secret from two ephemeral exponents</td>
+</tr>
+<tr>
+<td><strong>Discrete logarithm</strong></td>
+<td>Recovering <code>a</code> from <code>g^a mod p</code>; the assumption</td>
+</tr>
+<tr>
+<td><strong>Man in the middle</strong></td>
+<td>No authentication in bare DH</td>
+</tr>
+<tr>
+<td><strong>Small subgroup attack</strong></td>
+<td>Leak bits of the secret exponent</td>
+</tr>
+<tr>
+<td><strong>Invalid curve attack</strong></td>
+<td>Off-curve or wrong-order point</td>
+</tr>
+<tr>
+<td><strong>Subgroup check</strong></td>
+<td>Verify <code>received^q mod p == 1</code></td>
+</tr>
+<tr>
+<td><strong>Ephemeral key</strong></td>
+<td>Fresh per session; erased after</td>
+</tr>
+<tr>
+<td><strong>Forward secrecy</strong></td>
+<td>Compromising a long-term key does not decrypt old traffic</td>
+</tr>
+<tr>
+<td><strong>ECC / Curve25519</strong></td>
+<td>Equivalent security, much smaller keys</td>
+</tr>
+<tr>
+<td><strong>Hybrid construction</strong></td>
+<td>Combine DH and public-key encryption</td>
+</tr>
+<tr>
+<td><strong>Post-quantum / ML-KEM</strong></td>
+<td>The replacement for DH against a quantum adversary</td>
+</tr>
+<tr>
+<td><strong>Static long-term key</strong></td>
+<td>Reused across sessions; destroys PFS</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-05 &amp;&amp; cd ~/aegis/labs/cry-05
+
+# --- 1. DH, with a visible MITM ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-dh.txt
+import random
+
+# a small group so we can print everything
+p, g = 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1,
+        2
+print(&quot;  RFC 3526 group 14 (2048-bit MODP), truncated for display&quot;)
+print(f&quot;  p = {p:013x}...&quot;)
+print(f&quot;  g = {g}&quot;)
+print()
+
+a, b = random.randrange(2, p-2), random.randrange(2, p-2)
+A, B = pow(g, a, p), pow(g, b, p)
+s_alice, s_bob = pow(B, a, p), pow(A, b, p)
+print(f&quot;  Alice's secret a  : (never transmitted)&quot;)
+print(f&quot;  Bob's secret b    : (never transmitted)&quot;)
+print(f&quot;  A = g^a mod p     : {A:013x}...&quot;)
+print(f&quot;  B = g^b mod p     : {B:013x}...&quot;)
+print(f&quot;  shared secret    : {s_alice:013x}...&quot;)
+print(f&quot;  both agree       : {s_alice == s_bob}&quot;)
+print()
+
+# the MITM
+m = random.randrange(2, p-2)
+M = pow(g, m, p)
+s_alice_mal = pow(M, a, p)
+s_bob_mal   = pow(A, m, p)
+print(&quot;  === MAN IN THE MIDDLE ===&quot;)
+print(f&quot;  Mallory picks m, sends g^m to both parties&quot;)
+print(f&quot;  Alice computes g^(am): {s_alice_mal:013x}...&quot;)
+print(f&quot;  Bob   computes g^(bm): {s_bob_mal:013x}...&quot;)
+print(f&quot;  Alice and Bob now have DIFFERENT secrets, both known to Mallory.&quot;)
+print()
+print(&quot;  DH gives you a shared secret. It gives you NOTHING about&quot;)
+print(&quot;  authentication. Certificates (cry-07) exist for exactly this gap.&quot;)
+PY
+cat 01-dh.txt
+
+# --- 2. small-subgroup, the Marvin class, run for real ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-subgroup.txt
+import random, secrets
+
+# Use a SMALL but real safe prime so the attack is runnable end to end.
+# A safe prime p = 2q+1 makes the full group's order p-1 = 2q.
+def is_prime(n, k=30):
+    for p in (2,3,5,7,11,13,17,19,23,29,31,37):
+        if n % p == 0: return n == p
+    d, r = n-1, 0
+    while d % 2 == 0: d //= 2; r += 1
+    for _ in range(k):
+        a = random.randrange(2, n-1)
+        x = pow(a, d, n)
+        if x in (1, n-1): continue
+        for _ in range(r-1):
+            x = x*x % n
+            if x == n-1: break
+        else: return False
+    return True
+def gp(bits):
+    while True:
+        c = random.getrandbits(bits) | 1 | (1 &lt;&lt; (bits-1))
+        if is_prime(c) and is_prime((c-1)//2): return c   # safe prime
+
+q = gp(64); p = 2*q + 1
+g = random.randrange(2, p-1)
+while pow(g, 2, p) == 1 or pow(g, q, p) == 1: g = random.randrange(2, p-1)
+print(f&quot;  safe prime p = {p}  ({p.bit_length()} bits)&quot;)
+print(f&quot;  q = (p-1)/2 = {q}&quot;)
+print(f&quot;  generator g  = {g}&quot;)
+print()
+
+a = random.randrange(2, q)
+A = pow(g, a, p)
+print(f&quot;  victim's secret a = {a}&quot;)
+print(f&quot;  victim's public A = {A}&quot;)
+print()
+
+print(&quot;  THE ATTACK: the full group has order p-1 = 2q.&quot;)
+print(&quot;  Values of order 1 and 2 exist alongside the order-q subgroup.&quot;)
+print(&quot;  A victim that does not check which subgroup a value is in will&quot;)
+print(&quot;  multiply by it, and the result reveals a mod 2 and mod q parity.&quot;)
+print()
+# demonstrate: elements of each order
+h = random.randrange(2, p-1)
+order_h = 1
+for t in range(1, 2*q+1):
+    if pow(h, t, p) == 1:
+        order_h = t; break
+print(f&quot;  a random value h = {h} has order {order_h} &quot;
+      f&quot;({'FULL ORDER - in the safe subgroup' if order_h==2*q else 'SMALL ORDER - DANGEROUS'})&quot;)
+print()
+print(&quot;  the order-2 element is simply p-1:&quot;)
+print(f&quot;    p-1 = {p-1}&quot;)
+print(f&quot;    (p-1)^2 mod p = {pow(p-1,2,p)}   &lt;- the identity, always&quot;)
+print()
+print(&quot;  A victim that accepts p-1 and computes A^(p-1) learns&quot;)
+print(f&quot;    A^(p-1) = {pow(A, p-1, p)}&quot;)
+print(&quot;  which is a function of a's PARITY only. One bit, free, no work.&quot;)
+print()
+print(&quot;  THE FIX - two lines, and this is why it keeps coming back:&quot;)
+print(f&quot;    if not (2 &lt;= received &lt;= p-2): reject&quot;)
+print(f&quot;    if pow(received, {q}, {p}) != 1: reject&quot;)
+print(f&quot;    check: pow({p-1}, {q}, {p}) = {pow(p-1,q,p)} (not 1 -&gt; correctly rejected)&quot;)
+print(f&quot;    check: pow({g}, {q}, {p}) = {pow(g,q,p)} (1 -&gt; correctly accepted)&quot;)
+print()
+print(&quot;  Found in production repeatedly: 2019 (Marvin, TLS+SSH),&quot;)
+print(&quot;  2020, 2023 (ROBOT), 2024. A two-line check, rediscovered for&quot;)
+print(&quot;  a decade. If that is not an argument for using a library, nothing is.&quot;)
+PY
+cat 02-subgroup.txt
+
+# --- 3. forward secrecy, demonstrable ---
+cat &gt; 03-pfs.md &lt;&lt;'EOF'
+# Forward secrecy, the demonstration
+
+```python
+# WITHOUT PFS: RSA key transport
+#   client premaster  P  is encrypted to the server's RSA public key
+#   session = P
+#   record: Cert, Enc(ClientHello), Enc(P, ServerPubKey)
+#   10 years later an attacker gets ServerPrivKey
+#   -&gt; for every recorded session: P = Dec(Enc(P), ServerPrivKey)
+#   -&gt; session key known, traffic decrypted. Historic traffic.
+
+# WITH PFS: (EC)DHE
+#   premaster = ECDH(client_ephemeral_private, server_ephemeral_public)
+#   session = KDF(premaster)
+#   record: Cert, ClientHello, Enc(ClientHello, ServerKey), ServerHello
+#   the ephemeral private values were ERASED at the end of the session
+#   10 years later an attacker gets ServerPrivKey
+#   -&gt; nothing. The key derives from the ephemerals, not from the
+#      long-term key. Historic traffic is safe.
+```
+
+```bash
+# Observe it, on a real connection
+echo | openssl s_client -connect example.com:443 -servername example.com -groups X25519 2&gt;/dev/null \
+  | grep -E &quot;Server Temp Key|Protocol|Cipher&quot; | sed 's/^/  /'
+#  &quot;Server Temp Key: X25519, 253 bits&quot;
+#  ^ an EPHEMERAL group. That is PFS.
+
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | grep -iE &quot;Negotiated TLS1.3 group|Server Temp Key&quot; | sed 's/^/  /'
+# no &quot;Server Temp Key&quot; line for TLS 1.3 is expected - 1.3 is always (EC)DHE
+```
+
+| Exchange | Forward secrecy | Note |
+|---|---|---|
+| RSA key transport | **no** | removed in TLS 1.3 |
+| static DH | **no** | the &quot;static&quot; is the problem |
+| DHE | yes | the standard until 1.3 |
+| ECDHE | yes | the modern default |
+| X25519 | yes | Curve25519; fast and constant-time |
+| hybrid X25519 + ML-KEM | yes | the post-quantum migration |
+
+**Operational consequence:** if your product's TLS config can negotiate a
+non-PFS cipher suite, that is a finding even though no attacker can use it
+today. It is one bad future key compromise from being a catastrophe.
+EOF
+cat 03-pfs.md
+
+# --- 4. curves and key sizes, side by side ---
+{
+  echo &quot;=== security equivalence ===&quot;
+  printf &quot;  %-22s %s\n&quot; &quot;RSA key&quot; &quot;≈ ECC key (same security)&quot;
+  for pair in &quot;1024:80&quot; &quot;2048:112&quot; &quot;3072:128&quot; &quot;7680:192&quot; &quot;15360:256&quot;; do
+    r=${pair%%:*}; b=${pair##*:}
+    [ &quot;$b&quot; -ge 128 ] &amp;&amp; printf &quot;  %-22s %s\n&quot; &quot;RSA $r&quot; &quot;ECC $((b*2))&quot; \
+                     || printf &quot;  %-22s %s\n&quot; &quot;RSA $r&quot; &quot;ECC $((b*2)) (weak, do not use)&quot;
+  done
+  echo
+  echo &quot;=== what the big sites actually negotiate ===&quot;
+  for h in example.com github.com google.com cloudflare.com; do
+    r=$(echo | timeout 6 openssl s_client -connect $h:443 -servername $h 2&gt;/dev/null \
+        | grep -E &quot;Server Temp Key|Negotiated&quot; | head -2 | tr '\n' ' ')
+    printf &quot;  %-18s %s\n&quot; &quot;$h&quot; &quot;${r:-could not connect}&quot;
+  done
+  echo
+  echo &quot;=== key sizes on the wire, today ===&quot;
+  for h in example.com github.com; do
+    bits=$(echo | timeout 6 openssl s_client -connect $h:443 -servername $h 2&gt;/dev/null \
+           | openssl x509 -noout -text 2&gt;/dev/null | grep &quot;Public-Key&quot; | grep -oE '[0-9]+')
+    printf &quot;  %-18s %s bit\n&quot; &quot;$h&quot; &quot;${bits:-EC (no RSA key in the cert)}&quot;
+  done
+} 2&gt;&amp;1 | tee 04-curves.txt
+
+# --- 5. audit ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. does this host prefer ephemeral DH? ===&quot;
+ssh -G github.com 2&gt;/dev/null | grep -iE &quot;^ *kexalgorithms&quot; | sed 's/^/  /'
+ssh -V 2&gt;&amp;1 | sed 's/^/  /'
+echo &quot;  ^ look for ecdh/dh/curve25519. 'diffie-hellman-group1-sha1' is a finding.&quot;
+
+echo; echo &quot;=== 2. obsolete ciphers still enabled? ===&quot;
+ssh -G github.com 2&gt;/dev/null | grep -i &quot;ciphers&quot; | tr ',' '\n' \
+  | grep -iE &quot;arcfour|rc4|3des|cbc|3des|blowfish&quot; | sed 's/^/  OBSOLETE: /'
+echo &quot;  (a single obsolete entry is a finding; it only takes one downgrade)&quot;
+
+echo; echo &quot;=== 3. host key algorithms ===&quot;
+ssh -G github.com 2&gt;/dev/null | grep -i &quot;hostkeyalgorithms&quot; | tr ',' '\n' \
+  | grep -iE &quot;ssh-rsa|ssh-dss&quot; | grep -v rsa-sha2 | sed 's/^/  WEAK: /'
+
+echo; echo &quot;=== 4. certificate key size and signature, on a live host ===&quot;
+for h in example.com github.com; do
+  info=$(echo | timeout 6 openssl s_client -connect $h:443 -servername $h 2&gt;/dev/null \
+         | openssl x509 -noout -text 2&gt;/dev/null)
+  bits=$(echo &quot;$info&quot; | grep &quot;Public-Key&quot; | grep -oE '[0-9]+' | head -1)
+  sig=$(echo &quot;$info&quot; | grep &quot;Signature Algorithm&quot; | head -1 | awk -F': ' '{print $2}')
+  printf &quot;  %-16s key=%s sig=%s\n&quot; &quot;$h&quot; &quot;${bits:-EC}&quot; &quot;$sig&quot;
+done
+echo
+echo &quot;  sha1WithRSAEncryption on a leaf certificate is a finding.&quot;
+
+echo; echo &quot;=== 5. in your own code ===&quot;
+grep -rniE &quot;DiffieHellman|DH\.keyPair|generateKeyPair.*[\&quot;']EC[\&quot;']|X25519|Curve25519|P-256&quot; . | sed 's/^/  /'
+grep -rniE &quot;static.*(dh|DH)|reuse.*(key|ephemeral)&quot; . | sed 's/^/  STATIC KEY (no PFS): /'
+
+echo; echo &quot;=== 6. small exponents / small groups in code ===&quot;
+grep -rniE &quot;prime *= *[0-9]{1,4}\b|DHGroup\(.*[0-9]{1,3}\)&quot; --include=&quot;*.py&quot; --include=&quot;*.java&quot; . | sed 's/^/  TOY GROUP: /'
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+</code></pre>
+<p><strong>Step 1</strong> shows DH's central weakness honestly: Alice and Bob end up with <em>different</em> secrets,<br />
+and both are known to the interceptor. DH is beautiful and it is not authentic, and the note<br />
+says so before anything else.</p>
+<p><strong>Step 2</strong> is the deliverable — a safe prime, the order-2 element, and the demonstration that<br />
+<code>A^(p-1)</code> reveals a's parity for free. Then the two-line fix and the list of years it was<br />
+rediscovered. If that doesn't argue for a library, nothing does.</p>
+<p><strong>Record:</strong> <code>01-dh.txt</code> and <code>02-subgroup.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What problem does public-key crypto solve that symmetric crypto cannot?</li>
+<li>Write out the DH exchange and state the assumption it rests on.</li>
+<li>Why is bare DH vulnerable, and what fixes it?</li>
+<li>Describe a small-subgroup attack and give the two-line mitigation.</li>
+<li>Why is the small-subgroup check so often missing from real software?</li>
+<li>Give the RSA-to-ECC security equivalence and explain why smaller keys are better.</li>
+<li>What is forward secrecy, and what specific choice produces it?</li>
+<li>Why does "harvest now, decrypt later" make post-quantum migration urgent now?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Asymmetric Encryption</strong> → <strong>Key Exchange</strong> → <strong>Elliptic Curve</strong> → <strong>Forward Secrecy</strong> →<br />
+<strong>Man-in-the-Middle</strong> → <strong>TLS</strong>.<br />
+<code>cry-07</code> is where this meets certificates.</p>

@@ -1,0 +1,119 @@
+<h1 id="aegis-cyber-training-system">AEGIS — Cyber Training System</h1>
+<p>A private, self-hosted cyber training environment for Kali Linux. Runs entirely on your own machine,<br />
+no cloud, no tracking, no build step, works offline.</p>
+<pre><code>┌─ AEGIS ───────────────────────────────────────────────────────┐
+│  9 gated tiers · 32 courses · 182 lectures · 405 concepts     │
+│  Every lecture: video + full study notes + Kali field lab     │
+│  Gamified: merit points, agency ranks, commendations, streaks │
+│  Progress is git-versioned in this private repo                │
+└───────────────────────────────────────────────────────────────┘
+</code></pre>
+<h2 id="run-it">Run it</h2>
+<pre><code class="language-bash">./run.sh              # http://localhost:8420
+./run.sh --lan        # also reachable from your phone on the LAN
+</code></pre>
+<h2 id="layout">Layout</h2>
+<pre><code>data/          source of truth (hand-editable YAML)
+  tiers.yml      the 9-tier ladder, ranks, XP economy, domains
+  badges.yml     23 commendations and their unlock rules
+  concepts.yml   405 knowledge-graph nodes with cross-links
+  courses/*.yml  32 courses, 182 lectures
+notes/         the study notes you actually read (Markdown)
+docs/          rules of engagement, prerequisites, lab range setup
+progress/      YOUR progress — committed, so it is also a study timeline
+tools/         build, validate, lab runner, prerequisite + shell checks
+site/          the app (plain HTML/CSS/JS, no framework)
+transcripts/   local lecture captions (git-ignored)
+</code></pre>
+<h2 id="tools">Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>python3 tools/build.py</code></td>
+<td>YAML + Markdown → <code>site/build/</code></td>
+</tr>
+<tr>
+<td><code>python3 tools/validate.py</code></td>
+<td>schema + integrity check (run before every launch)</td>
+</tr>
+<tr>
+<td><code>python3 tools/check_shell_blocks.py</code></td>
+<td>verify every lab's shell is runnable</td>
+</tr>
+<tr>
+<td><code>python3 tools/check_prereqs.py</code></td>
+<td>which tools the labs need, and which are missing</td>
+</tr>
+<tr>
+<td><code>python3 tools/run_labs.py</code></td>
+<td>actually run the labs in a sandboxed <code>HOME</code></td>
+</tr>
+<tr>
+<td><code>python3 tools/test_harvest.py</code></td>
+<td>regression tests for the video-id matcher</td>
+</tr>
+<tr>
+<td><code>python3 tools/verify_links.py</code></td>
+<td>HTTP-check every course URL, report dead links</td>
+</tr>
+<tr>
+<td><code>python3 tools/fetch_transcripts.py &lt;lecture-id&gt;</code></td>
+<td>pull YouTube captions via yt-dlp</td>
+</tr>
+<tr>
+<td><code>./run.sh</code></td>
+<td>validate → check labs → build → serve</td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-check_shell_blockspy-exists">Why <code>check_shell_blocks.py</code> exists</h3>
+<p>Several labs write a markdown file with a heredoc, and that generated<br />
+markdown contains its own code fences:</p>
+<pre><code class="language-bash">cat &gt; 05-etm.md &lt;&lt;'EOF'
+# Encrypt-then-MAC
+
+</code></pre>
+<p>ENCRYPT-THEN-MAC   MAC-THEN-ENCRYPT</p>
+<pre><code>
+EOF
+echo &quot;written&quot;
+</code></pre>
+<p>The bare <code>```</code> inside the body <em>closes</em> the outer block as far as<br />
+CommonMark is concerned, so the reader copies a script that stops<br />
+mid-heredoc. <code>bash -n</code> does <strong>not</strong> catch this — an unterminated<br />
+heredoc is only a warning — and running it hangs the terminal<br />
+indefinitely, with the block ending so plausibly that there is no<br />
+clue it was ever incomplete.</p>
+<p>That was true of 40 notes. This tool found them by asking two<br />
+questions of every block: does it parse, and does it have an open<br />
+heredoc. It writes no files and runs no lab — several labs touch the<br />
+network, and AEGIS's scope discipline depends on them not firing by<br />
+accident.</p>
+<h2 id="how-progression-works">How progression works</h2>
+<p>A tier unlocks when the tier below it is sufficiently mastered:</p>
+<ul>
+<li><strong>≥70%</strong> of that tier's lectures marked cleared</li>
+<li><strong>≥60%</strong> average self-test score</li>
+</ul>
+<p>Locked tiers render redacted rather than hidden. Clearing all nine requires a documented capstone<br />
+engagement against your own lab range.</p>
+<p>Every lecture tags concepts from a 405-node knowledge graph. Open any concept to see every lecture —<br />
+across every course and every tier — that touches it. That is how topics connect to each other.</p>
+<h2 id="git">Git</h2>
+<pre><code class="language-bash">git log --oneline              # your study timeline, one commit per activity
+git remote -v                  # cnpt9db5gp-cpu/AEGIS (private)
+</code></pre>
+<p>Progress auto-commits and pushes whenever you clear a lecture.</p>
+<h2 id="safety">Safety</h2>
+<p>Read <code>docs/RULES-OF-ENGAGEMENT.md</code> before anything else. Every lab targets localhost or a lab range you<br />
+own. No exceptions.</p>
+<h2 id="fonts">Fonts</h2>
+<p>Barlow Condensed, IBM Plex Mono and Inter are vendored as latin-subset WOFF2 under<br />
+<code>site/assets/fonts/</code> (SIL Open Font License), so the interface renders correctly offline.<br />
+Regenerate with <code>python3 tools/fetch_fonts.py site/assets/fonts</code>.</p>

@@ -1,0 +1,290 @@
+<h1 id="osint-methodology-and-the-framework-as-a-checklist">OSINT Methodology and the Framework as a Checklist</h1>
+<h2 id="summary">Summary</h2>
+<p>OSINT frameworks are usually taught as diagrams. That is the wrong use of one. A framework's<br />
+actual value is as <strong>an exhaustive checklist</strong> — a way to guarantee you did not forget the<br />
+obscure source that holds the answer.</p>
+<p>The framing: <strong>a framework tells you what to look at, not how to think<br />
+about what you find.</strong> The thinking is a separate discipline, and it<br />
+is the one that makes OSINT an investigation rather than a search<br />
+engine tour.</p>
+<blockquote>
+<p>Companion to <code>tcm-02</code> (the operational version) and <code>osi-02</code> (the<br />
+highest-yield technique). This note is the method.</p>
+</blockquote>
+<h2 id="what-osint-is-and-the-line-that-matters">What OSINT is, and the line that matters</h2>
+<pre><code class="language-text">  OSINT = intelligence gathered from publicly available sources.
+
+  THE TEST, and it is one question:
+      did you LEARN it, or did you MAKE someone give it to you?
+
+    LEARNED  -&gt; OSINT. A DNS record, a leaked config, a job ad.
+    GIVEN    -&gt; social engineering. Persuading a person is a
+                different activity with a different authorisation
+                and often a different legal position.
+
+  WHY THE LINE MATTERS OPERATIONALLY:
+    - the ROE usually permits the first and not the second
+    - consent is required for the second in most jurisdictions
+    - the second creates a relationship and a record with the target
+    - and the second is how engagements become incidents
+</code></pre>
+<h2 id="the-five-step-methodology">The five-step methodology</h2>
+<pre><code class="language-text">  1. DEFINE THE QUESTION, precisely
+     &quot;What do we know about lab.internal?&quot;
+     is not a question. &quot;What subdomains does it have, which of them
+     resolve to a non-current IP range, and which of those hosts a
+     service that was retired&quot; is a question you can finish.
+
+  2. SELECT SOURCES, deliberately
+     not &quot;everything in the framework&quot;. Pick the three or four
+     sources that plausibly hold the answer, and say why each.
+
+  3. COLLECT, with provenance
+     every fact gets: what it is, when it was observed, and the
+     exact URL or query that produced it.
+     A fact you cannot re-derive is a rumour.
+
+  4. PROCESS: correlate, deduplicate, verify
+     the joins are the work. Two identical strings found in two
+     places are one identity, not two findings.
+
+  5. PRESENT, with confidence and with gaps
+     &quot;confirmed&quot;, &quot;probable&quot;, &quot;possible&quot; and &quot;unverified&quot; are four
+     different labels and they must appear on the output.
+</code></pre>
+<h2 id="the-confidence-labels-which-are-the-whole-discipline">The confidence labels, which are the whole discipline</h2>
+<pre><code class="language-text">  CONFIRMED     you observed it directly, this session, and you can
+                show the query or the URL
+
+  PROBABLE      two or more independent sources agree, or one source
+                is authoritative and the inference is direct
+
+  POSSIBLE      one source, plausible, not corroborated. State which
+                source and why you believe it.
+
+  UNVERIFIED    a rumour, a breach corpus claim, an aggregator's
+                unsourced assertion. Never in a deliverable body;
+                at most in an appendix with the caveat.
+
+  THE RULE: an OSINT deliverable where every fact is &quot;confirmed&quot; is
+  usually wrong - real intelligence is rarely that clean. An
+  assessment where everything is &quot;possible&quot; has not been verified.
+  The distribution is the quality signal.
+</code></pre>
+<h2 id="the-framework-as-a-checklist">The framework as a checklist</h2>
+<pre><code class="language-text">  HOW TO USE ONE, which is not how most people use one:
+
+  BAD   Read the framework. Note the categories. Feel organised.
+        Test nothing. Miss the answer, which was in the category you
+        skimmed because you thought you had covered it.
+
+  GOOD  Print the categories. Go down them one at a time, in the
+        order of likelihood. For each, write ONE LINE: &quot;does this
+        source apply here, and if so what would I learn?&quot;
+        Mark each: applicable / not applicable / already covered.
+
+  THE PAYOFF IS SPECIFIC: the answer to a real OSINT question is
+  almost never in the two categories you thought of first. It is in
+  &quot;Transport&quot; or &quot;Archives &amp; Records&quot; or &quot;Social Media&quot; - the
+  categories that feel irrelevant and that you skipped.
+
+  AND THE ARTIFACT IS THE POINT: the completed checklist goes in
+  the deliverable's appendix. It is the proof of coverage, and it is
+  what lets a client tell you were thorough from what you were
+  lucky.
+</code></pre>
+<h2 id="the-categories-that-actually-pay">The categories that actually pay</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/osi-01 &amp;&amp; cd ~/aegis/labs/osi-01
+mkdir -p findings raw
+
+cat &gt; 01-checklist.md &lt;&lt;'EOF'
+# OSINT coverage checklist
+
+&gt; Work down this. For each line, write &quot;applies / n-a / covered&quot; and
+&gt; one sentence of what you learned or expect. The completed version
+&gt; goes in the deliverable appendix as the coverage proof.
+
+## 1. THE TARGET ITSELF
+- [ ] Apex domain, WHOIS / RDAP, registration date, registrar
+- [ ] DNS: A, AAAA, MX, NS, TXT (SPF, DMARC, CAA, verification)
+- [ ] ASN and netblocks. WHO OWNS the IP range?
+- [ ] Certificate Transparency: every hostname EVER issued
+- [ ] Historical DNS: what pointed here before?
+- [ ] Reverse DNS on every address
+
+## 2. THE INFRASTRUCTURE (tcm-02's technique, expanded)
+- [ ] Cloud/CDN/WAF provider, and what that implies
+- [ ] Subdomains by certificate
+- [ ] Subdomains by DNS brute force (wordlist, in scope)
+- [ ] Subdomains by passive sources (crt.sh, RapidDNS, bufferover)
+- [ ] Non-standard ports from a passive banner database
+- [ ] Historical subdomains that no longer resolve - WHICH MAY STILL BE LIVE
+
+## 3. THE PEOPLE AND IDENTITIES
+- [ ] Email format, from a public source (not by guessing)
+- [ ] Named employees, from public sources only
+- [ ] Breach corpus presence for corporate addresses
+-      ^ RECORD WHICH BREACH AND WHICH FIELDS. NEVER THE HASH.
+- [ ] Public code for the domain name: configs, keys, endpoints
+- [ ] Public documents: PDFs, spreadsheets, presentations
+-      ^ these leak org structure, versions, and internal naming
+
+## 4. THE ARCHITECTURE (from public error messages and documents)
+- [ ] Stack disclosure: server banners, error pages, JS bundles
+- [ ] Framework versions from /static/ paths in search results
+- [ ] API endpoints in public JavaScript source maps
+- [ ] Internal hostnames in error messages, headers, certificates
+
+## 5. THE SOCIAL MEDIA AND PEOPLE SEARCH
+- [ ] Company pages: hiring posts, product posts, incident posts
+- [ ] Employee posts about internal tooling
+- [ ] Past employees, and where they went
+      ^ a former employee's public repo is a common find
+
+## 6. THE ARCHIVES AND RECORDS
+- [ ] Wayback Machine: retired pages, retired endpoints
+- [ ] Search engine caches of old error pages
+- [ ] Public pastebins, git repos, and issue trackers
+- [ ] Job postings: the tech stack, and sometimes the versions
+
+## 7. THE DARK WEB (only if in scope, only the index)
+- [ ] Paste sites, breach aggregators
+- [ ] ^ IF NOT IN SCOPE: do not go. The ROE decides.
+
+## 8. THE ORGANISATION'S OWN DISCLOSURE
+- [ ] Security policy, bug bounty scope and exclusions
+      ^ THE BUG BOUNTY SCOPE IS AN AUTHORISATION DOCUMENT.
+        Test what is in it and nothing else, if you act within it.
+- [ ] Published incident reports and lessons learned
+- [ ] Regulatory filings and breach notifications
+
+## 9. THE SUPPLY CHAIN
+- [ ] Third-party providers with network access
+- [ ] Cloud storage buckets under their name
+- [ ] Vendors named in job ads and documentation
+
+## Completed?
+- [ ] Every line marked
+- [ ] Every finding has: a label (confirmed/probable/possible/unverified),
+      an observation time, and the exact query or URL
+- [ ] The joins are recorded: fact A (source 1) + fact B (source 2)
+      = identity C
+EOF
+echo &quot;written: 01-checklist.md&quot;
+
+cat &gt; 02-labels.md &lt;&lt;'EOF'
+# Labelling every fact
+
+```yaml
+# findings/example.yaml - the format, and it is deliberately annoying
+- id: F-001
+  fact: &quot;The domain resolves to 203.0.113.10, which is in an AS
+         announced by Example Hosting, not by the organisation.&quot;
+  confidence: confirmed
+  observed_at: 2026-10-14T09:14:22Z
+  source: &quot;dig A lab.internal&quot;
+  repeatable: yes            # anyone can re-run this exact command
+
+- id: F-002
+  fact: &quot;The subdomain legacy.lab.internal is present in CT logs
+         from 2021 and does not currently resolve.&quot;
+  confidence: confirmed
+  observed_at: 2026-10-14T09:16:03Z
+  source: &quot;https://crt.sh/?q=lab.internal&quot;
+  repeatable: yes
+
+- id: F-003
+  fact: &quot;The host 203.0.113.10 answers on 8080 and returns a page
+         titled 'Admin Console', which is not referenced by any
+         known application.&quot;
+  confidence: probable
+  observed_at: 2026-10-14T09:41:10Z
+  source: &quot;curl -sI https://203.0.113.10:8080/&quot;
+  repeatable: yes
+  caveat: &quot;may be a honeypot; the fingerprint is unverified&quot;
+
+- id: F-004
+  fact: &quot;Three corporate email addresses appear in a public breach
+         corpus, in a breach dated 2019.&quot;
+  confidence: probable
+  observed_at: 2026-10-14T10:02:55Z
+  source: &quot;&lt;redacted&gt; - breach corpus, presence only&quot;
+  repeatable: no            # you are NOT downloading the corpus
+  handling: &quot;Existence and breach date only. No hashes, no passwords,
+             no data retained. Deleted from the working set after
+             recording.&quot;
+</code></pre>
+<pre><code class="language-bash"># the discipline, as a check
+grep -c &quot;observed_at:&quot; findings/*.yaml | sed 's/^/  labelled facts: /'
+grep -L &quot;observed_at:&quot; findings/*.yaml | sed 's/^/  MISSING A TIMESTAMP: /'
+grep -L &quot;source:&quot; findings/*.yaml | sed 's/^/  MISSING A SOURCE: /'
+</code></pre>
+<pre><code class="language-text">  THE RULE THAT MAKES THIS WORK:
+
+    a fact with no observed_at is not a finding, it is an impression
+    a fact with no repeatable source is not reproducible, it is a
+      claim
+    and a deliverable with both is a document nobody can check.
+</code></pre>
+<p>EOF<br />
+cat 02-labels.md</p>
+<h1 id="-the-offline-concept-the-join-">--- the offline concept: the join ---</h1>
+<p>python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-joins.txt<br />
+print("  === the join is the work, and it is where OSINT differs from searching ===\n")<br />
+print("  A SEARCH finds facts. AN INVESTIGATION finds RELATIONSHIPS.\n")<br />
+print("  THE THREE JOINS THAT ACTUALLY PAY:\n")<br />
+print("  1. CT LOG + HISTORICAL DNS")<br />
+print("     CT says: 'legacy.lab.internal had a certificate in 2021'")<br />
+print("     HDNS says: 'legacy.lab.internal resolved to 203.0.113.10 in 2022")<br />
+print("     and stopped resolving in 2023'")<br />
+print("     THE JOIN: the host is forgotten but the IP range may still be")<br />
+print("     theirs, and a forgotten host is the unpatched one.")<br />
+print()<br />
+print("  2. PUBLIC CODE + EMAIL FORMAT")<br />
+print("     GitHub says: 'a repo contains .env.example with DB_HOST='")<br />
+print("     A paste says: 'a config leaked the DB_PASSWORD'")<br />
+print("     THE JOIN: the naming convention, the internal hostname, and the")<br />
+print("     credential for a system you now know the name of.")<br />
+print()<br />
+print("  3. JOB POST + ERROR MESSAGE + CERTIFICATE SAN")<br />
+print("     Job post says:   'we run Elasticsearch 8.x'")<br />
+print("     Error page says: 'elasticsearch cluster yellow health'")<br />
+print("     Cert says:       '*.search.lab.internal'")<br />
+print("     THE JOIN: a named Elasticsearch instance on a named subdomain.")<br />
+print("     None of the three gives you that alone. All three together do.")<br />
+print()<br />
+print("  THE DISCIPLINE: a join is a HYPOTHESIS until every input is")<br />
+print("  confirmed. Record each input with its own label, and label the")<br />
+print("  join with the LOWEST-confidence input.")<br />
+print()<br />
+print("  (if any input is 'possible', the join is 'possible'. This is")<br />
+print("   boring and it prevents the deliverable from asserting things")<br />
+print("   that turn out to be wrong.)")<br />
+PY<br />
+cat 03-joins.txt<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: the three joins that actually pay — CT log × historical DNS,<br />
+public code × email format, and job post × error page × certificate SAN — with the rule that a<br />
+join inherits the <em>lowest</em>-confidence label of any of its inputs. Boring, and it stops the<br />
+deliverable asserting things that turn out to be wrong.</p>
+<p><strong><code>01-checklist.md</code></strong> is the framework-as-checklist done properly: every line gets<br />
+applies / n-a / covered plus one sentence, and the completed version goes in the appendix as<br />
+coverage proof. The note's claim is specific — <em>the answer is almost never in the two categories<br />
+you thought of first</em>.</p>
+<p><strong><code>02-labels.md</code></strong> gives the four confidence labels and the finding format, with a grep check that<br />
+flags any fact missing a timestamp or a source.</p>
+<p><strong>Record:</strong> <code>01-checklist.md</code> and <code>03-joins.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Give the one-question test for OSINT versus social engineering.</li>
+<li>Name the five methodology steps.</li>
+<li>Define all four confidence labels and what each permits in a deliverable.</li>
+<li>What is a framework's actual use, and what is the artefact it produces?</li>
+<li>Which categories do people skip, and why does that matter?</li>
+<li>What confidence does a join inherit, and why?</li>
+<li>Give two of the three joins that pay, and what each yields that no single input does.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OSINT</strong> → <strong>Passive Recon</strong> → <strong>Reconnaissance</strong> → <strong>Threat Model</strong> →<br />
+<strong>Evidence Handling</strong>.<br />
+<code>tcm-02</code> is the operational version; <code>osi-02</code> is the highest-yield technique.</p>

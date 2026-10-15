@@ -1,0 +1,278 @@
+<h1 id="cpu-timing-attacks">CPU Timing Attacks</h1>
+<h2 id="summary">Summary</h2>
+<p>Lecture 18 is the capstone: an attacker with no bug to exploit, no key to steal, and often no<br />
+code execution at all — just the ability to measure time. Spectre and Meltdown made speculative<br />
+execution a universal memory-disclosure primitive.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Side channels</strong>: secrets leak through time, cache state, power, or contention</li>
+<li><strong>Timing attacks</strong>: measure how long an operation takes, infer a secret-dependent branch</li>
+<li><strong>Speculative execution</strong>: the CPU executes past a bounds check or a permission check, and the<br />
+  result leaks via cache</li>
+<li><strong>Meltdown</strong>: speculative read of kernel memory, then a fault; flush+reload recovers it</li>
+<li><strong>Spectre</strong>: speculative execution poisons a branch predictor or a register</li>
+<li><strong>The mitigations all cost performance</strong> — the industry accepted the cost</li>
+<li><strong>The lesson</strong>: physical properties become security properties once data depends on them</li>
+</ul>
+<h2 id="the-three-ingredients">The three ingredients</h2>
+<pre><code class="language-text">1. a secret-dependent operation
+2. an observable side effect of that operation
+3. the ability to measure the side effect
+
+You need all three. Remove any one and the attack fails.
+</code></pre>
+<h2 id="timing-attacks-without-speculation">Timing attacks without speculation</h2>
+<p>The classic demonstration: find a secret with a byte-at-a-time comparison.</p>
+<pre><code class="language-python">def is_secret_byte_correct(secret_guess):
+    return secret_guess == SECRET[0]        # early return
+
+# An attacker measuring the time per guess learns how many
+# leading bytes matched - then brute-forces 256 values per byte
+</code></pre>
+<p>This requires no kernel bug, no speculative execution, and no memory access<br />
+privilege. It requires only the ability to time a remote operation, which is<br />
+why constant-time code (<code>constant-time</code>) exists.</p>
+<h2 id="spectre-v1-in-four-steps">Spectre v1, in four steps</h2>
+<ol>
+<li>The CPU speculatively executes a branch it predicted will be taken</li>
+<li>That speculation reads memory the branch should not have read</li>
+<li>The result stays in a register or cache line</li>
+<li>The branch is mispredicted, the speculation is squashed — <strong>but the cache is not</strong></li>
+</ol>
+<p>Attack variants: bounds-check bypass (<code>array[i]</code> where <code>i</code> is out of range),<br />
+indirect branch misprediction, and return-oriented programming variants.</p>
+<h2 id="meltdown">Meltdown</h2>
+<ol>
+<li>A user-space instruction speculatively reads kernel memory</li>
+<li>A subsequent access faults, but the speculative read already happened</li>
+<li>The value left a cache footprint</li>
+<li>Flush+Reload from user space recovers it</li>
+</ol>
+<p>Meltdown is an architectural bug (privilege check after the memory access);<br />
+Spectre is a microarchitectural bug (speculative execution past a check).</p>
+<h2 id="mitigations-and-their-costs">Mitigations and their costs</h2>
+<table>
+<thead>
+<tr>
+<th>Mitigation</th>
+<th>Against</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>KPTI / Meltdown mitigation</td>
+<td>Meltdown</td>
+<td>5-20% on some workloads</td>
+</tr>
+<tr>
+<td>IBRS / STIBP</td>
+<td>Spectre v2</td>
+<td>smaller</td>
+</tr>
+<tr>
+<td>retpolines / IBPB</td>
+<td>Spectre v2</td>
+<td>branch prediction disabled</td>
+</tr>
+<tr>
+<td>lfence in bounds checks</td>
+<td>bounds-check Spectre</td>
+<td>serialising instruction</td>
+</tr>
+<tr>
+<td>ASLR + KASLR</td>
+<td>address guessing</td>
+<td>negligible</td>
+</tr>
+<tr>
+<td>constant-time code</td>
+<td>timing channels</td>
+<td>harder to write, easy to get wrong</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Note the asymmetry:</strong> KPTI prevents Meltdown by making kernel memory<br />
+unmapped in user space, which is a large architectural cost. There is <strong>no<br />
+complete fix for Spectre v1</strong> — the mitigation is probabilistic.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Side channel</strong></td>
+<td>Leaking secrets via observable side effects</td>
+</tr>
+<tr>
+<td><strong>Timing attack</strong></td>
+<td>Inferring secrets from execution time</td>
+</tr>
+<tr>
+<td><strong>Speculative execution</strong></td>
+<td>Executing instructions before they are known to be needed</td>
+</tr>
+<tr>
+<td><strong>Branch predictor</strong></td>
+<td>Hardware guess about which branch will be taken</td>
+</tr>
+<tr>
+<td><strong>Spectre</strong></td>
+<td>Speculative execution poisons a predictor or register</td>
+</tr>
+<tr>
+<td><strong>Meltdown</strong></td>
+<td>Speculative read of kernel memory</td>
+</tr>
+<tr>
+<td><strong>KPTI</strong></td>
+<td>Kernel page-table isolation</td>
+</tr>
+<tr>
+<td><strong>IBPB / retpolines</strong></td>
+<td>Indirect-branch mitigations</td>
+</tr>
+<tr>
+<td><strong>Flush+Reload</strong></td>
+<td>Reading another process's cache access via timing</td>
+</tr>
+<tr>
+<td><strong>Constant-time</strong></td>
+<td>Code whose timing does not depend on secrets</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what mitigations are active on this machine? ---
+{
+  echo &quot;=== CPU flags (the mitigations are visible here) ===&quot;
+  for f in spec_store_bypass ssbd ibpb ibrs stibp retpoline l1tf flush_l1d arm_speculation; do
+    grep -qw &quot;$f&quot; /proc/cpuinfo &amp;&amp; echo &quot;  present : $f&quot; || echo &quot;  absent  : $f&quot;
+  done
+  echo
+  echo &quot;=== kernel mitigations ===&quot;
+  dmesg 2&gt;/dev/null | grep -iE &quot;speculation|meltdown|spectre|kpti|retpoline&quot; | head -8
+  echo
+  echo &quot;=== kernel knobs ===&quot;
+  for s in unprivileged_userns_clone kptr_restrict perf_event_paranoid; do
+    printf &quot;  %-32s %s\n&quot; &quot;$s&quot; &quot;$(cat /proc/sys/kernel/$s 2&gt;/dev/null)&quot;
+  done
+} 2&gt;&amp;1 | tee 01-mitigations.txt
+
+# --- perf_event_paranoid: can anyone profile this machine? ---
+echo &quot;=== side-channel-adjacent settings ===&quot;
+echo &quot;  perf_event_paranoid = $(cat /proc/sys/kernel/perf_event_paranoid 2&gt;/dev/null)&quot;
+echo &quot;    0: anyone can profile any process  &lt;- highest side-channel exposure&quot;
+echo &quot;    2: only your own processes&quot;
+echo &quot;    3: paranoid, no kernel profiling&quot;
+
+# --- kptr_restrict: are kernel addresses leaked? ---
+echo &quot;  kptr_restrict = $(cat /proc/sys/kernel/kptr_restrict 2&gt;/dev/null)&quot;
+echo &quot;    0: /proc/*/maps reveals kernel addresses -&gt; KASLR is useless&quot;
+
+# --- a timing measurement you can do without any tool ---
+python3 - &lt;&lt;'PY' | tee 02-timing.txt
+import time, statistics
+
+def work(n):
+    s = 0
+    for i in range(n): s += i * i
+    return s
+
+def measure(n, reps=200):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter_ns(); work(n); ts.append(time.perf_counter_ns() - t0)
+    return min(ts)
+
+print(&quot;  measuring execution time by workload size:&quot;)
+prev = None
+for n in (1000, 10000, 100000, 1000000):
+    t = measure(n)
+    print(f&quot;    n={n:&lt;9} {t/1e6:9.3f} ms&quot; + (f&quot;   delta {(t-prev)/1e6:.3f} ms&quot; if prev else &quot;&quot;))
+    prev = t
+print()
+print(&quot;  The measurement is stable and repeatable. That stability is exactly what&quot;)
+print(&quot;  makes timing attacks practical: the signal exceeds the noise.&quot;)
+PY
+cat 02-timing.txt
+
+# --- the early-exit timing attack, demonstrated ---
+cat &gt; 03-early-exit.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Recover a secret byte by byte using timing. No kernel bug required.&quot;&quot;&quot;
+import time, secrets, statistics
+
+SECRET = secrets.token_bytes(4)
+
+def check(guess: bytes) -&gt; bool:
+    &quot;&quot;&quot;Returns False at the first mismatching byte.&quot;&quot;&quot;
+    for a, b in zip(SECRET, guess):
+        if a != b:
+            return False
+    return True
+
+def timeit(fn, arg, reps=2000):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter_ns(); fn(arg); ts.append(time.perf_counter_ns() - t0)
+    return statistics.median(ts)
+
+def recover() -&gt; bytes:
+    found = b&quot;&quot;
+    while len(found) &lt; len(SECRET):
+        base = timeit(check, found + b&quot;\x00&quot;)
+        best, best_t = None, -1
+        for candidate in range(256):
+            t = timeit(check, found + bytes([candidate]))
+            if t &gt; best_t:
+                best_t, best = t, candidate
+        found += bytes([best])
+        print(f&quot;    recovered so far: {found.hex()}  (baseline {base} ns, best {best_t} ns)&quot;)
+    return found
+
+if __name__ == &quot;__main__&quot;:
+    print(f&quot;  secret      : {SECRET.hex()}&quot;)
+    print(&quot;  recovering by timing (this is the whole attack):&quot;)
+    got = recover()
+    print(f&quot;  recovered   : {got.hex()}&quot;)
+    print(f&quot;  correct     : {got == SECRET}&quot;)
+PY
+python3 03-early-exit.py | tee 04-early-exit.txt
+rm -f 03-early-exit.py
+
+# --- cache state is observable: the core of every cache attack ---
+{
+  echo &quot;=== the cache hierarchy an attacker measures ===&quot;
+  for i in /sys/devices/system/cpu/cpu0/cache/index*; do
+    [ -d &quot;$i&quot; ] || continue
+    printf &quot;  L%s %-8s size=%-8s line=%s\n&quot; \
+      &quot;$(cat $i/level 2&gt;/dev/null)&quot; &quot;$(cat $i/type 2&gt;/dev/null)&quot; \
+      &quot;$(cat $i/size 2&gt;/dev/null)&quot; &quot;$(cat $i/coherency_line_size 2&gt;/dev/null)&quot;
+  done
+  echo
+  echo &quot;  Smaller share of cache = faster access = detectable difference.&quot;
+  echo &quot;  mit858-07 (enclaves) is the hardware version of this problem.&quot;
+} 2&gt;&amp;1 | tee 05-cache.txt
+</code></pre>
+<p><strong>Step 4 is the demonstration</strong>: it recovers a random 4-byte secret purely by timing, with no<br />
+kernel bug, no speculative execution and no memory access privilege. That is the lecture's point<br />
+in 20 lines of Python.</p>
+<p><strong>Record:</strong> <code>02-timing.txt</code>, <code>04-early-exit.txt</code> and <code>01-mitigations.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What three ingredients does a side-channel attack require?</li>
+<li>Why does an early-exit comparison leak the secret through timing?</li>
+<li>What is the difference between Meltdown and Spectre, architecturally?</li>
+<li>Why does KPTI mitigate Meltdown but not Spectre v1?</li>
+<li>Why is <code>perf_event_paranoid=0</code> a security concern?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>CPU Timing Attack</strong> → <strong>Side Channel</strong> → <strong>Speculation</strong> → <strong>Enclave Attack</strong> →<br />
+<strong>Constant-Time</strong> → <strong>CPU / Cache Timing</strong>.<br />
+This is the end of 6.858's core argument: security is not only logic, it is<br />
+physics.</p>

@@ -1,0 +1,233 @@
+<h1 id="triggering-and-observing-a-crash">Triggering and Observing a Crash</h1>
+<h2 id="summary">Summary</h2>
+<p>A crash is data. Before you can control where a program goes, you need to reliably make it fail,<br />
+and you need to read exactly how. This is the observation half of exploitation.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>A segfault is the kernel refusing a memory access; the address tells you what you touched</li>
+<li><strong>Overwriting the return address with <code>0xdeadbeef</code> crashes at <code>ret</code></strong>, not at the copy</li>
+<li>The crash location tells you which pointer you corrupted</li>
+<li><code>dmesg</code> reports the faulting address and the instruction pointer</li>
+<li>GDB catches the signal before the process dies, so you can walk the stack</li>
+<li>Reproducibility matters: same input, same crash, every time</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Segmentation fault (SIGSEGV)</strong></td>
+<td>Invalid memory access</td>
+</tr>
+<tr>
+<td><strong>SIGABRT</strong></td>
+<td><code>abort()</code> called — usually a canary failure</td>
+</tr>
+<tr>
+<td><strong>RIP</strong></td>
+<td>Instruction pointer at the fault</td>
+</tr>
+<tr>
+<td><strong>Faulting address</strong></td>
+<td>The address that was invalid</td>
+</tr>
+<tr>
+<td><strong>Core dump</strong></td>
+<td>Post-mortem memory snapshot</td>
+</tr>
+<tr>
+<td><strong><code>ret</code> instruction</strong></td>
+<td>Where a corrupted return address finally takes effect</td>
+</tr>
+<tr>
+<td><strong>Wild pointer</strong></td>
+<td>A pointer to unmapped memory</td>
+</tr>
+<tr>
+<td><strong>Dmesg</strong></td>
+<td>Kernel ring buffer; logs the segfault reason</td>
+</tr>
+<tr>
+<td><strong>Deterministic crash</strong></td>
+<td>Same input always produces the same fault</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- trigger it from the shell ---
+./target &quot;$(python3 -c 'print(&quot;A&quot;*64)')&quot; ; echo &quot;exit: $?&quot;
+dmesg | tail -5
+
+# --- core dumps ---
+ulimit -c unlimited
+cat /proc/sys/kernel/core_pattern
+ls -la core* 2&gt;/dev/null | head
+
+# --- catch the signal in gdb ---
+gdb -q --batch \
+  -ex 'run' \
+  -ex 'bt' \
+  -ex 'info registers rip rsp rbp' \
+  -ex 'x/i $rip' \
+  -ex 'x/8gx $rsp' \
+  ./target &quot;$(python3 -c 'print(&quot;A&quot;*64)')&quot; 2&gt;&amp;1 | tail -25
+
+# --- break at ret to see the moment of the jump ---
+objdump -d ./target | grep -B2 &quot;ret&quot;
+# then:  gdb -ex 'break *0x4011ce' -ex run -ex 'p/x $rsp' -ex 'x/4gx $rsp'
+
+# --- signals reference ---
+kill -l | head -12
+python3 -c &quot;import signal; print('SIGSEGV', int(signal.SIGSEGV), 'SIGABRT', int(signal.SIGABRT))&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> produce crashes with distinct signatures and identify each one from evidence.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ex-03 &amp;&amp; cd ~/aegis/labs/ex-03
+
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+
+void win(void) { puts(&quot;WIN: you redirected execution&quot;); exit(0); }
+
+void vuln(const char *input) {
+    char buf[32];
+    strcpy(buf, input);              /* unbounded copy */
+    printf(&quot;copied %zu bytes\n&quot;, strlen(buf));
+}
+
+int main(int argc, char **argv) {
+    if (argc &lt; 2) { fprintf(stderr, &quot;usage: %s &lt;string&gt; [win]\n&quot;, argv[0]); return 1; }
+    vuln(argv[1]);
+    printf(&quot;returned normally\n&quot;);
+    return 0;
+}
+EOF
+gcc -Wall -g -O0 -fno-stack-protector -no-pie -z execstack target.c -o target
+checksec --file=./target | grep -E &quot;canary|NX|PIE&quot;
+objdump -d ./target | grep -E &quot;&lt;win&gt;|&lt;vuln&gt;|&lt;main&gt;:&quot; | head
+
+# --- 1. no overflow: clean run ---
+echo &quot;=== short input ===&quot;
+./target &quot;hello&quot;; echo &quot;  exit: $?&quot;
+echo &quot;  ^ 'returned normally' means the frame was intact&quot;
+
+# --- 2. exactly at the boundary ---
+echo
+echo &quot;=== boundary probing ===&quot;
+for n in 16 24 31 32 33 40 48 56 64 80; do
+  out=$(./target &quot;$(python3 -c &quot;print('A'*$n)&quot;)&quot; 2&gt;&amp;1); rc=$?
+  printf &quot;  n=%-4s rc=%-4s %s\n&quot; &quot;$n&quot; &quot;$rc&quot; &quot;$(echo &quot;$out&quot; | tail -1 | cut -c1-46)&quot;
+done
+
+# --- 3. the kernel's version of the same event ---
+echo
+echo &quot;=== what the kernel recorded ===&quot;
+sudo dmesg -T 2&gt;/dev/null | grep -iE &quot;segfault|general protection|trap&quot; | tail -5 \
+  || dmesg | grep -i segfault | tail -5
+
+# --- 4. crash under gdb, caught before death ---
+echo
+echo &quot;=== catching the fault in gdb ===&quot;
+gdb -q --batch \
+  -ex 'run' \
+  -ex 'echo \n=== signal caught ===\n' \
+  -ex 'bt' \
+  -ex 'info registers rip rsp rbp rdi rsi' \
+  -ex 'x/i $rip' \
+  -ex 'x/4gx $rbp' \
+  -ex quit \
+  --args ./target &quot;$(python3 -c 'print(&quot;B&quot;*48)')&quot; 2&gt;&amp;1 | tail -30 | tee 01-gdb-crash.txt
+cat 01-gdb-crash.txt
+echo
+echo &quot;Read: RIP is where it died. If RIP looks like 0x00000000deadbeef or&quot;
+echo &quot;0x4141414141414141, the return address is what you corrupted.&quot;
+
+# --- 5. control the corrupted return address exactly ---
+echo
+echo &quot;=== putting a known value in the return slot ===&quot;
+python3 - &lt;&lt;'PY'
+import subprocess, struct
+ADDR = 0xdeadbeef
+for pad in range(1, 80):
+    payload = b&quot;A&quot; * pad + struct.pack(&quot;&lt;Q&quot;, ADDR)
+    r = subprocess.run([&quot;./target&quot;, payload], capture_output=True, timeout=5)
+    if r.returncode != 0:
+        print(f&quot;  padding {pad:&gt;3}  exit={r.returncode}  (SIGSEGV={r.returncode &lt; 0 and -r.returncode or 139})&quot;)
+        break
+PY
+
+# --- 6. prove the fault address is OUR value ---
+echo
+echo &quot;=== the faulting address in dmesg should be 0xdeadbeef ===&quot;
+./target &quot;$(python3 -c 'print(&quot;A&quot;*40 + &quot;\xef\xbe\xad\xde\x00\x00\x00\x00&quot;)')&quot; 2&gt;/dev/null
+sudo dmesg -T 2&gt;/dev/null | tail -3
+
+# --- 7. distinguish SIGSEGV from SIGABRT ---
+echo
+echo &quot;=== two different failure signatures ===&quot;
+python3 - &lt;&lt;'PY'
+import subprocess, struct
+# a canary failure calls abort() -&gt; SIGABRT (134); a bad return -&gt; SIGSEGV (139)
+for name, payload in [
+    (&quot;short input          &quot;, b&quot;A&quot;*8),
+    (&quot;long input, no canary&quot;, b&quot;A&quot;*200),
+    (&quot;wild return address  &quot;, b&quot;A&quot;*40 + struct.pack(&quot;&lt;Q&quot;, 0xdeadbeef)),
+]:
+    r = subprocess.run([&quot;./target&quot;, payload], capture_output=True, timeout=5)
+    sig = -r.returncode if r.returncode &lt; 0 else None
+    print(f&quot;  {name}  exit={r.returncode:&lt;4} signal={sig}  {r.stderr.decode()[:44]}&quot;)
+PY
+
+# --- 8. break exactly at ret ---
+echo
+echo &quot;=== the moment of the jump ===&quot;
+RETADDR=$(objdump -d ./target | awk '/&lt;main&gt;:/,/^$/' | grep -B1 &quot;ret&quot; | grep -oE &quot;0x[0-9a-f]+&quot; | head -1)
+echo &quot;  a ret instruction is at approximately: $RETADDR&quot;
+gdb -q --batch \
+  -ex &quot;break *${RETADDR:-0x0}&quot; \
+  -ex &quot;run $(python3 -c 'print(&quot;C&quot;*40)')&quot; \
+  -ex 'echo \n-- at the ret instruction --\n' \
+  -ex 'x/1gx $rsp' \
+  -ex 'x/i $rip' \
+  -ex quit ./target 2&gt;&amp;1 | tail -12 | tee 02-at-ret.txt
+
+# --- 9. record the observations ---
+cat &gt; 03-observations.md &lt;&lt;'EOF'
+# Crash observations (target, gcc -O0 -fno-stack-protector)
+
+| Input length | Exit | Signal | RIP looks like | Interpretation |
+|---|---|---|---|---|
+|   |  |  |  |  |
+|   |  |  |  |  |
+|   |  |  |  |  |
+|   |  |  |  |  |
+
+## What to remember
+- The crash happens at `ret`, not at the copy. The copy silently succeeds.
+- SIGSEGV (139) = invalid address. SIGABRT (134) = a check failed (canary).
+- The faulting address in dmesg equals whatever you wrote into the return slot.
+EOF
+cat 03-observations.md
+</code></pre>
+<p><strong>Step 7 is the insight to carry forward.</strong> A SIGSEGV from a wild address and a SIGABRT from a<br />
+canary failure look completely different, and telling them apart instantly tells you which<br />
+mitigation you are fighting.</p>
+<p><strong>Record:</strong> <code>03-observations.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>At which instruction does a stack overflow crash: the copy, or the return?</li>
+<li>How do you tell a SIGSEGV caused by a corrupted return address from a canary abort?</li>
+<li>What is the significance of the faulting address in dmesg?</li>
+<li>Why does gdb see the crash when the shell only sees an exit code?</li>
+<li>What does RIP look like if the return address was overwritten with <code>0x41414141</code>?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Buffer Overflow</strong> → <strong>Stack Overflow Exploitation</strong> → <strong>Dynamic Analysis</strong> → <strong>gdb</strong> →<br />
+<strong>Info Leak</strong> → <strong>Stack Canary</strong>.</p>

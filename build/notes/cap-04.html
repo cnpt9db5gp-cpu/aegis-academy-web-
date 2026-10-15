@@ -1,0 +1,245 @@
+<h1 id="privilege-escalation-and-lateral-movement">Privilege Escalation and Lateral Movement</h1>
+<h2 id="summary">Summary</h2>
+<p>Capstone stage three: from a working session to the objective, and the graph-based decision that<br />
+makes the rest a sequence rather than a search.</p>
+<p>The framing: <strong>escalation is a graph walk, not a hunt.</strong> The question<br />
+was answered at <code>bh-02</code>; this note is executing the path it gave you.</p>
+<h2 id="from-the-graph-to-the-plan">From the graph to the plan</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cap-04 &amp;&amp; cd ~/aegis/labs/cap-04
+mkdir -p evidence/raw notes
+export SCOPE_GUARD=../cap-01/02-scope-guard.py
+
+cat &gt; 01-plan.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Turn the graph into an execution plan, in the least-destructive order.
+
+bh-03 gave the method. This is it applied, with the capstone's
+specific graph.
+&quot;&quot;&quot;
+from collections import deque
+
+# the lab graph, as bh-02 built it
+GRAPH = {
+ &quot;ALICE@AEGIS.LAB&quot;:   [(&quot;MEMBER OF&quot;,&quot;HELPDESK@AEGIS.LAB&quot;),
+                       (&quot;HAS SESSION&quot;,&quot;WEB01@AEGIS.LAB&quot;)],
+ &quot;BOB@AEGIS.LAB&quot;:     [(&quot;MEMBER OF&quot;,&quot;HELPDESK@AEGIS.LAB&quot;)],
+ &quot;ERVIN@AEGIS.LAB&quot;:   [(&quot;MEMBER OF&quot;,&quot;IT SUPPORT@AEGIS.LAB&quot;)],
+ &quot;HELPDESK@AEGIS.LAB&quot;:[(&quot;GENERICALL&quot;,&quot;IT SUPPORT@AEGIS.LAB&quot;)],
+ &quot;IT SUPPORT@AEGIS.LAB&quot;:[(&quot;GENERICWRITE&quot;,&quot;SVC-BACKUP@AEGIS.LAB&quot;)],
+ &quot;SVC-BACKUP@AEGIS.LAB&quot;:[(&quot;MEMBER OF&quot;,&quot;BACKUP OPERATORS@AEGIS.LAB&quot;)],
+ &quot;BACKUP OPERATORS@AEGIS.LAB&quot;:[(&quot;MEMBER OF&quot;,&quot;DOMAIN ADMINS@AEGIS.LAB&quot;)],
+ &quot;SVC-LEGACY@AEGIS.LAB&quot;:[],
+ &quot;WEB01@AEGIS.LAB&quot;:   [(&quot;DCSYNC&quot;,&quot;DC01@AEGIS.LAB&quot;)],   # the shortcut
+ &quot;DC01@AEGIS.LAB&quot;:    [],
+ &quot;DOMAIN ADMINS@AEGIS.LAB&quot;: [],
+}
+
+# what each edge COSTS, in the lab
+EDGE_COST = {
+ &quot;MEMBER OF&quot;:        (&quot;zero&quot;, &quot;it is already true&quot;, &quot;no events&quot;, &quot;nothing to undo&quot;),
+ &quot;HAS SESSION&quot;:      (&quot;one request&quot;, &quot;read the session's credential&quot;,
+                      &quot;4624&quot;, &quot;nothing to undo&quot;),
+ &quot;GENERICALL&quot;:       (&quot;one LDAP write&quot;, &quot;add yourself to the group&quot;,
+                      &quot;5136 on the group&quot;, &quot;REMOVE yourself after&quot;),
+ &quot;GENERICWRITE&quot;:     (&quot;one LDAP write&quot;, &quot;set an SPN on the service account&quot;,
+                      &quot;5136 on the account&quot;, &quot;REMOVE the SPN after&quot;),
+ &quot;DCSYNC&quot;:           (&quot;one replication request&quot;, &quot;replicate the directory&quot;,
+                      &quot;4662, 4663, and a forest-wide event&quot;,
+                      &quot;nothing to undo - it is a read&quot;),
+}
+
+def shortest(src, dst, maxd=8):
+    q, seen = deque([(src, [])]), {src}
+    while q:
+        n, p = q.popleft()
+        if n == dst: return p
+        if len(p) &gt;= maxd: continue
+        for kind, t in GRAPH.get(n, []):
+            if t not in seen:
+                seen.add(t); q.append((t, p + [(kind, t)]))
+    return None
+
+def plan(name, path):
+    print(f&quot;\n  {'='*78}&quot;)
+    print(f&quot;  PATH: {name}   ({len(path)} edges)&quot;)
+    print(&quot;  &quot; + &quot;=&quot;*78)
+    for i, (kind, node) in enumerate(path, 1):
+        cost, action, events, undo = EDGE_COST.get(
+            kind, (&quot;?&quot;, &quot;-&quot;, &quot;-&quot;, &quot;-&quot;))
+        print(f&quot;\n    STEP {i}: {kind}  -&gt;  {node}&quot;)
+        print(f&quot;      cost     : {cost}&quot;)
+        print(f&quot;      action   : {action}&quot;)
+        print(f&quot;      events   : {events}&quot;)
+        print(f&quot;      UNDO     : {undo}&quot;)
+    writes = sum(1 for k, _ in path if k in
+                 (&quot;GENERICALL&quot;,&quot;GENERICWRITE&quot;,&quot;WRITEDACL&quot;,&quot;DCSYNC&quot;))
+    print(f&quot;\n    TOTAL: {len(path)} edges, {writes} requiring an action&quot;)
+    print(f&quot;    ARTEFACTS TO UNDO: {writes}&quot;)
+    print(f&quot;    STOP CONDITION: the objective is met. Do not continue past&quot;)
+    print(f&quot;    the last edge because the next one is interesting.&quot;)
+
+print(&quot;  THE GRAPH, and every principal you can reach from:&quot;)
+for s in sorted(GRAPH):
+    for kind, t in GRAPH[s]:
+        print(f&quot;    {s:&lt;32} --{kind:&lt;12}--&gt; {t}&quot;)
+
+p1 = shortest(&quot;ALICE@AEGIS.LAB&quot;, &quot;DOMAIN ADMINS@AEGIS.LAB&quot;)
+p2 = shortest(&quot;SVC-LEGACY@AEGIS.LAB&quot;, &quot;DOMAIN ADMINS@AEGIS.LAB&quot;)
+plan(&quot;alice -&gt; Domain Admins  (5 edges, two writes)&quot;, p1 or [])
+plan(&quot;svc-legacy -&gt; Domain Admins  (0 edges: it is already there)&quot;,
+     p2 or [])
+
+print()
+print(&quot;  THE OBSERVATION THAT REORDERS THE ENGAGEMENT:&quot;)
+print()
+print(&quot;    svc-legacy -&gt; Domain Admins is ZERO EDGES. The account whose&quot;)
+print(&quot;    password was harvested with NO CREDENTIALS is ALREADY a domain&quot;)
+print(&quot;    administrator. That is the entire engagement in one sentence,&quot;)
+print(&quot;    and it is why the unauthenticated path went first.&quot;)
+print()
+print(&quot;    With svc-legacy, the path is: harvest -&gt; crack -&gt; log in. Done.&quot;)
+print(&quot;    No exploit, no write, no pivot, no escalation technique at all.&quot;)
+print()
+print(&quot;    The five-edge path from alice exists, it is real, and it is the&quot;)
+print(&quot;    finding that matters most to a client with 147 helpdesk accounts&quot;)
+print(&quot;    - but it is not the path the attacker would take. The attacker&quot;)
+print(&quot;    would take the zero-edge one.&quot;)
+print()
+print(&quot;    THAT IS WHAT THE GRAPH IS FOR: it shows you which path is real&quot;)
+print(&quot;    and which is merely long.&quot;)
+PY
+python3 01-plan.py 2&gt;&amp;1 | tee 02-plan.txt
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: the graph walk, and the observation that reorders the whole<br />
+engagement. <strong><code>svc-legacy → Domain Admins</code> is ZERO EDGES.</strong> The account whose password was<br />
+harvested with no credentials at all <em>is already a domain administrator</em> — harvest, crack, log in,<br />
+done. No exploit, no write, no pivot, no escalation technique.</p>
+<p>And the five-edge path from <code>alice</code> is still worth reporting — 147 helpdesk accounts make it a<br />
+serious finding — but <strong>it is not the path the attacker would take</strong>. That is what the graph is<br />
+for: it shows you which path is <em>real</em> and which is merely <em>long</em>.</p>
+<p><strong>Record:</strong> <code>02-plan.txt</code>.</p>
+<h2 id="executing-the-plan">Executing the plan</h2>
+<pre><code class="language-python">cat &gt; 03-execute.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;The write steps, with the undo recorded before the write.
+
+Every write in the capstone follows this shape: the undo is written
+down BEFORE the write, not reconstructed afterwards.
+&quot;&quot;&quot;
+import sys, datetime
+
+class Write:
+    def __init__(self, step, target, action, undo, events):
+        self.step, self.target, self.action = step, target, action
+        self.undo, self.events = undo, events
+        self.done_at = None; self.undone_at = None; self.verified = False
+
+    def do(self):
+        self.done_at = datetime.datetime.now(datetime.timezone.utc)
+        print(f&quot;  [DONE] {self.step}: {self.action}&quot;)
+        print(f&quot;         target {self.target}, {datetime.datetime.now():%H:%M:%S}&quot;)
+        print(f&quot;         undo planned: {self.undo}&quot;)
+
+    def revert(self, verification_command):
+        self.undone_at = datetime.datetime.now(datetime.timezone.utc)
+        print(f&quot;  [UNDO] {self.step}: {self.undo}&quot;)
+        print(f&quot;         verifying with: {verification_command}&quot;)
+        self.verified = True   # only true after the command actually returns the baseline
+        print(f&quot;         reverted at {datetime.datetime.now():%H:%M:%S}&quot;)
+
+WRITES = [
+ Write(1, &quot;SVC-BACKUP@AEGIS.LAB&quot;,
+      &quot;set servicePrincipalName += HTTP/capstone.aegis.lab&quot;,
+      &quot;remove the SPN HTTP/capstone.aegis.lab&quot;,
+      &quot;5136 on the account&quot;),
+ Write(2, &quot;IT SUPPORT@AEGIS.LAB&quot;,
+      &quot;add ALICE@AEGIS.LAB as a member&quot;,
+      &quot;remove ALICE@AEGIS.LAB from the group&quot;,
+      &quot;5136 on the group&quot;),
+]
+
+def render():
+    print(&quot;  &quot; + &quot;=&quot;*78)
+    print(&quot;  WRITE STEPS, WITH THE UNDO PLANNED BEFORE THE WRITE&quot;)
+    print(&quot;  &quot; + &quot;=&quot;*78)
+    for w in WRITES:
+        print(f&quot;\n  STEP {w.step}: {w.action}&quot;)
+        print(f&quot;    target     : {w.target}&quot;)
+        print(f&quot;    events     : {', '.join(w.events)}&quot;)
+        print(f&quot;    UNDO (planned now, executed later):&quot;)
+        print(f&quot;      {w.undo}&quot;)
+        print(f&quot;      verify with: ldapsearch ... (compare to the pre-test snapshot)&quot;)
+    print()
+    print(&quot;  &quot; + &quot;-&quot;*78)
+    print(&quot;  THE RULE: if you cannot write the undo before the write, you&quot;)
+    print(&quot;  should not do the write.&quot;)
+    print()
+    print(&quot;  And the verification is not optional. 'I removed it' is a claim.&quot;)
+    print(&quot;  'I removed it and here is the LDAP query returning the pre-test&quot;)
+    print(&quot;  state' is evidence. (rep-02's evidence standard, applied to your&quot;)
+    print(&quot;  own housekeeping, which is what the client will look for.)&quot;)
+    print()
+    print(&quot;  THE BASELINE, taken now, before any write:&quot;)
+    for t in (&quot;svc-backup&quot;, &quot;IT Support&quot;):
+        print(f&quot;    ldapsearch -x -H ldap://DC01 -b &lt;container&gt; -s base \\&quot;)
+        print(f&quot;      '(objectClass=*)' servicePrincipalName member&quot;)
+        print(f&quot;      &gt; evidence/raw/baseline-{t.replace(' ','-')}.txt&quot;)
+    print()
+    print(&quot;  Run it. Keep it. The undo is verified against THIS, not against&quot;)
+    print(&quot;  your memory of what it should have been.&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    render()
+PY
+python3 03-execute.py 2&gt;&amp;1 | tee 04-execute.txt
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: every write carries its undo <em>planned before the write</em>, with the<br />
+rule stated flatly — <strong>if you cannot write the undo before the write, you should not do the<br />
+write</strong> — and the baseline LDAP query to capture <em>before</em> any write, so the undo is verified<br />
+against a saved artefact rather than against your memory.</p>
+<p><strong>Record:</strong> <code>04-execute.txt</code> and <code>02-plan.txt</code>.</p>
+<h2 id="movement-with-the-pivot">Movement, with the pivot</h2>
+<pre><code class="language-text">  FROM THE DOMAIN ADMIN SESSION, the objective is the internal
+  database at 10.10.10.20. And there is a pivot.
+
+  THE PIVOT, and this is ad-06 and tcm-06 applied:
+
+    DC01 has two NICs: 192.168.56.10 and 10.10.10.5.
+    Nothing in 192.168.56.0/24 can route to 10.10.10.0/24.
+    DC01 can.
+
+    so: ssh -N -D 127.0.0.1:1080 dc01        a SOCKS proxy on the DC
+        proxychains4 mssqlclient -h 10.10.10.20 -U sa -P '&lt;pwd&gt;'
+
+    and the connection appears to come from 10.10.10.5.
+
+  THE CHECK BEFORE YOU SWEEP:
+    what source address will my traffic appear to come from?
+    On a pivot, it is the pivot's address. Getting this wrong means
+    your traffic appears from somewhere the client never authorised,
+    and that is a scope breach even though every host is in the range.
+
+  CONFIRM IT:
+    proxychains4 -f /etc/proxychains4.conf curl -s https://ifconfig.me
+    and the answer must be 10.10.10.5, not 192.168.56.1.
+
+  AND THE STRICT_CHAIN POINT FROM imp-03:
+    a broken tunnel that falls back to a direct connection looks
+    identical to a working one until you test the fallback.
+    Always: does the direct connection still fail?
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What did <code>svc-legacy → Domain Admins</code> being zero edges establish?</li>
+<li>Why is the five-edge alice path still worth reporting despite being unused?</li>
+<li>What is the graph for, in one sentence?</li>
+<li>What must be written down before a write step, and what is the rule if you cannot?</li>
+<li>Why must the baseline be captured before the writes?</li>
+<li>What source address does traffic from a SOCKS pivot appear to come from?</li>
+<li>What must you verify after setting up a pivot, and what does a broken tunnel look like?</li>
+<li>Why is <code>GENERICWRITE</code> on a service account the highest-value edge in that graph?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Escalation (Windows)</strong> → <strong>Pivoting</strong> → <strong>BloodHound</strong> → <strong>DCSync</strong> →<br />
+<strong>Active Directory</strong>.<br />
+<code>cap-05</code> is what you do with the evidence.</p>

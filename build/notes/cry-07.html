@@ -1,0 +1,489 @@
+<h1 id="tls-and-secure-channels">TLS and Secure Channels</h1>
+<h2 id="summary">Summary</h2>
+<p>TLS is where everything in this course gets used at once: certificates to authenticate, DH for<br />
+forward secrecy, AEAD for confidentiality and integrity, and careful protocol design to avoid the<br />
+classic downgrades.</p>
+<p>The lecture's framing: TLS is not "encryption". It is an authenticated key exchange that<br />
+happens to use encryption. Get the authentication wrong and the rest is worthless — <code>cry-05</code>'s<br />
+man in the middle is the failure mode TLS exists to prevent.</p>
+<h2 id="what-tls-actually-provides">What TLS actually provides</h2>
+<pre><code class="language-text">  AUTHENTICATION     of the server, via a certificate chain
+  CONFIDENTIALITY    via an AEAD cipher
+  INTEGRITY          via the AEAD tag (not a separate MAC)
+  FORWARD SECRECY    via ephemeral (EC)DHE, in TLS 1.3 always
+  CA-CHANNEL ENCRYPTION  0-RTT is NOT forward secret. See below.
+
+  WHAT IT DOES NOT PROVIDE:
+    - that the server is honest (it could serve a phishing page)
+    - that the CONTENT is correct (a signed malicious update is valid TLS)
+    - privacy from traffic analysis (IP, SNI, timing, size)
+    - protection against an endpoint that has been compromised
+    - anything at all before the certificate is validated
+</code></pre>
+<h2 id="the-tls-13-handshake">The TLS 1.3 handshake</h2>
+<pre><code class="language-text">  Client                                              Server
+    |                                                    |
+    |--- ClientHello ----------------------------------&gt;|
+    |    key_share (X25519)                             |
+    |    supported_versions: 1.3                        |
+    |    cipher_suites: TLS_AES_128_GCM_SHA256          |
+    |    signature_algorithms: rsa_pss, ed25519         |
+    |                                                    |
+    |&lt;-- ServerHello ------------------------------------|
+    |     key_share (X25519)                            |
+    |     cipher: TLS_AES_128_GCM_SHA256                |
+    |                                                    |
+    |&lt;-- {EncryptedExtensions} --------------------------|
+    |&lt;-- {Certificate} ----------------------------------|
+    |     the server's certificate chain                 |
+    |&lt;-- {CertificateVerify} ----------------------------|
+    |     signature over the transcript                 |
+    |&lt;-- {Finished} -------------------------------------|
+    |                                                    |
+    |    both sides compute:                             |
+    |      handshake_secret = HKDF(ECDHE_shared)        |
+    |      traffic keys   = HKDF(handshake_secret)     |
+    |      session keys   = HKDF(handshake_secret)      |
+    |      -&gt; traffic is now encrypted, from here       |
+    |                                                    |
+    |--- {Finished} -----------------------------------&gt;|
+    |                                                    |
+    |    application data (encrypted)                   |
+</code></pre>
+<p><strong>Note what is missing:</strong> there is no ServerKeyExchange in TLS 1.3<br />
+(unlike 1.2), because the server's key share is already in the<br />
+ServerHello. The whole thing is two round trips, then encryption.</p>
+<p><strong>Note also what makes it safe:</strong> the <code>CertificateVerify</code> signature is<br />
+over the <strong>transcript hash</strong> of the entire handshake so far. That binds<br />
+the key exchange to the certificate, so an attacker cannot substitute<br />
+the server's key_share without invalidating the signature.</p>
+<h2 id="the-0-rtt-problem">The 0-RTT problem</h2>
+<pre><code class="language-text">  TLS 1.3 lets the client send application data in its FIRST flight
+  (0-RTT), for things like a page reload.
+
+  0-RTT DATA IS NOT FORWARD SECRET.
+    The early data is encrypted to the server's long-term key and
+    recorded. If that key is compromised later, the recorded 0-RTT is
+    decrypted.
+
+  AND 0-RTT IS REPLAYABLE.
+    There is no way to know it has been seen. An attacker can replay it.
+
+  THEREFORE:
+    0-RTT is acceptable for GET and other idempotent requests.
+    0-RTT for a POST /transfer is a critical finding.
+
+  How to check: does the client use 0-RTT, and what does it send early?
+  WireGuard, iCloud, and some CDNs use it aggressively; some of those
+  uses are inappropriate.
+</code></pre>
+<h2 id="certificates">Certificates</h2>
+<pre><code class="language-text">  A CERTIFICATE BINDS a public key to a name.
+
+    subject:      CN=example.com
+    issuer:       CN=Example CA, O=Example Inc, C=US
+    validity:     notBefore .. notAfter
+    subjectAltName:  DNS:example.com, DNS:*.example.com, IP:1.2.3.4
+    basicConstraints: CA:FALSE
+    keyUsage:      digitalSignature, keyEncipherment
+    extendedKeyUsage: serverAuth
+    publicKey:     the key itself
+    signature:     the issuer's signature over the TBSCertificate
+
+  VALIDATION, all of it:
+    1. parse strictly (DER, no trailing bytes, no malformed extensions)
+    2. chain to a trusted root in the app's trust store
+    3. each issuer's CA:TRUE and keyCertSign
+    4. notBefore/notAfter, at the current time
+    5. hostname against subjectAltName (NEVER against CN, never against
+       a suffix match)
+    6. keyUsage and extendedKeyUsage fit the purpose
+    7. path length constraints
+    8. revocation: CRL or OCSP, and a REVOCATION FAILURE IS A FAILURE
+    9. verify the signature
+   10. check the signature is valid and the transcript matches
+</code></pre>
+<h3 id="the-hostname-check-which-is-where-people-cut-corners">The hostname check, which is where people cut corners</h3>
+<pre><code class="language-text">  WRONG:  endswith(&quot;.example.com&quot;)    -&gt; evil-example.com passes
+  WRONG:  endswith(&quot;example.com&quot;)     -&gt; notexample.com passes
+  WRONG:  == the CN field             -&gt; CN is deprecated, and CA:B? 
+                                          CERTs carry no SAN
+  WRONG:  a wildcard anywhere         -&gt; *.com is never valid
+  RIGHT:  exact match, or a wildcard
+          as the LEFTMOST label only:
+            *.example.com   matches  a.example.com
+            *.example.com   matches  www.example.com
+            *.example.com   does NOT match example.com
+            *.example.com   does NOT match a.b.example.com
+            (*.com is invalid by RFC 6125)
+</code></pre>
+<h2 id="downgrade-and-version-negotiation">Downgrade and version negotiation</h2>
+<pre><code class="language-text">  THE ATTACK: convince one side that the other cannot do TLS 1.3.
+  Then the 1.2 rules (weaker, more cipher suites, sometimes no PFS)
+  apply.
+
+  DEFENCES BUILT INTO THE PROTOCOL:
+    - TLS 1.3 puts a marker in the ServerHello random bytes
+      (DOWNGRD\x01) so the CLIENT can detect that the server was told
+      to downgrade
+    - TLS 1.3 has no separate version negotiation field; it uses
+      supported_versions in an extension
+    - all signatures cover the transcript, so a downgrade changes the
+      hash and invalidates the signature
+
+  WHAT TO CHECK IN YOUR OWN DEPLOYMENT:
+    - is version pinned, or is it &quot;the best the client offers&quot;?
+    - is a weak suite still in the list? (one entry is enough)
+    - is there a fallback to plaintext for the initial request?
+      (HSTS is the answer, and `includeSubDomains` and preload matter)
+</code></pre>
+<pre><code class="language-bash"># check what a real endpoint will negotiate, and with what
+for v in -tls1 -tls1_1 -tls1_2 -tls1_3; do
+  r=$(echo | timeout 5 openssl s_client $v -connect example.com:443 -servername example.com 2&gt;&amp;1 \
+      | grep -E &quot;^ *(New|.*Protocol|.*Cipher) *:&quot; | tr -s ' ' | tr '\n' ' ')
+  printf &quot;  %-10s %s\n&quot; &quot;$v&quot; &quot;${r:-refused}&quot;
+done
+</code></pre>
+<h2 id="session-resumption-and-0-rtt">Session resumption and 0-RTT</h2>
+<pre><code class="language-text">  SESSION RESUMPTION (TLS 1.3, PSK)
+    the server issues a session ticket (an encrypted blob containing
+    the resumption PSK and a timestamp)
+    the client stores it and presents it on the next connection
+    the handshake is shortened
+
+  THE FORWARD SECRECY QUESTION:
+    does the ticket contain the actual traffic keys, or just an
+    identifier?
+      - if it contains the keys, then resuming after a key compromise
+        restores access to that session. Old tickets should be
+        short-lived and rotated.
+      - &quot;anti-replay&quot; requires single-use tickets, which costs state
+
+  THE PRACTICAL POSTURE:
+    - short ticket lifetimes (hours, not weeks)
+    - rotate the ticket key
+    - 0-RTT only for idempotent operations
+    - never 0-RTT for anything that changes state
+</code></pre>
+<h2 id="what-tls-does-not-do-and-what-you-have-to-add">What TLS does not do, and what you have to add</h2>
+<pre><code class="language-text">  CERTIFICATE PINNING
+    Pros: resists a compromised CA (the 2018 events), resists many
+          interception proxies
+    Cons: rotation is painful, a mistake bricks the client, and an
+          attacker with one app update can bypass it
+    Only pin in a context you control (an app you ship), never in a
+    browser.
+
+  HSTS + preload
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    eliminates the &quot;first request over HTTP&quot; downgrade entirely.
+    The preload list is the hard part, and it is what you want.
+
+  SUBRESOURCE INTEGRITY
+    an integrity attribute on &lt;script&gt; and &lt;link&gt; pins a specific
+    hash. Works today, in every browser, with no key management.
+
+  OPAQUE / ECH
+    hides the server name from a passive observer. Coming, and it
+    changes the threat model for SSRF-to-metadata (see ps-05).
+</code></pre>
+<h2 id="reading-a-handshake-on-the-command-line">Reading a handshake, on the command line</h2>
+<pre><code class="language-bash"># what the client and server agreed on
+echo | openssl s_client -connect example.com:443 -servername example.com \
+  -showcerts -status 2&gt;/dev/null | grep -E &quot;^(New|Server public key|Negotiated|Verify return code)&quot;
+</code></pre>
+<pre><code class="language-bash">echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | openssl x509 -noout -text | grep -E &quot;Issuer|Subject:|Not Before|Not After|Algorithm|Key Usage&quot;
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TLS</strong></td>
+<td>An authenticated key exchange that carries encrypted data</td>
+</tr>
+<tr>
+<td><strong>Certificate chain</strong></td>
+<td>Leaf → intermediate(s) → root</td>
+</tr>
+<tr>
+<td><strong>Trust anchor</strong></td>
+<td>The root in the verifier's trust store</td>
+</tr>
+<tr>
+<td><strong>SNI</strong></td>
+<td>Server Name Indication; sent in cleartext, pre-ECH</td>
+</tr>
+<tr>
+<td><strong><code>CertificateVerify</code></strong></td>
+<td>Signature over the handshake transcript</td>
+</tr>
+<tr>
+<td><strong>Transcript hash</strong></td>
+<td>Running hash of every handshake message</td>
+</tr>
+<tr>
+<td><strong>0-RTT / early data</strong></td>
+<td>Client data before the server is authenticated</td>
+</tr>
+<tr>
+<td><strong>Session ticket / PSK</strong></td>
+<td>Resumption credential; may contain traffic keys</td>
+</tr>
+<tr>
+<td><strong>Downgrade attack</strong></td>
+<td>Forcing a weaker version</td>
+</tr>
+<tr>
+<td><strong>HSTS</strong></td>
+<td>Header forcing HTTPS, and preloading it</td>
+</tr>
+<tr>
+<td><strong>Certificate pinning</strong></td>
+<td>Pinning a key or SPKI in a client you control</td>
+</tr>
+<tr>
+<td><strong>SRI</strong></td>
+<td>Subresource Integrity; a hash in the markup</td>
+</tr>
+<tr>
+<td><strong>ECH</strong></td>
+<td>Encrypted Client Hello; hides SNI</td>
+</tr>
+<tr>
+<td><strong>AEAD in TLS</strong></td>
+<td>AES-GCM or ChaCha20-Poly1305; no separate MAC</td>
+</tr>
+<tr>
+<td><strong>OCSP stapling</strong></td>
+<td>Server-supplied revocation status</td>
+</tr>
+<tr>
+<td><strong>ALPN</strong></td>
+<td>Application-Layer Protocol Negotiation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir - ~/aegis/labs/cry-07 2&gt;/dev/null; mkdir -p ~/aegis/labs/cry-07 &amp;&amp; cd ~/aegis/labs/cry-07
+
+# --- 1. read a real handshake ---
+{
+  echo &quot;=== a live handshake, annotated ===&quot;
+  echo | timeout 8 openssl s_client -connect example.com:443 -servername example.com \
+    -showcerts 2&gt;/dev/null | grep -E &quot;^(New|Server public key|Negotiated TLS1.3 group|Verify return code)&quot; \
+    | sed 's/^/  /'
+  echo
+  echo &quot;  'Server Temp Key: X25519' or 'Negotiated TLS1.3 group: X25519'&quot;
+  echo &quot;  ^ an ephemeral group. That is forward secrecy.&quot;
+  echo &quot;  'Verify return code: 0 (ok)' is the only acceptable answer.&quot;
+} 2&gt;&amp;1 | tee 01-handshake.txt
+
+# --- 2. the version matrix ---
+{
+  echo &quot;=== what will it negotiate, at each forced version? ===&quot;
+  for v in &quot;-tls1&quot; &quot;-tls1_1&quot; &quot;-tls1_2&quot; &quot;-tls1_3&quot;; do
+    out=$(echo | timeout 6 openssl s_client $v -connect example.com:443 -servername example.com 2&gt;&amp;1)
+    proto=$(echo &quot;$out&quot; | grep -E &quot;^New,&quot; | awk -F, '{print $2}')
+    cipher=$(echo &quot;$out&quot; | grep -E &quot;^Cipher *:&quot; | head -1 | awk '{print $2}')
+    if [ -z &quot;$proto&quot; ]; then
+      printf &quot;  %-9s REFUSED\n&quot; &quot;$v&quot;
+    else
+      printf &quot;  %-9s %-10s %s\n&quot; &quot;$v&quot; &quot;$proto&quot; &quot;$cipher&quot;
+    fi
+  done
+  echo
+  echo &quot;  TLS 1.0 and 1.1 being accepted is a finding: both are deprecated&quot;
+  echo &quot;  (RFC 8996) and both lack modern cipher suites and AEAD.&quot;
+  echo
+  echo &quot;=== cipher suite inventory from the server's own advertisement ===&quot;
+  echo | timeout 6 openssl s_client -connect example.com:443 -servername example.com \
+    -cipher 'ALL:@SECLEVEL=0' 2&gt;/dev/null | grep -A2 &quot;Cipher list&quot; | head -3 | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 02-versions.txt
+
+# --- 3. the certificate, examined properly ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-cert.txt
+import ssl, socket, subprocess, datetime
+
+def grab(host, port=443):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE          # we are READING the cert, not trusting it
+    with socket.create_connection((host, port), timeout=8) as s:
+        with ctx.wrap_socket(s, server_hostname=host) as ss:
+            pem = ss.getpeercert(binary_form=True)
+            return pem, ss.version(), ss.cipher()
+
+import subprocess, tempfile, os
+for host in (&quot;example.com&quot;, &quot;github.com&quot;):
+    try:
+        der, ver, cip = grab(host)
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=&quot;.der&quot;); f.write(der); f.close()
+        txt = subprocess.run([&quot;openssl&quot;,&quot;x509&quot;,&quot;-inform&quot;,&quot;DER&quot;,&quot;-in&quot;,f.name,
+                              &quot;-noout&quot;,&quot;-text&quot;], capture_output=True, text=True).stdout
+        os.unlink(f.name)
+        print(f&quot;  === {host} ===&quot;)
+        print(f&quot;  negotiated  : {ver}  {cip[0]}&quot;)
+        for line in txt.splitlines():
+            s = line.strip()
+            if s.startswith((&quot;Issuer:&quot;,&quot;Not Before&quot;,&quot;Not After&quot;,&quot;Signature Algorithm&quot;,&quot;Public-Key&quot;,&quot;DNS:&quot;,&quot;CA:&quot;)):
+                print(f&quot;    {s[:90]}&quot;)
+        print()
+    except Exception as e:
+        print(f&quot;  {host}: {type(e).__name__}: {e}&quot;)
+        print()
+print(&quot;  WHAT TO READ:&quot;)
+print(&quot;    Public-Key            2048+ (or EC). 1024 is a finding.&quot;)
+print(&quot;    Signature Algorithm   sha1WithRSA = a finding (expired 2017)&quot;)
+print(&quot;    DNS:                  the SAN. The CN alone is not enough.&quot;)
+print(&quot;    Not After             days until expiry. &lt; 30 = a finding.&quot;)
+print(&quot;    CA:TRUE               on a LEAF certificate is a finding&quot;)
+print(&quot;                            (it lets anyone issue for your name)&quot;)
+PY
+cat 03-cert.txt
+
+# --- 4. the hostname check, demonstrated ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-hostname.txt
+def wildcard_match(host: str, pattern: str) -&gt; bool:
+    &quot;&quot;&quot;RFC 6125 rules, correctly.&quot;&quot;&quot;
+    if not pattern.startswith(&quot;*.&quot;):
+        return host.lower() == pattern.lower()
+    suffix = pattern[1:]                 # &quot;.example.com&quot;
+    if host.lower().endswith(suffix):
+        left = host[: -len(suffix)]
+        return left != &quot;&quot; and &quot;.&quot; not in left      # exactly ONE label
+    return False
+
+cases = [
+    (&quot;a.example.com&quot;,      &quot;*.example.com&quot;,  True,  &quot;one label matches&quot;),
+    (&quot;www.example.com&quot;,    &quot;*.example.com&quot;,  True,  &quot;one label matches&quot;),
+    (&quot;example.com&quot;,        &quot;*.example.com&quot;,  False, &quot;the bare domain does NOT match&quot;),
+    (&quot;a.b.example.com&quot;,    &quot;*.example.com&quot;,  False, &quot;two labels do NOT match&quot;),
+    (&quot;evil-example.com&quot;,   &quot;*.example.com&quot;,  False, &quot;suffix trick rejected&quot;),
+    (&quot;notexample.com&quot;,     &quot;example.com&quot;,    False, &quot;prefix trick rejected&quot;),
+    (&quot;evil.com&quot;,           &quot;*.com&quot;,          False, &quot;wildcard TLD is invalid&quot;),
+    (&quot;example.com.evil.tld&quot;,&quot;example.com&quot;,   False, &quot;suffix trick rejected&quot;),
+    (&quot;EXAMPLE.com&quot;,        &quot;example.com&quot;,    True,  &quot;case-insensitive&quot;),
+]
+print(f&quot;  {'host':&lt;24} {'pattern':&lt;18} {'match':&lt;7} why&quot;)
+print(&quot;  &quot; + &quot;-&quot;*74)
+for h, p, expect, why in cases:
+    got = wildcard_match(h, p)
+    flag = &quot;ok &quot; if got == expect else &quot;***&quot;
+    print(f&quot;  {h:&lt;24} {p:&lt;18} {str(got):&lt;7} {why}&quot;)
+print()
+print(&quot;  THE TWO THAT MATTER MOST:&quot;)
+print(&quot;    example.com vs *.example.com  -&gt; False. Most libraries get this right;&quot;)
+print(&quot;                                    many hand-rolled checks get it wrong.&quot;)
+print(&quot;    a.b.example.com vs *.example.com -&gt; False. A wildcard matches exactly&quot;)
+print(&quot;                                    ONE label. '.*' style rules are wrong.&quot;)
+PY
+cat 04-hostname.txt
+
+# --- 5. the audit ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. do you verify TLS at all? (in your own code) ===&quot;
+grep -rniE &quot;verify_mode *= *CERT_NONE|rejectUnauthorized *: *false|check_hostname *= *False|verify=False|curl *-k|verify *= *False&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.go&quot; --include=&quot;*.sh&quot; . 2&gt;/dev/null | sed 's/^/  CRITICAL: /'
+
+echo; echo &quot;=== 2. what is pinned vs what is trusted ===&quot;
+python3 - &lt;&lt;'PY'
+import ssl, socket
+ctx = ssl.create_default_context()
+print(f&quot;    CA certificates loaded: {len(ctx.get_ca_certs())}&quot;)
+print(f&quot;    check_hostname        : {ctx.check_hostname}&quot;)
+print(f&quot;    verify_mode           : {ctx.verify_mode}&quot;)
+print(&quot;    ^ an empty CA store with check_hostname True is a hard failure at&quot;)
+print(&quot;      connect time. An empty CA store with CERT_NONE is worse.&quot;)
+PY
+
+echo; echo &quot;=== 3. HSTS, on the hosts you own ===&quot;
+for h in ${AEGIS_TLS_TARGETS:-example.com}; do
+  hsts=$(curl -sI --max-time 5 &quot;https://$h/&quot; 2&gt;/dev/null | grep -i &quot;strict-transport-security&quot; | head -1)
+  preload=$(curl -sI --max-time 5 &quot;https://$h/&quot; 2&gt;/dev/null | grep -i &quot;strict-transport-security&quot; | grep -ci preload)
+  printf &quot;    %-18s %s\n&quot; &quot;$h&quot; &quot;${hsts:-ABSENT}&quot;
+done
+echo &quot;    absent HSTS = the first request can be stripped to HTTP.&quot;
+echo &quot;    no preload  = a fresh client still does not know.&quot;
+
+echo; echo &quot;=== 4. weak suites still enabled, in ssh config ===&quot;
+ssh -G github.com 2&gt;/dev/null | grep -i &quot;^ *ciphers&quot; | tr ',' '\n' \
+  | grep -iE &quot;arcfour|3des|cbc|blowfish|des-&quot; | sed 's/^/    OBSOLETE: /'
+echo &quot;    (one obsolete entry = one downgrade path)&quot;
+
+echo; echo &quot;=== 5. other protocol headers that matter ===&quot;
+curl -sI --max-time 5 https://example.com/ 2&gt;/dev/null \
+  | grep -iE &quot;strict-transport|content-security-policy|x-frame-options|x-content-type|referrer-policy&quot; \
+  | sed 's/^/    /'
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+
+# --- 6. the posture, as a one-pager ---
+cat &gt; 07-posture.md &lt;&lt;'EOF'
+# A defensible TLS posture
+
+## Server
+- [ ] TLS 1.3 only. If 1.2 is required, AEAD suites only.
+- [ ] TLS 1.0/1.1 disabled (RFC 8996, deprecated since 2021)
+- [ ] AEAD everywhere: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+      TLS_CHACHA20_POLY1305_SHA256
+- [ ] no CBC, no RC4, no 3DES, no export, no NULL
+- [ ] forward cipher suite (ECDHE) only
+- [ ] OCSP stapling on
+- [ ] certificates: 2048+ RSA or ECDSA P-256/Ed25519, SHA-256+, SAN
+      present, CA:FALSE, appropriate keyUsage, &lt;= 90-day validity
+- [ ] HSTS with max-age &gt;= 31536000, includeSubDomains, preload
+- [ ] session tickets: short-lived, rotated keys
+- [ ] 0-RTT disabled, or restricted to idempotent operations
+
+## Client
+- [ ] verify the chain to a trust anchor you control
+- [ ] verify the hostname against the SAN, with RFC 6125 rules
+- [ ] enforce expiry and revocation; revocation FAILURE = REJECT
+- [ ] no certificate warning overrides
+- [ ] no `curl -k`, no `verify=False`, no `CERT_NONE`
+
+## Application
+- [ ] sensitive endpoints marked `Cache-Control: no-store`
+- [ ] secrets never in URLs (they land in logs via Referer)
+- [ ] subresource integrity on third-party scripts
+- [ ] certificate pinning only in a client you ship, with a backup pin
+
+## The three things that are findings on sight
+1. TLS 1.0 or 1.1 accepted
+2. certificate verification disabled anywhere
+3. an RSA key exchange (no PFS) still enabled
+EOF
+cat 07-posture.md
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: nine hostname/certificate cases against a correct RFC 6125<br />
+matcher, including the two that hand-rolled checks get wrong — <code>example.com</code> should <em>not</em> match<br />
+<code>*.example.com</code>, and <code>a.b.example.com</code> should not either, because a wildcard matches exactly<br />
+one label.</p>
+<p><strong>Step 2</strong> shows what a real endpoint negotiates at each forced version. TLS 1.0 and 1.1 being<br />
+accepted is a finding regardless of whether anyone uses them, because one obsolete suite in the<br />
+list is one downgrade path.</p>
+<p><strong>Record:</strong> <code>02-versions.txt</code> and <code>04-hostname.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does TLS provide that encryption alone does not?</li>
+<li>Walk the TLS 1.3 handshake in message order.</li>
+<li>Why must <code>CertificateVerify</code> cover the transcript hash?</li>
+<li>Why is 0-RTT data not forward secret, and when is it acceptable?</li>
+<li>What must a certificate validation check, in order?</li>
+<li>Why is <code>example.com</code> not matched by <code>*.example.com</code>?</li>
+<li>What does the transcript signature do against a downgrade attack?</li>
+<li>Name three TLS settings that are findings on sight.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>TLS</strong> → <strong>TLS Handshake</strong> → <strong>PKI</strong> → <strong>Certificate</strong> → <strong>Forward Secrecy</strong> →<br />
+<strong>Downgrade Attack</strong>.<br />
+This closes Stanford CS255. <code>cry-d1</code>..<code>d4</code> are the hands-on doctrine notes.</p>

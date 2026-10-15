@@ -1,0 +1,350 @@
+<h1 id="memory-forensics-challenges">Memory Forensics Challenges</h1>
+<h2 id="summary">Summary</h2>
+<p>Memory challenges are faster to resolve than disk challenges and much harder to fake your way<br />
+through, because the ground truth is a running system's state. This note covers the artefact<br />
+classes, the four questions that appear in nearly every one, and the discipline of writing a<br />
+memory finding so it survives scrutiny.</p>
+<p>The framing: <strong>a memory answer is a claim about a moment.</strong> "This<br />
+process was running, at this address, at this time" — and every part of<br />
+that claim has to be checkable from your output.</p>
+<blockquote>
+<p>Companion to <code>vol-01</code>..<code>vol-04</code> (the tooling) and <code>cd-01</code> (the flow).<br />
+This note is the discipline against real memory dumps.</p>
+</blockquote>
+<h2 id="the-artefact-classes">The artefact classes</h2>
+<pre><code class="language-text">  WHAT IS IN A MEMORY DUMP THAT IS NOT ON DISK
+
+    THE RUNNING PROCESS LIST     including processes that unlinked
+                                 themselves
+    COMMAND LINES                including ones that were wiped
+    LOADED MODULES               including reflective DLLs that were
+                                 never registered
+    INJECTED MEMORY              private RWX regions with no file
+    OPEN SOCKETS                 with the owning PID - who was talking
+                                 to whom, right now
+    OPEN HANDLES                 to files, registry keys, and other
+                                 processes. A handle to a deleted
+                                 file is a handle to a file you cannot
+                                 find on disk
+    THE DNS CACHE                domains this host resolved, and when
+    REGISTRY HIVES               as they were in memory, which may
+                                 differ from what is on disk (a
+                                 registry key deleted from disk can
+                                 still be in the cached hive)
+    THE TOKEN OF EVERY PROCESS   the user's group memberships, from
+                                 the PEB - a live authorisation
+                                 snapshot (see ad-02's PAC)
+    CLIPBOARD                    what was copied, if it has not
+                                 rotated out of the 5-buffer
+    KEYSTROKES                   if a keylogger ran, or if the
+                                 console buffer has them
+    ENVIRONMENT VARIABLES        per process; often where a C2
+                                 config or a key ends up
+    CACHED CREDENTIALS           in LSASS. The most dangerous thing in
+                                 the image.
+
+  THE QUESTION THAT MEMORY ANSWERS THAT DISK CANNOT:
+    &quot;What was this machine DOING at 14:32, and what was it talking to?&quot;
+    Disk tells you what exists. Memory tells you what is happening.
+</code></pre>
+<h2 id="the-four-questions">The four questions</h2>
+<pre><code class="language-text">  1. IS THERE A MALICIOUS PROCESS?
+     pslist + pstree + cmdline + dlllist + malfind
+     The join, not any one. See vol-02's three-way cross-check.
+
+  2. WHAT WAS IT COMMUNICATING WITH?
+     netscan + netstat + the DNS cache
+     An established outbound connection at the capture timestamp,
+     joined to a process name and a path, is the answer.
+
+  3. IS THERE INJECTED CODE?
+     malfind, then malfind.Dump, then hand the dump to for-05.
+     A family plugin's output must be corroborated (vol-04).
+
+  4. WHAT CREDENTIALS WERE ON THE MACHINE?
+     hashdump (demonstrable) vs credential_dump (plaintext).
+     The ROE question. See vol-03.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cd-03 &amp;&amp; cd ~/aegis/labs/cd-03
+mkdir -p work/{dumps,carved}
+
+cat &gt; 01-flow.md &lt;&lt;'MD'
+# The memory challenge flow
+
+```bash
+VOL=&quot;vol.py&quot;; IMG=&quot;challenge.raw&quot;
+
+# 0. VERIFY THE IMAGE
+sha256sum &quot;$IMG&quot;          # the challenge gives you one
+file &quot;$IMG&quot;               # 'data' is CORRECT for a raw memory image
+du -h &quot;$IMG&quot;              # should be close to the source machine's RAM
+
+# 1. THE REFERENCE POINT (and it is the first plugin, always)
+$VOL windows.info -f &quot;$IMG&quot;
+#   ^ SystemTime is your clock. Every other timestamp in every other
+#     plugin is relative to it. Record it. Record the offset from
+#     your own clock.
+
+# 2. THE PROCESS LAYER
+$VOL windows.pstree -f &quot;$IMG&quot;            # the shape
+$VOL windows.cmdline -f &quot;$IMG&quot;           # what was run, with paths
+$VOL windows.dlllist -f &quot;$IMG&quot;           # modules per process
+
+# 3. THE DIFF (this is the technique, not a plugin)
+$VOL windows.pslist  -f &quot;$IMG&quot; | awk '{print $2}' | sort -u &gt; /tmp/a
+$VOL windows.psxview -f &quot;$IMG&quot; | awk '{print $2}' | sort -u &gt; /tmp/b
+comm -13 /tmp/a /tmp/b
+#   ^ a process that psxview sees and pslist does not: DKOM.
+#     This is the single strongest memory finding there is.
+
+# 4. INJECTION
+$VOL windows.malfind -f &quot;$IMG&quot;
+#   for each hit: --pid, then dlllist --pid, and compare
+
+# 5. THE NETWORK
+$VOL windows.netscan -f &quot;$IMG&quot;
+$VOL windows.netstat -f &quot;$IMG&quot;
+#   join the PIDs to pslist. &quot;svchost.exe&quot; at a Temp path with an
+#   outbound connection is the answer to most challenges.
+
+# 6. THE DNS CACHE (the domain behind the IP)
+$VOL windows.registry.printkey -f &quot;$IMG&quot; \
+  --key 'ROAMING\MACHINE\SOFTWARE\MICROSOFT\WINDOWS NT\CURRENTVERSION\DNS\CACHE'
+
+# 7. THE FILES ONLY IN MEMORY
+$VOL windows.filescan -f &quot;$IMG&quot; | head -40
+$VOL windows.dumpfiles --pid &lt;pid&gt; -f &quot;$IMG&quot; --dump-dir work/carved
+#   ^ this is the handoff to for-05's static triage. Handle the
+#     output as malware.
+
+# 8. CREDENTIALS (authorisation gate)
+$VOL windows.hashdump -f &quot;$IMG&quot; &gt; work/hashes.txt
+#   hashdump is the demonstrable finding. credential_dump prints
+#   plaintext and needs its own ROE clause.
+```
+
+```text
+  AND ON A LINUX HOST:
+    $VOL linux.pslist / linux.pstree / linux.bash / linux.proc.Maps
+    the Linux plugin set is smaller and easier to verify, which is why
+    some challenges use Linux images. The METHOD is identical.
+```
+MD
+cat 01-flow.md
+
+# --- 2. offline: the artefact that exists only in memory ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-only-in-memory.txt
+print(&quot;  === artefacts that exist ONLY in memory, and the questions they answer ===\n&quot;)
+
+rows = [
+ (&quot;The running process list&quot;,
+  &quot;which processes existed, including ones that unlinked from the list&quot;,
+  &quot;windows.pslist / psxview&quot;,
+  &quot;was there a malicious process?&quot;),
+ (&quot;Command lines&quot;,
+  &quot;what was actually executed, with the full path&quot;,
+  &quot;windows.cmdline&quot;,
+  &quot;what did the attacker run?&quot;),
+ (&quot;Loaded modules&quot;,
+  &quot;what DLLs each process had, including never-registered ones&quot;,
+  &quot;windows.dlllist&quot;,
+  &quot;was there an injected DLL?&quot;),
+ (&quot;Injected memory&quot;,
+  &quot;private RWX regions with no file behind them&quot;,
+  &quot;windows.malfind&quot;,
+  &quot;was there shellcode?&quot;),
+ (&quot;Open sockets&quot;,
+  &quot;who was talking to whom, at the capture instant, with the PID&quot;,
+  &quot;windows.netscan / netstat&quot;,
+  &quot;where was the C2?&quot;),
+ (&quot;Open handles&quot;,
+  &quot;to files that have been deleted from disk&quot;,
+  &quot;windows.handles&quot;,
+  &quot;what was the process using?&quot;),
+ (&quot;The DNS cache&quot;,
+  &quot;domains this host resolved, and when&quot;,
+  &quot;windows.registry.printkey (DNS\\CACHE)&quot;,
+  &quot;what domain was it talking to?&quot;),
+ (&quot;The DNS cache's inverse&quot;,
+  &quot;the IP-&gt;name map, which may survive when the forward cache expired&quot;,
+  &quot;windows.dumpfiles (the resolver cache)&quot;,
+  &quot;who owned that IP?&quot;),
+ (&quot;Process tokens&quot;,
+  &quot;every process's group memberships, live&quot;,
+  &quot;windows.getsids / windows.handles --pid&quot;,
+  &quot;what could that process do?&quot;),
+ (&quot;The environment block&quot;,
+  &quot;per-process env vars; keys and C2 config land here&quot;,
+  &quot;windows.envars --pid&quot;,
+  &quot;what was it configured with?&quot;),
+ (&quot;Clipboard contents&quot;,
+  &quot;the last few clipboard items&quot;,
+  &quot;windows.clipboard&quot;,
+  &quot;what was copied out?&quot;),
+ (&quot;Cached credentials&quot;,
+  &quot;every account that had logged on here&quot;,
+  &quot;windows.hashdump&quot;,
+  &quot;what could be reused?&quot;),
+ (&quot;Keyboard state&quot;,
+  &quot;the console input buffer&quot;,
+  &quot;windows.consoles / windows.thrdscan&quot;,
+  &quot;what was typed?&quot;),
+]
+
+print(f&quot;  {'ARTEFACT':&lt;26} {'WHAT IT HOLDS':&lt;52} PLUGIN&quot;)
+print(&quot;  &quot; + &quot;-&quot;*96)
+for a, b, c, d in rows:
+    print(f&quot;  {a:&lt;26} {b:&lt;52} {c}&quot;)
+print()
+print(&quot;  THE POINT: eight of these thirteen have NO disk equivalent at all.&quot;)
+print(&quot;  Disk tells you what exists. Memory tells you what was happening.&quot;)
+print()
+print(&quot;  THE THREE THAT ANSWER THE MOST CHALLENGE QUESTIONS:&quot;)
+print(&quot;    1. netscan + pslist   -&gt; 'what was it talking to'  (most challenges)&quot;)
+print(&quot;    2. cmdline            -&gt; 'what did they run'&quot;)
+print(&quot;    3. malfind + psxview  -&gt; 'is anything hidden'&quot;)
+print()
+print(&quot;  THE ONE THAT IS THE MOST DANGEROUS TO RUN WITHOUT THINKING:&quot;)
+print(&quot;    cached credentials. It is also the answer to several challenges,&quot;)
+print(&quot;    and it needs its own ROE clause (vol-03).&quot;)
+PY
+cat 02-only-in-memory.txt
+
+# --- 3. writing the answer ---
+cat &gt; 03-answer.md &lt;&lt;'MD'
+# Writing a memory answer so it survives scrutiny
+
+</code></pre>
+<p>A memory finding is a claim about a moment. Every part of it has<br />
+  to be checkable from the output you provide.</p>
+<p>BAD    "There was a malicious process called svchost32.exe and it<br />
+          connected to 1.2.3.4"</p>
+<p>GOOD   Claim: process impersonation used to host a C2 channel.</p>
+<pre><code>     Evidence, in the order a reviewer would check it:
+
+     1. PROCESS IDENTITY
+        windows.pslist: PID 3412, name "svchost.exe",
+        command line "svchost.exe -k netsvcs -w"
+        windows.cmdline confirms the FULL PATH:
+          C:\Users\jdoe\AppData\Local\Temp\svchost.exe
+        The genuine svchost runs from
+          C:\Windows\System32\svchost.exe
+        -&gt; the name is real; the binary is not.
+
+     2. INJECTED CODE
+        windows.malfind: PID 3412, 0x1f0000-0x1f7000,
+        Tag VEx, 28 KB, no MZ header
+        windows.dlllist --pid 3412: 4 modules, none from a
+        signed Microsoft path
+        -&gt; a private RWX region, with almost nothing loaded.
+
+     3. NETWORK
+        windows.netstat: PID 3412, ESTABLISHED,
+        10.10.10.50:49876 -&gt; 198.51.100.44:443
+        Created 2026-06-11 14:33:02 UTC
+        windows.info SystemTime: 2026-06-11 14:34:18 UTC
+        -&gt; the connection was live 76 seconds before acquisition.
+
+     4. ATTRIBUTION OF THE DESTINATION
+        windows.registry.printkey (DNS\CACHE): entry for
+        cdn.example.com, cached 14:33:01, resolves to
+        198.51.100.44
+        -&gt; the IP is attributable to a domain.
+
+     CONCLUSION: an impersonated system binary hosting injected
+     memory, communicating with an external host over TLS,
+     established 76 seconds before the image was taken.
+
+     NOT CLAIMED: which actor, what the payload does, or what
+     data left the host. None of that is in the image.
+</code></pre>
+<pre><code>
+```text
+  THE LAST PARAGRAPH IS THE ONE THAT MATTERS.
+
+  A memory image is a snapshot of one machine at one second. It
+  cannot tell you what happened before, what happened after, what was
+  exfiltrated, or who did it. Say that, in those words, and your
+  report is trustworthy. Overstate and it is not.
+</code></pre>
+<p>MD<br />
+cat 03-answer.md</p>
+<h1 id="-4-the-linux-variant-">--- 4. the Linux variant ---</h1>
+<p>cat &gt; 04-linux.md &lt;&lt;'MD'</p>
+<h1 id="linux-memory-challenges">Linux memory challenges</h1>
+<pre><code class="language-bash">VOL=&quot;vol.py&quot;; IMG=&quot;challenge.lime&quot;
+
+$VOL linux.pslist   -f &quot;$IMG&quot;
+$VOL linux.pstree   -f &quot;$IMG&quot;
+$VOL linux.bash     -f &quot;$IMG&quot;           # bash history from memory
+$VOL linux.psaux    -f &quot;$IMG&quot;
+$VOL linux.lsof     -f &quot;$IMG&quot;           # open files
+$VOL linux.ifconfig -f &quot;$IMG&quot;
+$VOL linux.proc.Maps -f &quot;$IMG&quot; -p &lt;pid&gt; # the memory map of one process
+$VOL linux.proc.Mounts -f &quot;$IMG&quot;
+$VOL linux.hidden_modules -f &quot;$IMG&quot;
+$VOL linux.check_modules -f &quot;$IMG&quot;
+</code></pre>
+<pre><code class="language-text">  WHY SOME CHALLENGES USE LINUX IMAGES
+    - a smaller, more verifiable plugin set (the analyst can check
+      every plugin by hand)
+    - no symbol server dependency in the same way (still needs symbols)
+    - the artefacts are simpler: .bash_history, /var/log, the process
+      environment, and the network state
+    - and it trains the same discipline
+
+  THE LiME FORMAT
+    A kernel module that dumps physical memory. The image is LiME-
+    formatted; Volatility detects it from the header. The advantage
+    over a raw dd of a memory device is that it is consistent and
+    small enough to transfer.
+
+  THE ARTEFACT LIST is shorter:
+    bash history in memory (the real one, including the commands that
+    were typed but never made it to the on-disk .bash_history)
+    the process environment (PATH, and anything else exported)
+    /proc/PID/maps (what is mapped where - and a deleted file still
+      mapped is a finding)
+    open sockets (ss equivalent)
+    the rootkit's own hiding: linux.hidden_modules finds a module
+    present in the list but absent from sysfs
+</code></pre>
+<pre><code class="language-bash"># the two classic Linux challenges and their answers
+echo &quot;  'Who deleted /var/log/auth.log?'&quot;
+echo &quot;    linux.bash -&gt; the rm command, with its timestamp&quot;
+echo
+echo &quot;  'What was the process hiding?'&quot;
+echo &quot;    linux.proc.Maps vs /proc/PID/maps from a disk image:&quot;
+echo &quot;    a mapped region with no file behind it is the hiding&quot;
+echo
+echo &quot;  'Was rootkit installed?'&quot;
+echo &quot;    linux.hidden_modules: a module in the loaded list with no&quot;
+echo &quot;    matching entry in sysfs&quot;
+EOF
+cat 04-linux.md
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong>: a table of thirteen memory artefacts, <strong>eight of which have no<br />
+disk equivalent at all</strong>. Disk tells you what exists; memory tells you what was happening.</p>
+<p><strong><code>03-answer.md</code></strong> is the discipline: a memory finding is a claim about a moment, and every part<br />
+of it must be checkable from output you provide. The sample answer builds it in review order —<br />
+process identity, injected code, network, destination attribution — and then ends with the<br />
+paragraph that makes a report trustworthy: <em>"Not claimed: which actor, what the payload does, or<br />
+what data left the host. None of that is in the image."</em></p>
+<p><strong>Record:</strong> <code>02-only-in-memory.txt</code> and <code>03-answer.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name eight artefacts that exist only in memory.</li>
+<li>What question can memory answer that disk cannot?</li>
+<li>What is the pslist/psxview diff, and what does a non-empty result mean?</li>
+<li>Why is <code>windows.netstat</code> better than <code>netscan</code> for most challenges, and when is the reverse true?</li>
+<li>What is the DNS cache good for, and what does the inverse lookup add?</li>
+<li>Why is <code>windows.cmdline</code> more informative than <code>windows.pslist</code> for the "what did they run"<br />
+   question?</li>
+<li>Give the four claims a good memory answer makes, in review order.</li>
+<li>What must a memory report explicitly <em>not</em> claim?</li>
+<li>What is <code>linux.hidden_modules</code> finding?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Memory Forensics</strong> → <strong>Volatility 3</strong> → <strong>Network Forensics</strong> →<br />
+<strong>Malware Triage</strong> → <strong>Incident Response</strong>.<br />
+<code>cd-04</code> is the network capture; <code>for-03</code> is the methodology behind all three.</p>

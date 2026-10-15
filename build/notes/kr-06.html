@@ -1,0 +1,210 @@
+<h1 id="building-an-isolated-lab-range">Building an Isolated Lab Range</h1>
+<h2 id="summary">Summary</h2>
+<p>Everything else in AEGIS says "your own machine" or "your lab VM". This lecture is how you make<br />
+that true. A range is a small private network — Kali as the attacker, one or more<br />
+<strong>intentionally vulnerable</strong> VMs as targets, connected on a <strong>host-only</strong> adapter that has no<br />
+route to the internet or to your real network.</p>
+<p>Build this once. It converts every "is this legal?" question in the remaining 180 lectures into<br />
+a settled yes.</p>
+<h2 id="the-architecture">The architecture</h2>
+<pre><code>  ┌─────────────────────────────┐
+  │  KALI (attacker)            │   running AEGIS, nmap, metasploit, wireshark
+  │  adapter1: NAT   10.0.2.15  │   for apt updates
+  │  adapter2: hostonly 192.168.56.1 │  &lt;-- the lab network
+  └──────────────┬──────────────┘
+                 │  vboxnet0, isolated, no route anywhere else
+     ┌───────────┴───────────┐
+     ▼                       ▼
+ ┌──────────┐          ┌──────────┐
+ │ vuln01   │          │ vuln02   │
+ │ Metasplo │          │ DVWA /   │
+ │ itable3  │          │ Juice    │
+ │ .101     │          │ Shop     │
+ │          │          │ .102     │
+ └──────────┘          └──────────┘
+</code></pre>
+<p>The critical property: <strong>there is no route from the lab network to your home LAN or the<br />
+internet.</strong> If you accidentally scan too wide, nothing outside the range is reachable.</p>
+<h2 id="target-1-metasploitable3">Target 1: Metasploitable3</h2>
+<p>The workhorse. Real (old) services, deliberately vulnerable, and explicitly intended for this.</p>
+<p><strong>Why Metasploitable exists:</strong> it turns "is this legal?" into "is this a legal use of the<br />
+provided target?" — the most defensible answer in security.</p>
+<pre><code class="language-bash"># Download the official image (SourceForge), then on your Kali host:
+VBoxManage import metasploitable3_ubuntu_v4.4.6-64.zip \
+  --name vuln01 --vsys 0 --register
+
+VBoxManage modifyvm vuln01 --memory 1024 --cpus 2
+VBoxManage modifyvm vuln01 --nic1 hostonly --hostonlyif vboxnet0
+
+# Optional: expose the web UI to your Kali host only
+VBoxManage modifyvm vuln01 --natpf1 &quot;web,tcp,127.0.0.1,8080,,80&quot;
+
+VBoxManage startvm vuln01 --headless
+</code></pre>
+<p>Wait for boot, then <strong>discover its address the legitimate way</strong>:</p>
+<pre><code class="language-bash"># passive-ish: watch ARP on the host-only interface
+sudo arp-scan --interface=vboxnet0 --localnet 2&gt;/dev/null
+# or let nmap find it (this IS your first recon exercise)
+sudo nmap -sn 192.168.56.0/24
+</code></pre>
+<p><strong>Then snapshot it before you touch anything:</strong></p>
+<pre><code class="language-bash">VBoxManage snapshot vuln01 take &quot;pristine&quot; --description &quot;fresh import&quot;
+</code></pre>
+<p>Reverting is <code>VBoxManage snapshot vuln01 restore "pristine"</code>. This single command is why<br />
+virtualisation is non-negotiable for this curriculum.</p>
+<h2 id="target-2-web-targets">Target 2: web targets</h2>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>What it teaches</th>
+<th>Runs as</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DVWA</td>
+<td>SQLi, XSS, file upload, command injection, low skill floor</td>
+<td>Docker or VM</td>
+</tr>
+<tr>
+<td>OWASP Juice Shop</td>
+<td>Modern SPA: DOM XSS, deserialisation, IDOR, broken auth</td>
+<td>Docker</td>
+</tr>
+<tr>
+<td>WebGoat</td>
+<td>Guided lessons mapped to the OWASP Top 10</td>
+<td>Docker</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-bash"># Juice Shop, on Kali
+docker run --rm -p 3000:3000 bkimminich/juice-shop
+# browse to http://127.0.0.1:3000  -- loopback only, nothing exposed
+</code></pre>
+<h2 id="target-3-the-tier-1-privilege-escalation-box">Target 3: the Tier 1 privilege-escalation box</h2>
+<p>A plain Ubuntu VM you deliberately misconfigure. This is how the <code>linux-privesc-doctrine</code> labs<br />
+have something to escalate against.</p>
+<pre><code class="language-bash">VBoxManage import ubuntu-24.04-server-amd64.vdi --name vuln03 --vsys 0 --register
+VBoxManage modifyvm vuln03 --memory 1024 --nic1 hostonly --hostonlyif vboxnet0
+</code></pre>
+<p>Then, from Kali, using deliberate misconfigurations:</p>
+<pre><code class="language-bash"># 1. world-writable cron directory
+sudo mkdir -p /opt/backup &amp;&amp; sudo chmod 777 /opt/backup
+# 2. SUID copy of a shell (the classic misconfiguration)
+sudo cp /bin/bash /tmp/rootshell &amp;&amp; sudo chmod u+s /tmp/rootshell
+# 3. writable service file
+sudo chmod o+w /etc/cron.d/backup
+# 4. weak sudo rule for the lab user
+echo 'vuln ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/cron.d/planted' | sudo tee /etc/sudoers.d/vuln
+sudo chmod 440 /etc/sudoers.d/vuln
+</code></pre>
+<p>Snapshot <strong>after</strong> configuring, named <code>misconfigured</code>. Then never touch it again — the labs<br />
+will escalate it repeatedly and you will want a clean reset.</p>
+<h2 id="the-isolation-proof">The isolation proof</h2>
+<p>Before you scan anything, verify the network actually is isolated:</p>
+<pre><code class="language-bash"># On Kali host
+ip -br addr | grep vboxnet0
+ip route | grep 192.168.56
+
+# In a target VM (should FAIL - there is no default route out)
+ping -c1 8.8.8.8
+
+# From Kali host, confirm the real LAN is a DIFFERENT subnet
+ip route | grep default
+</code></pre>
+<p><strong>The check that matters:</strong> <code>192.168.56.0/24</code> (host-only) and your real LAN must be different<br />
+subnets. If your home LAN is also <code>192.168.56.0/24</code>, renumber the host-only network:</p>
+<pre><code class="language-bash">VBoxManage hostonlyif ipaddr vboxnet0 192.168.77.1
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Lab range</strong></td>
+<td>Your own deliberately vulnerable infrastructure</td>
+</tr>
+<tr>
+<td><strong>Host-only network</strong></td>
+<td>Private segment with no internet or LAN route</td>
+</tr>
+<tr>
+<td><strong>Metasploitable</strong></td>
+<td>Officially sanctioned intentionally vulnerable VM</td>
+</tr>
+<tr>
+<td><strong>Snapshot</strong></td>
+<td>Frozen VM state; your undo key</td>
+</tr>
+<tr>
+<td><strong>Segment / subnet</strong></td>
+<td>A logically separated network range</td>
+</tr>
+<tr>
+<td><strong>Gateway</strong></td>
+<td>The router a host sends non-local traffic to</td>
+</tr>
+<tr>
+<td><strong>Segmentation</strong></td>
+<td>The defensive control that a lab network embodies</td>
+</tr>
+</tbody>
+</table>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> stand up a two-host range and produce proof that it is isolated.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/kr-06 &amp;&amp; cd ~/aegis/labs/kr-06
+
+# 1. Create the isolated network
+VBoxManage hostonlyif create
+VBoxManage hostonlyif ipaddr vboxnet0 192.168.56.1
+VBoxManage list hostonlyifs | tee 01-hostonly.txt
+
+# 2. Confirm Kali is attached to it
+ip -br addr | grep vboxnet0
+ip route | grep 192.168.56 | tee 02-routes.txt
+
+# 3. Prove the isolation - record the FAILING result, it is the evidence
+{
+  echo &quot;=== host-only subnet ===&quot;; ip route | grep 192.168.56
+  echo &quot;=== real LAN ===&quot;; ip route | grep default
+  echo &quot;=== can a lab host reach the internet? (should fail) ===&quot;
+} &gt; 03-isolation.txt
+
+# 4. Once targets are running, discover them the legitimate way
+sudo nmap -sn 192.168.56.0/24 | tee 04-discovery.txt
+
+# 5. Full port and service inventory of your own range (this is a real assessment)
+sudo nmap -sV -sC -p- 192.168.56.101 -oN 05-vuln01-scan.txt
+less 05-vuln01-scan.txt
+
+# 6. Record the baseline for later comparison
+{
+  echo &quot;range created: $(date -Iseconds)&quot;
+  echo &quot;subnet: 192.168.56.0/24 (host-only vboxnet0)&quot;
+  echo &quot;attacker: $(hostname) $(ip -br addr show vboxnet0 | awk '{print $3}')&quot;
+} | tee 00-RANGE-README.txt
+</code></pre>
+<p><strong>The assessment in step 5 is a real skill.</strong> Reading an nmap scan and understanding what each<br />
+line means is Tier 2 work. Do it now so that Tier 2 is review, not first contact.</p>
+<p><strong>Record:</strong> in your scratchpad, note the open ports on <code>vuln01</code>. You will meet them again in<br />
+<code>doc-03</code> and <code>pr-01</code>, and recognising them fast is what makes enumeration fast.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the single most important property your lab network must have, and how do you test it?</li>
+<li>Why does Metasploitable exist as a legal artefact?</li>
+<li>You accidentally scanned your university network while trying to scan your range. What<br />
+   controls should have prevented it, and which one actually failed?</li>
+<li>What does a snapshot buy you that <code>rm -rf</code> recovery does not?</li>
+<li>Your host-only network is <code>192.168.56.0/24</code> and your home LAN is also <code>192.168.56.0/24</code>.<br />
+   What happens, and how do you fix it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Practice Range</strong> → <strong>Rules of Engagement</strong> → <strong>Scope Definition</strong> → <strong>Threat Model</strong>.<br />
+When Tier 8 asks you to run a full engagement, every host you touch will be one you built here.</p>

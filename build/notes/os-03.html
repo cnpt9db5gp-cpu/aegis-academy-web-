@@ -1,0 +1,192 @@
+<h1 id="os-organization-and-system-calls">OS Organization and System Calls</h1>
+<h2 id="summary">Summary</h2>
+<p>A system call is the <strong>only</strong> way a user program asks the kernel to do something. This lecture<br />
+covers how the call is made, how the kernel finds the handler, and what happens to arguments on<br />
+the way across the boundary.</p>
+<p><strong>Security framing:</strong> a system call is a trust boundary crossing with arguments supplied by an<br />
+untrusted party. Every bug class you will meet later — argument validation failures, integer<br />
+overflow in a size argument, races on a shared fd — lives at this interface.</p>
+<h2 id="how-a-syscall-happens">How a syscall happens</h2>
+<p>x86-64 Linux uses the <code>syscall</code> instruction:</p>
+<pre><code class="language-c">// glibc wrapper (userspace)
+long sys_write(int fd, const char *buf, size_t count) {
+    long ret;
+    __asm__ volatile (&quot;syscall&quot;
+        : &quot;=a&quot;(ret) : &quot;a&quot;(1), &quot;D&quot;(fd), &quot;S&quot;(buf), &quot;d&quot;(count)
+        : &quot;rcx&quot;, &quot;r11&quot;, &quot;memory&quot;);
+    return ret;
+}
+</code></pre>
+<pre><code>user space                          kernel space
+-----------                         ------------
+rdi = fd                            ┌─ validate rdi is a real open descriptor
+rsi = buffer                        ├─ validate rsi points to readable memory
+rdx = length                        ├─ validate rdx (and check for overflow)
+                                     ├─ do the work
+syscall                             └─ return value in rax, error as negative errno
+  │                                        │
+  └──────── rax = 1 (bytes written) ───────┘
+</code></pre>
+<p>Registers carrying arguments: <code>rdi</code>, <code>rsi</code>, <code>rdx</code>, <code>r10</code>, <code>r8</code>, <code>r9</code> (System V ABI).<br />
+<code>rax</code> holds the syscall number going in, and the return value coming out.</p>
+<h2 id="the-dispatch-mechanism">The dispatch mechanism</h2>
+<ol>
+<li><code>syscall</code> traps to the kernel</li>
+<li>The CPU saves registers and enters the kernel</li>
+<li>The kernel reads the syscall number from <code>rax</code></li>
+<li>Looks it up in the <strong>syscall table</strong> — an array of function pointers</li>
+<li>Calls the handler with the arguments already in registers</li>
+<li>Returns to user space</li>
+</ol>
+<p><strong>The syscall table is a security object.</strong> A rootkit that hooks it can make every program on the<br />
+system lie about what files exist or what a syscall did. That is why <code>strace</code> is considered a<br />
+relatively safe analysis technique: it observes the same interface the kernel uses, rather than<br />
+faking the kernel's view.</p>
+<h2 id="strace-is-this-lecture-runnable">strace is this lecture, runnable</h2>
+<pre><code class="language-bash">strace -e trace=write ./program
+strace -f -e trace=network curl https://example.com
+strace -e trace=execve -f /bin/ls
+strace -c ./program           # summary counts, grouped
+</code></pre>
+<p><code>strace -c ls</code> showing thousands of <code>openat</code> calls is the clearest possible illustration of how<br />
+much crossing happens per second.</p>
+<h2 id="system-call-design-rules">System call design rules</h2>
+<ol>
+<li><strong>Validate every argument.</strong> Pointer, length, and descriptor.</li>
+<li><strong>Check for overflow</strong> on any length arithmetic: <code>a + b</code> can wrap.</li>
+<li><strong>Copy user data into kernel memory</strong> rather than trusting the pointer directly.</li>
+<li><strong>Never dereference a user pointer</strong> that has not been proven to point at user memory.</li>
+<li><strong>Return errors, do not crash.</strong> A null dereference in the kernel is a full system compromise.</li>
+</ol>
+<h2 id="in-xv6">In xv6</h2>
+<p>Each system call is a function in <code>kernel/syscall.c</code>. The table is explicit, which makes the<br />
+whole mechanism readable in about 100 lines. Reading it is the best exercise in this lecture.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>System call</strong></td>
+<td>The user→kernel entry point</td>
+</tr>
+<tr>
+<td><strong>Syscall number</strong></td>
+<td>Index identifying which handler</td>
+</tr>
+<tr>
+<td><strong>Syscall table</strong></td>
+<td>Array of kernel function pointers</td>
+</tr>
+<tr>
+<td><strong>errno</strong></td>
+<td>Negative error code convention</td>
+</tr>
+<tr>
+<td><strong>Trap</strong></td>
+<td>Synchronous transfer of control into the kernel</td>
+</tr>
+<tr>
+<td><strong>Argument register</strong></td>
+<td><code>rdi</code>, <code>rsi</code>, <code>rdx</code>, <code>r10</code>, <code>r8</code>, <code>r9</code></td>
+</tr>
+<tr>
+<td><strong>Wrapper</strong></td>
+<td>libc function that issues the syscall</td>
+</tr>
+<tr>
+<td><strong><code>strace</code></strong></td>
+<td>Userspace syscall tracer</td>
+</tr>
+<tr>
+<td><strong><code>ltrace</code></strong></td>
+<td>Traces library calls instead</td>
+</tr>
+<tr>
+<td><strong>Argument validation</strong></td>
+<td>The kernel's core security job at this boundary</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">strace -c -f ls 2&gt;&amp;1 | tail -25          # summary by syscall
+strace -e trace=network -f curl -s https://example.com 2&gt;&amp;1 | tail -20
+strace -e trace=openat -f /usr/bin/chromium 2&gt;&amp;1 | head -20
+strace -p $(pgrep -f yourprocess) -f      # attach to a live process
+
+# what does a binary import?
+readelf -s /usr/bin/ls | grep UND | head -20
+objdump -T /usr/bin/ls | head
+nm -D /usr/bin/ls | grep -E &quot;open|read|write|socket&quot;
+
+# syscall numbers on this kernel
+ausyscall --dump 2&gt;/dev/null | head -20
+cat /usr/include/asm/unistd_64.h 2&gt;/dev/null | head -30
+
+# ltrace for the layer above
+ltrace -e 'malloc+free' ./prog
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> see the syscall boundary from three angles — frequency, content, and tracing a<br />
+live process.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-03 &amp;&amp; cd ~/aegis/labs/os-03
+
+# --- how expensive is the boundary? ---
+strace -c /usr/bin/ls 2&gt;&amp;1 | tail -30 | tee 01-syscalls-ls.txt
+strace -c -f nmap -sn 127.0.0.1 2&gt;/dev/null | tail -20 | tee 02-syscalls-nmap.txt
+echo &quot;ls vs nmap: compare total calls and the top syscalls.&quot;
+
+# --- what does a network client actually ask for? ---
+strace -e trace=network -f curl -s https://example.com 2&gt;&amp;1 \
+  | grep -E &quot;socket|connect|sendto|recvfrom|bind&quot; | head -25 | tee 03-network.txt
+echo &quot;Every line here is a trust boundary crossing with user-controlled arguments.&quot;
+
+# --- the exec chain from a shell ---
+strace -e trace=execve -f bash -c &quot;ls -la&quot; 2&gt;&amp;1 | head -10
+
+# --- attach to a running process ---
+sleep 300 &amp;
+BGPID=$!
+strace -p $BGPID -e trace=none -o /tmp/idle.txt &amp;
+sleep 2; kill %2 2&gt;/dev/null
+head -5 /tmp/idle.txt
+kill $BGPID 2&gt;/dev/null
+
+# --- which syscalls does a binary import? ---
+{
+  echo &quot;=== undefined (imported) symbols in /usr/bin/ls ===&quot;
+  nm -D /usr/bin/ls 2&gt;/dev/null | grep &quot; U &quot; | head -25
+  echo
+  echo &quot;=== dynamic symbols ===&quot;
+  readelf --dyn-syms /usr/bin/ls 2&gt;/dev/null | grep UND | head -15
+} | tee 04-imports.txt
+
+# --- syscall table on this machine ---
+{
+  echo &quot;=== syscall table / vectors ===&quot;
+  cat /proc/sys/kernel/syscall 2&gt;/dev/null &amp;&amp; echo &quot;(syscall hardening: '1' = no, '2' = seccomp only)&quot;
+  echo
+  echo &quot;=== seccomp mode of this shell ===&quot;
+  grep Seccomp /proc/self/status
+} | tee 05-seccomp.txt
+</code></pre>
+<p><strong><code>/proc/sys/kernel/syscall</code> is worth understanding</strong>: <code>0</code> = allow everything, <code>1</code> = deny all<br />
+unknown syscalls (poor man's seccomp), <code>2</code> = require seccomp mode. Read the value, then think<br />
+about what a binary compiled yesterday does on a kernel that adds a syscall today. That is<br />
+<code>sandbox</code> and <code>seccomp</code> in Tier 3.</p>
+<p><strong>Record:</strong> <code>01-syscalls-ls.txt</code> — the top-5 syscalls of a simple program. Recognise them.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Which registers carry the first three arguments to a syscall on x86-64?</li>
+<li>Where does the syscall number go in, and where does the return value come out?</li>
+<li>Why is <code>strace</code> considered a relatively safe way to analyse an unknown binary?</li>
+<li>What does <code>cat /proc/sys/kernel/syscall</code> tell you, and what do the values mean?</li>
+<li>Name three things a kernel must validate at the syscall boundary, and why each matters.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>System Call</strong> → <strong>Syscall Table</strong> → <strong>Kernel vs Userspace</strong> → <strong>strace</strong> → <strong>seccomp</strong> →<br />
+<strong>Rootkit &amp; Syscall Hooking</strong>.</p>

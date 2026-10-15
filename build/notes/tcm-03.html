@@ -1,0 +1,417 @@
+<h1 id="active-reconnaissance-and-network-scanning">Active Reconnaissance and Network Scanning</h1>
+<h2 id="summary">Summary</h2>
+<p>Active recon is where passive recon stops paying: you send packets to the target and observe<br />
+what answers. It is the first stage that <strong>leaves a trace</strong> — logs, IDS alerts, and sometimes a<br />
+ticket from the client's SOC.</p>
+<p>The engineering content of this lecture is not "type nmap". It is: <strong>what does a port scan<br />
+actually learn, what does it cost, and what can you infer from a port that is closed, filtered,<br />
+or absent?</strong></p>
+<blockquote>
+<p>Companion to <code>ccnad-02</code> (TCP/IP security problems) and <code>cs161-06</code><br />
+(firewalls). This note is the operational craft.</p>
+</blockquote>
+<h2 id="what-a-port-state-tells-you">What a port state tells you</h2>
+<pre><code class="language-text">  OPEN       -&gt; something accepted the connection. A service is there.
+  CLOSED     -&gt; the host sent RST / ICMP unreachable. Nothing listening,
+                but the host is ALIVE and reachable.
+  FILTERED   -&gt; no response at all. Either a firewall dropped it, or the
+                host is down, or the route is black-holed.
+  open|filtered  (UDP) -&gt; no response either way; UDP has no handshake,
+                          so this state is normal and nearly useless.
+</code></pre>
+<p><strong>The genuinely useful inference:</strong> a <code>filtered</code> TCP port with every other<br />
+port <code>closed</code> is a strong signal that a firewall exists and is <em>selectively</em><br />
+allowing or dropping. That tells you where to focus. A host where <em>everything</em><br />
+is filtered is probably down; a host where <em>everything</em> is closed and a<br />
+handful are open is a normal host with a small exposed surface.</p>
+<p>That distinction is the difference between reading a scan and reading a<br />
+network.</p>
+<h2 id="scan-types-and-what-each-costs-the-target">Scan types, and what each costs the target</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Cost</th>
+<th>Speed</th>
+<th>Use when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TCP connect (<code>-sT</code>)</td>
+<td>one full connection each</td>
+<td>slow</td>
+<td>you are not root</td>
+</tr>
+<tr>
+<td>SYN / half-open (<code>-sS</code>)</td>
+<td>one SYN each</td>
+<td>fast</td>
+<td>default, needs root</td>
+</tr>
+<tr>
+<td>UDP (<code>-sU</code>)</td>
+<td><strong>very heavy</strong></td>
+<td>very slow</td>
+<td>only with explicit ROE permission</td>
+</tr>
+<tr>
+<td>Ping sweep (<code>-sn</code>)</td>
+<td>one host per 3 probes</td>
+<td>fast</td>
+<td>/24 discovery</td>
+</tr>
+<tr>
+<td>Version detect (<code>-sV</code>)</td>
+<td>a probe per open port</td>
+<td>medium</td>
+<td>you need versions</td>
+</tr>
+<tr>
+<td>Script scan (<code>-sC</code>)</td>
+<td>heavy</td>
+<td>slow</td>
+<td>default scripts, in scope only</td>
+</tr>
+<tr>
+<td>Timing (<code>-T0</code>..<code>-T5</code>)</td>
+<td>varies</td>
+<td>varies</td>
+<td>evasion (rarely justified)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>UDP scans deserve their own warning.</strong> A <code>-sU</code> scan can saturate a link<br />
+and take a host offline, because the scanner sends large payloads and waits<br />
+for rate-limited ICMP. A UDP scan is a DoS with a reconnaissance payload.<br />
+Never run one without written permission.</p>
+<h2 id="the-workflow-that-works">The workflow that works</h2>
+<pre><code class="language-text">  1. DISCOVER HOSTS   who is here?
+  2. PORTS            what is listening?
+  3. SERVICE + VERSION what exactly is it? (nmap -sV)
+  4. VULNERABILITIES  what is known to be wrong with it?
+  5. PRIORITISE       reachability x severity, not severity alone
+  6. EXPLOIT          (tcm-04)
+</code></pre>
+<p>Step 5 is the professional step. A CVE with CVSS 9.8 on a host with no<br />
+route to your objective and behind three layers of filtering is worth less<br />
+than a medium on the box that fronts the database.</p>
+<h2 id="nmap-the-actual-craft">Nmap, the actual craft</h2>
+<pre><code class="language-bash"># The template that works, and why each part is there
+nmap -sn 192.168.56.0/24                      # 1. discovery, host only
+nmap -sS -T4 --top-ports 1000 -oA 02-top1000 192.168.56.0/24
+nmap -sV -sC -p- -oA 03-full 192.168.56.20    # one host, everything
+nmap -sU --top-ports 20 --max-rate 50 -oA 04-udp 192.168.56.20   # WRITES FIRST
+</code></pre>
+<pre><code class="language-bash"># Script categories, chosen deliberately rather than by -sC
+nmap -sV --script=safe     192.168.56.20   # non-intrusive only
+nmap -sV --script=vuln     192.168.56.20   # these SEND traffic; scope them
+nmap --script=smb-enum-shares,smb-vuln-ms17-010 -p 445 192.168.56.20
+</code></pre>
+<p><code>--script=vuln</code> sends real exploit probes. It is active exploitation with a<br />
+scanner's UI. <strong>It requires explicit scope permission</strong>, and a<br />
+<code>--script=vuln</code> against an out-of-scope host is your engagement over.</p>
+<h2 id="what-to-actually-look-for-in-the-output">What to actually look for in the output</h2>
+<pre><code class="language-text">  HIGH SIGNAL
+    version banners that pin an exact vulnerable release
+    anonymous/default credentials on a service
+    SMB signing not required (relay in tcm-06)
+    outdated TLS configuration
+    a service on a non-standard port that the asset inventory missed
+    a host that appears in scan but not in the client's CMDB  &lt;- a rogue asset
+
+  MEDIUM
+    directory listing on a web server
+    verbose error pages with stack traces
+    missing security headers
+    ntp/ntp monlist enabled
+    ssh host keys reused across hosts (host key = clone)
+
+  LOW / INFORMATIONAL
+    &quot;the scan is detected&quot; banners
+    standard banners
+    anything that requires you to authenticate to learn
+</code></pre>
+<p>The rogue-asset finding is worth stating explicitly: <strong>a scan is an asset<br />
+discovery tool as much as a vulnerability tool.</strong> Hosts that appear in the<br />
+scan but not in the client's inventory are a report finding on their own,<br />
+and often the most important one.</p>
+<h2 id="scope-discipline-again">Scope discipline, again</h2>
+<pre><code class="language-text">  BEFORE every scan:
+    [ ] is this address range in the written scope?
+    [ ] is this scan type permitted by the ROE?
+    [ ] is it inside the time window?
+    [ ] has anyone asked you to stop?
+    [ ] do you know your source IP, in case you get blocked?
+
+  If any answer is no, do not scan.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Host discovery</strong></td>
+<td>Finding live hosts in a range</td>
+</tr>
+<tr>
+<td><strong>Port scan</strong></td>
+<td>Finding listening services</td>
+</tr>
+<tr>
+<td><strong>Connect scan</strong></td>
+<td>Full TCP handshake; needs no privilege</td>
+</tr>
+<tr>
+<td><strong>SYN / half-open scan</strong></td>
+<td>Sends SYN only; stealthier, needs root</td>
+</tr>
+<tr>
+<td><strong>Filtered</strong></td>
+<td>No response; firewall or host down</td>
+</tr>
+<tr>
+<td><strong>Service fingerprinting</strong></td>
+<td>Identifying the software and version</td>
+</tr>
+<tr>
+<td><strong>Banner grab</strong></td>
+<td>Reading the service's own greeting</td>
+</tr>
+<tr>
+<td><strong>Vulnerability scanner</strong></td>
+<td>Probing for known weaknesses</td>
+</tr>
+<tr>
+<td><strong>SMB signing</strong></td>
+<td>Prevents SMB relay attacks</td>
+</tr>
+<tr>
+<td><strong>Rogue asset</strong></td>
+<td>A live host absent from the inventory</td>
+</tr>
+<tr>
+<td><strong>Scan rate</strong></td>
+<td>Packets per second; too high looks like an attack</td>
+</tr>
+<tr>
+<td><strong>Nmap script</strong></td>
+<td>An NSE module that speaks a protocol</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/tcm-03 &amp;&amp; cd ~/aegis/labs/tcm-03
+source ~/aegis/bin/scope-guard.sh
+
+# The guard is not decorative - wire it into every scan
+cat &gt; scan.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Usage: ./scan.sh &lt;cidr&gt; [extra nmap args...]
+set -euo pipefail
+RANGE=&quot;$1&quot;; shift
+BASE=$(echo &quot;$RANGE&quot; | cut -d/ -f1)
+in_scope &quot;$BASE&quot; || { echo &quot;REFUSED: $BASE outside the engagement scope.&quot; &gt;&amp;2; exit 3; }
+echo &quot;[scope] $RANGE is in scope&quot;
+echo &quot;[roe]   confirming: full connect scan of in-scope range is PERMITTED&quot;
+exec nmap -sT -sV --reason -oA &quot;scan-${BASE}&quot; &quot;$@&quot; &quot;$RANGE&quot;
+EOF
+chmod +x scan.sh
+
+# --- build a lab to scan, because scanning the internet is not the lesson ---
+# On the Kali host:
+cat &gt; 00-lab-build.md &lt;&lt;'EOF'
+# Building a scannable lab
+
+Three targets on the host-only range 192.168.56.0/24:
+
+| Host | How to make it | What it will reveal |
+|---|---|---|
+| 192.168.56.20 | `sudo python3 -m http.server 8080` | open|filtered → a real listener |
+| 192.168.56.21 | `sudo systemctl start ssh` | SSH with a version banner |
+| 192.168.56.22 | nothing (empty VM, host-only only) | closed: host alive, nothing listening |
+
+The third one is the interesting one: a scan that returns `closed` for every
+port proves the host is alive AND reachable, which a ping-only sweep cannot.
+
+Run in three terminals, or:
+  nohup python3 -m http.server 8080 &gt;/dev/null 2&gt;&amp;1 &amp;
+EOF
+
+# --- 1. host discovery, and what it does NOT tell you ---
+{
+  echo &quot;=== ping sweep of the lab range ===&quot;
+  nmap -sn 192.168.56.0/24 2&gt;&amp;1 | grep -E &quot;Nmap scan report|up$|down$&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== root can also sweep ARP, which is exact on a local segment ===&quot;
+  sudo -n arp-scan --localnet 2&gt;/dev/null | head -10 | sed 's/^/  /' \
+    || echo &quot;  (no passwordless sudo; ping sweep result stands)&quot;
+} | tee 01-discovery.txt
+
+# --- 2. the port states, demonstrated on your own host ---
+{
+  echo &quot;=== full connect scan of MY OWN host, loopback only ===&quot;
+  echo &quot;    (this is the engagement target for this exercise)&quot;
+  nmap -sT -sV --reason -p- 127.0.0.1 2&gt;&amp;1 | grep -vE &quot;^Nmap done|^$&quot; | sed 's/^/  /'
+} | tee 02-ports.txt
+
+# --- 3. why the states differ: a demonstration you control ---
+cat &gt; portlab.py &lt;&lt;'PY'
+&quot;&quot;&quot;Three listeners, three states. All on loopback, all yours.&quot;&quot;&quot;
+import socket, threading, time, subprocess, sys
+
+def listen(port):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((&quot;127.0.0.1&quot;, port)); s.listen(5)
+    while True:
+        try: s.accept()
+        except OSError: break
+
+def closed(port):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((&quot;127.0.0.1&quot;, port)); s.close()   # bind then release -&gt; RST
+
+# filtered is hard to demo without a firewall; leave that to nftables
+for p in (9001, 9002, 9003):
+    threading.Thread(target=listen, args=(p,), daemon=True).start()
+for p in (9011, 9012):
+    closed(p)
+time.sleep(0.5)
+print(&quot;  listeners : 9001 9002 9003   -&gt; should read open&quot;)
+print(&quot;  closed    : 9011 9012        -&gt; should read closed&quot;)
+print(&quot;  filtered  : 9021             -&gt; nothing bound, no rule (loopback)&quot;)
+PY
+python3 portlab.py &amp;
+sleep 1
+nmap -sT -Pn -p 9001-9003,9011-9012,9021 127.0.0.1 2&gt;&amp;1 | grep -E &quot;^9[0-9]{3}&quot; | sed 's/^/  /' | tee 03-states.txt
+wait 2&gt;/dev/null
+
+cat &gt;&gt; 03-states.txt &lt;&lt;'EOF'
+
+  READING THE TABLE
+    open      -&gt; a service exists. Version fingerprint next.
+    closed    -&gt; host is ALIVE and REACHABLE. This is a positive finding,
+                 not a null result: it rules out &quot;host down&quot;.
+    filtered  -&gt; no answer. Firewall drop, or host down, or no route.
+                 You cannot distinguish these without another probe.
+  The inference that matters: &quot;everything filtered&quot; and &quot;everything closed&quot;
+  describe completely different networks, and only the second one proves
+  the host exists.
+EOF
+cat 03-states.txt
+
+# --- 4. version fingerprinting: the high-yield step ---
+{
+  echo &quot;=== version detection on an open port ===&quot;
+  echo &quot;  an SSH banner discloses the OpenSSH release. That is a free CVE lookup.&quot;
+  echo
+  echo &quot;=== what a banner tells you about yourself ===&quot;
+  ssh -V 2&gt;&amp;1 | sed 's/^/  this host: /'
+  python3 -V 2&gt;&amp;1 | sed 's/^/  this host: /'
+  echo
+  echo &quot;  Then: search the exact version string for CVEs.&quot;
+  echo &quot;  nmap -sV already gives you the string; the search is the work.&quot;
+} | tee 04-versions.txt
+
+# --- 5. parsing a scan into prioritised work ---
+cat &gt; prioritise.py &lt;&lt;'PY'
+&quot;&quot;&quot;Turn an nmap XML report into a prioritised worklist.&quot;&quot;&quot;
+import xml.etree.ElementTree as ET, sys, glob
+
+def load(path):
+    try: return ET.parse(path).getroot()
+    except Exception: return None
+
+def score(state, version, cve, reachable):
+    # reachability dominates: an unreachable host is not a finding
+    if state == &quot;filtered&quot;: return 0
+    s = 10 if state == &quot;open&quot; else 0
+    if cve: s += 40
+    if version and any(k in version.lower() for k in
+                       (&quot;dev&quot;,&quot;test&quot;,&quot;debug&quot;,&quot;beta&quot;,&quot;1.0&quot;,&quot;0.&quot;)): s += 15
+    if reachable: s += 20
+    return s
+
+rows = []
+for f in sorted(glob.glob(&quot;scan-*.xml&quot;)):
+    r = load(f)
+    if r is None: continue
+    for h in r.findall(&quot;host&quot;):
+        addr = h.find(&quot;address&quot;).get(&quot;addr&quot;)
+        st = h.find(&quot;./status&quot;).get(&quot;state&quot;)
+        for p in h.findall(&quot;./ports/port&quot;):
+            state = p.find(&quot;state&quot;).get(&quot;state&quot;)
+            ver = (p.find(&quot;service&quot;).get(&quot;version&quot;) or &quot;&quot;)
+            prod = (p.find(&quot;service&quot;).get(&quot;product&quot;) or &quot;&quot;)
+            cve = any(&quot;cve&quot; in (e.get(&quot;id&quot;) or &quot;&quot;).lower()
+                      for e in p.findall(&quot;./script[@id='vulners']/elem&quot;))
+            sc = score(state, f&quot;{prod} {ver}&quot;, cve, st == &quot;up&quot;)
+            if sc:
+                rows.append((sc, addr, p.get(&quot;portid&quot;), state, f&quot;{prod} {ver}&quot;.strip()))
+
+rows.sort(reverse=True)
+print(f&quot;  {'SCORE':&gt;5}  {'HOST':&lt;16} {'PORT':&lt;6} {'STATE':&lt;9} SERVICE&quot;)
+print(&quot;  &quot; + &quot;-&quot;*64)
+for sc, addr, port, state, svc in rows[:20]:
+    print(f&quot;  {sc:&gt;5}  {addr:&lt;16} {port:&lt;6} {state:&lt;9} {svc}&quot;)
+if not rows:
+    print(&quot;  (no XML reports yet - run ./scan.sh 192.168.56.0/24 first)&quot;)
+PY
+python3 prioritise.py | tee 05-prioritised.txt
+
+# --- 6. the scan report section ---
+cat &gt; 06-scan-report.md &lt;&lt;'EOF'
+# Active reconnaissance report
+
+## Hosts
+| Host | Status | In client inventory? | Notes |
+|---|---|---|---|
+| 192.168.56.20 | up, 3 open | yes | |
+| 192.168.56.22 | up, 0 open | no | **rogue asset: alive, nothing listening** |
+
+## Services
+| Host:Port | Service | Version | Assessment |
+|---|---|---|---|
+| 20:22 | OpenSSH | 9.2p1 | check for CVE-2023-38408 (agent forwarding) |
+| 20:8080 | http | Python 3.13 | dev server in prod; check for directory listing |
+
+## Findings
+1. Rogue asset not in the inventory (Informational, but ownership must be resolved)
+2. Development HTTP server bound to a routable interface (Low)
+3. No SMB signing required on the file server (Medium) - enables relay in tcm-06
+
+## Coverage and gaps
+- All 65535 TCP ports attempted on reachable hosts: yes
+- UDP: NOT scanned (not permitted by ROE) - explicitly stated
+- IPv6: not scanned (host has no global IPv6)
+- Authentication was not attempted on any service (out of scope)
+EOF
+echo
+echo &quot;written: 06-scan-report.md&quot;
+</code></pre>
+<p><strong>Step 3 is the lesson</strong>: three listeners and two deliberately-closed ports on loopback, and the<br />
+scan correctly distinguishes <code>open</code> from <code>closed</code>. That distinction — <em>the host is alive and<br />
+reachable, nothing is listening</em> — is a real finding that a ping sweep alone would miss<br />
+entirely.</p>
+<p><strong>Step 5</strong> turns a scan into a worklist by refusing to rank unreachable hosts. An unreachable<br />
+host with a critical CVE is not a finding; ranking it above live targets is how people waste a<br />
+week.</p>
+<p><strong>Record:</strong> <code>03-states.txt</code> and <code>05-prioritised.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What do the states <code>open</code>, <code>closed</code>, and <code>filtered</code> each prove?</li>
+<li>Why is a UDP scan potentially a denial of service, and what permission does it need?</li>
+<li>Why does <code>-sT</code> work without root and <code>-sS</code> does not?</li>
+<li>What is a rogue asset, and why is it worth reporting even when it is harmless?</li>
+<li>Why should reachability outweigh CVSS severity in a prioritised worklist?</li>
+<li>What does <code>--script=vuln</code> actually do, and what permission does it require?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Nmap</strong> → <strong>Port Scan</strong> → <strong>Service Fingerprinting</strong> → <strong>Network Discovery</strong> →<br />
+<strong>Attack Surface</strong> → <strong>SMB Relay</strong>.<br />
+<code>tcm-04</code> is where the prioritised list gets acted on.</p>

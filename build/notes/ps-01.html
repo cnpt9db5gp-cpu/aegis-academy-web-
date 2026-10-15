@@ -1,0 +1,431 @@
+<h1 id="the-http-request-lifecycle-and-how-the-web-works">The HTTP Request Lifecycle and How the Web Works</h1>
+<h2 id="summary">Summary</h2>
+<p>Every web vulnerability in this tier is a consequence of how HTTP works — or, more precisely, of<br />
+what a server must <em>guess</em> when a request is ambiguous. Before SQL injection or request<br />
+smuggling, you need the raw request in your head.</p>
+<p>PortSwigger Academy's first topic is this foundation, and it is the note that makes<br />
+<code>ps-08</code> (request smuggling) legible: smuggling exists because <strong>two HTTP implementations<br />
+disagree about where one request ends and the next begins.</strong></p>
+<h2 id="the-request-byte-by-byte">The request, byte by byte</h2>
+<pre><code class="language-http">GET /search?q=cats&amp;cat=dog HTTP/1.1
+Host: lab.internal:8080
+User-Agent: Mozilla/5.0
+Accept: text/html
+Cookie: session=abc123
+Authorization: Basic dXNlcjpwYXNz
+X-Forwarded-For: 192.168.1.5
+</code></pre>
+<pre><code class="language-text">  REQUEST LINE   METHOD SP TARGET SP VERSION
+                 the one line that must come first
+
+  HEADERS        KEY: VALUE, colon-space, CRLF each
+                 Host is mandatory in HTTP/1.1
+                 Header folding (obs-fold) was removed in RFC 7230
+                 Order matters to nobody except a parser differential
+
+  EMPTY LINE     CRLF CRLF - the separator
+
+  BODY           optional; Content-Length or Transfer-Encoding defines it
+</code></pre>
+<h2 id="the-response">The response</h2>
+<pre><code class="language-http">HTTP/1.1 200 OK
+Content-Type: text/html; charset=UTF-8
+Content-Length: 1256
+Set-Cookie: session=xyz; HttpOnly; Secure; SameSite=Lax
+Cache-Control: no-store
+
+&lt;html&gt;...&lt;/html&gt;
+</code></pre>
+<h2 id="the-url-is-the-most-dangerous-string-in-the-application">The URL is the most dangerous string in the application</h2>
+<pre><code class="language-text">  https://user:pass@lab.internal:8080/path/page?a=1&amp;b=2#fragment
+
+  ^scheme ^userinfo      ^host      ^port ^path     ^query   ^fragment
+
+  WHAT AMBIGUOUS?
+  - @ in a path can mean 'userinfo' or 'path' depending on parser
+  - # ends the request in the browser but may be forwarded by a proxy
+  - ../ can be collapsed by the client, the proxy, or the server
+    (some collapse it twice -&gt; path traversal across a boundary)
+  - %2e%2e%2f is '..%2f' after one decode, '../' after two
+    DOUBLE URL ENCODING is a traversal primitive.
+  - ; in a path can separate a path parameter (old IIS/Java behaviour)
+  - a tab or newline in a header enables CRLF / request splitting
+</code></pre>
+<p>Every one of those ambiguities becomes a vulnerability somewhere in this<br />
+course. Smuggling, traversal, host-header attacks and CRLF injection all<br />
+live in this list.</p>
+<h2 id="headers-that-carry-security-meaning">Headers that carry security meaning</h2>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Host</code></td>
+<td>selects the virtual host; also a <strong>cache poisoning</strong> vector</td>
+</tr>
+<tr>
+<td><code>Cookie</code></td>
+<td>the ambient authority — CSRF and session fixation live here</td>
+</tr>
+<tr>
+<td><code>Authorization</code></td>
+<td>carries credentials; basic auth is base64, not encryption</td>
+</tr>
+<tr>
+<td><code>X-Forwarded-For</code> / <code>X-Real-IP</code> / <code>Forwarded</code></td>
+<td><strong>client-supplied</strong>, and apps trust them for ACLs</td>
+</tr>
+<tr>
+<td><code>Content-Type</code></td>
+<td>selects the parser; a mismatch is an XXE/CSRF primitive</td>
+</tr>
+<tr>
+<td><code>Content-Length</code></td>
+<td>how much body — the other half of smuggling</td>
+</tr>
+<tr>
+<td><code>Transfer-Encoding: chunked</code></td>
+<td>an alternative body framing — smuggling's other half</td>
+</tr>
+<tr>
+<td><code>Origin</code> / <code>Referer</code></td>
+<td>CORS checks; <code>null</code> origin is a bypass</td>
+</tr>
+<tr>
+<td><code>X-Forwarded-Host</code> / <code>X-Original-URL</code></td>
+<td>routing overrides; SSRF and access control bypass</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The rule that explains an entire vulnerability class:</strong> if a header is<br />
+used for an access decision, and the client can set it, it is not a<br />
+security control.</p>
+<h2 id="the-lifecycle">The lifecycle</h2>
+<pre><code class="language-text">  BROWSER
+    -&gt; URL resolution (scheme, host, port, DNS)
+    -&gt; TCP connect (+ TLS handshake)
+    -&gt; HTTP request
+    -&gt; [PROXY / LOAD BALANCER / WAF]        &lt;- where smuggling happens
+    -&gt; [CDN / CACHE]                         &lt;- where poisoning happens
+    -&gt; APPLICATION SERVER
+         parses URL, routes, authenticates session, authorises object,
+         queries the database, renders, encodes output
+    -&gt; HTTP response (+ Set-Cookie)
+    -&gt; browser parses HTML, executes JS, applies CSP
+</code></pre>
+<p>Your proxy sits between you and the target and shows you every step. That<br />
+visibility is the single most valuable tool in web security, and it is why<br />
+<code>ps-08</code> is possible at all.</p>
+<h2 id="proxies-intercepting-proxies-and-what-they-change">Proxies, intercepting proxies, and what they change</h2>
+<pre><code class="language-text">  FORWARD PROXY      acts on your behalf; the target sees the proxy
+  REVERSE PROXY      sits in front of the server; the client sees the proxy
+  INTERCEPTING PROXY a forward proxy you point a browser at, so you can
+                    read and modify every request
+
+  WHAT IT BUYS:
+    - you see raw bytes, not a rendered page
+    - you can change one header and re-send
+    - you can replay a request exactly
+    - you can send a request no UI would produce
+
+  WHAT IT COSTS:
+    - HTTPS needs certificates (see below)
+    - your browser is slower and slightly different
+    - some protections assume a real client
+</code></pre>
+<h2 id="tls-and-intercepting-honestly">TLS and intercepting, honestly</h2>
+<pre><code class="language-text">  If the target uses HTTP:                proxy reads everything. done.
+  If the target uses HTTPS:
+      the proxy presents its OWN certificate and decrypts, then
+      re-encrypts to the real server. You need:
+        - burp's CA certificate installed in your browser's trust store
+        - or --unsafe (proxy CA not installed) for quick throwaway labs
+
+  NOTE FOR ENGAGEMENTS: installing a CA in your own browser is fine.
+  Installing one system-wide on a client machine is not, and many ROCs
+  prohibit it. Ask before.
+</code></pre>
+<h2 id="encoding-and-why-it-is-the-root-of-half-these-bugs">Encoding, and why it is the root of half these bugs</h2>
+<pre><code class="language-text">  '  &lt; &gt;  &quot;  '         the HTML metacharacters
+  %20 %3C %3E %22 %27  URL-encoded forms of the same
+  \x3c &amp;#60; \u003c     HTML entity / hex / unicode forms
+
+  THE DECODING CHAIN:
+    raw  -&gt;  URL decode  -&gt;  HTML entity decode  -&gt;  SQL parse  -&gt;  shell
+     at every stage, the character means something DIFFERENT to the
+     next component.
+
+  AN ATTACK IS A STRING THAT IS INERT AT ONE STAGE AND LIVE AT ANOTHER.
+  A %252e decodes once to %2e, and again to '.' - so a validator that
+  checks after ONE decode sees %2e, and the filesystem sees '.'.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Request line</strong></td>
+<td><code>METHOD SP TARGET SP VERSION</code></td>
+</tr>
+<tr>
+<td><strong>Header</strong></td>
+<td><code>Key: Value</code>, CRLF-terminated</td>
+</tr>
+<tr>
+<td><strong>Host header</strong></td>
+<td>Virtual host selector; a security-relevant input</td>
+</tr>
+<tr>
+<td><strong>URL parsing</strong></td>
+<td>Fragmenting a URL into components; non-unique by design</td>
+</tr>
+<tr>
+<td><strong>Intercepting proxy</strong></td>
+<td>Your tool in the middle of the request</td>
+</tr>
+<tr>
+<td><strong>Forward / reverse proxy</strong></td>
+<td>Acts for you / sits in front of the server</td>
+</tr>
+<tr>
+<td><strong>URL decode</strong></td>
+<td><code>%XX</code> → byte; may happen more than once</td>
+</tr>
+<tr>
+<td><strong>Double encoding</strong></td>
+<td>Survives one decode; a traversal primitive</td>
+</tr>
+<tr>
+<td><strong>CRLF injection</strong></td>
+<td>Newline in a header; splits the request</td>
+</tr>
+<tr>
+<td><strong>Content-Type</strong></td>
+<td>Selects which parser handles the body</td>
+</tr>
+<tr>
+<td><strong>TLS interception</strong></td>
+<td>Proxy with its own CA, decrypting in the middle</td>
+</tr>
+<tr>
+<td><strong>Virtual host</strong></td>
+<td>Name-based routing; <code>Host</code> selects it</td>
+</tr>
+<tr>
+<td><strong>Status code</strong></td>
+<td>2xx ok, 3xx redirect, 4xx client error, 5xx server error</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-01 &amp;&amp; cd ~/aegis/labs/ps-01
+
+# --- 1. a real server to talk to. PHP + SQLite are already on Kali. ---
+cat &gt; index.php &lt;&lt;'PHP'
+&lt;?php
+// A deliberately minimal, local-only lab target. Binds to loopback.
+header('Content-Type: text/html; charset=utf-8');
+$q = $_GET['q'] ?? '';
+$path = $_SERVER['REQUEST_URI'] ?? '';
+echo &quot;&lt;!doctype html&gt;&lt;title&gt;AEGIS lab&lt;/title&gt;&lt;h1&gt;AEGIS ps-01 lab&lt;/h1&gt;&quot;;
+echo &quot;&lt;p&gt;request URI: &quot; . htmlspecialchars($path) . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;p&gt;query q: &quot; . htmlspecialchars($q) . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;p&gt;Host: &quot; . htmlspecialchars($_SERVER['HTTP_HOST'] ?? '') . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;p&gt;X-Forwarded-For: &quot; . htmlspecialchars($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '(none)') . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;p&gt;method: &quot; . htmlspecialchars($_SERVER['REQUEST_METHOD'] ?? '') . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;form method=get&gt;&lt;input name=q placeholder=search&gt;&lt;button&gt;go&lt;/button&gt;&lt;/form&gt;&quot;;
+PHP
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+curl -s --max-time 5 &quot;http://127.0.0.1:8080/index.php?q=cats&quot; | head -8 | sed 's/^/  /'
+echo
+echo &quot;  server running on 127.0.0.1:8080 (loopback only, kill with: kill %1)&quot;
+
+# --- 2. see the raw request, which is what a proxy shows you ---
+{
+  echo &quot;=== the request line and headers, exactly as sent ===&quot;
+  curl -sv --max-time 5 &quot;http://127.0.0.1:8080/index.php?q=cats&amp;cat=dog&quot; 2&gt;&amp;1 \
+    | grep -E &quot;^[*&gt;]&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== and the response headers ===&quot;
+  curl -sI --max-time 5 &quot;http://127.0.0.1:8080/index.php?q=cats&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== the body, byte count ===&quot;
+  curl -s --max-time 5 &quot;http://127.0.0.1:8080/index.php?q=cats&quot; | wc -c | xargs echo &quot;  bytes:&quot;
+} 2&gt;&amp;1 | tee 01-raw.txt
+
+# --- 3. URL parsing is non-unique: prove it ---
+python3 - &lt;&lt;'PY' | tee 02-ambiguity.txt
+from urllib.parse import urlsplit
+cases = [
+    &quot;http://lab.internal/a/b&quot;,
+    &quot;http://lab.internal/a/../b&quot;,
+    &quot;http://lab.internal/a/b/..%2f..%2fetc/passwd&quot;,
+    &quot;http://lab.internal/%2e%2e/%2e%2e/etc/passwd&quot;,
+    &quot;http://lab.internal/a%252e%252e%252fb&quot;,      # double-encoded
+    &quot;http://lab.internal/a;b=c&quot;,
+    &quot;http://lab.internal/a%3b=c&quot;,
+    &quot;http://lab.internal\\..\\..\\etc\\passwd&quot;,     # backslashes
+    &quot;http://evil.internal#@lab.internal/&quot;,
+    &quot;http://lab.internal/\\@evil.internal/&quot;,
+]
+print(&quot;  URL                                            parsed path&quot;)
+print(&quot;  &quot; + &quot;-&quot;*78)
+for u in cases:
+    p = urlsplit(u)
+    print(f&quot;  {u:&lt;46} {p.path!r}&quot;)
+print()
+print(&quot;  Six different encodings, four different parsers (browser, proxy,&quot;)
+print(&quot;  framework, filesystem) will disagree about what the path is.&quot;)
+print(&quot;  That disagreement is request smuggling (ps-08), path traversal&quot;)
+print(&quot;  (ps-06), and cache poisoning (ps-08) - one root cause, three lessons.&quot;)
+PY
+cat 02-ambiguity.txt
+
+# --- 4. the header set, and what each one is trusted for ---
+cat &gt; 03-headers.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+H=&quot;X-Forwarded-For: 10.0.0.1&quot;
+curl -s --max-time 5 &quot;http://127.0.0.1:8080/index.php&quot; \
+  -H &quot;$H&quot; \
+  -H &quot;X-Real-IP: 10.0.0.2&quot; \
+  -H &quot;X-Forwarded-Host: evil.internal&quot; \
+  -H &quot;X-Original-URL: /admin&quot; \
+  -H &quot;X-Custom-IP-Authorization: 127.0.0.1&quot; \
+  -H &quot;X-Forwarded-Proto: https&quot; \
+  | grep -E &quot;X-Forwarded-For|Host&quot; | sed 's/^/  /'
+echo
+echo &quot;  Every one of these headers is CLIENT-SUPPLIED and many apps use&quot;
+echo &quot;  them for access decisions. That is an authorisation bypass waiting&quot;
+echo &quot;  to happen, and it is exactly what ps-04 is about.&quot;
+EOF
+chmod +x 03-headers.sh
+./03-headers.sh 2&gt;&amp;1 | tee 04-headers.txt
+
+# --- 5. encoding layers, demonstrated ---
+python3 - &lt;&lt;'PY' | tee 05-encoding.txt
+import urllib.parse
+payloads = {
+    &quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;:                     &quot;raw HTML metacharacters&quot;,
+    &quot;%3Cscript%3Ealert(1)%3C%2Fscript%3E&quot;:           &quot;URL-encoded&quot;,
+    &quot;%253Cscript%253E&quot;:                               &quot;double URL-encoded&quot;,
+    &quot;&amp;lt;script&amp;gt;&quot;:                                 &quot;HTML entity&quot;,
+    &quot;&amp;#60;script&amp;#62;&quot;:                               &quot;decimal entity&quot;,
+    &quot;\\x3cscript\\x3e&quot;:                               &quot;hex escape&quot;,
+    &quot;&lt;ScRiPt&gt;alert(1)&lt;/ScRiPt&gt;&quot;:                      &quot;case variation&quot;,
+    &quot;&lt;script\n&gt;alert(1)&lt;/script&gt;&quot;:                    &quot;whitespace variation&quot;,
+    &quot;java\tscript:alert(1)&quot;:                          &quot;tab inside the scheme&quot;,
+}
+print(&quot;  payload                               what it is              inert where?&quot;)
+print(&quot;  &quot; + &quot;-&quot;*88)
+for p, d in payloads.items():
+    dec1 = urllib.parse.unquote(p)
+    dec2 = urllib.parse.unquote(dec1)
+    live = [&quot;&lt;&quot; in dec2, &quot;&amp;#&quot; in p, &quot;\\\\x3c&quot; in p]
+    where = &quot;never - live everywhere&quot;
+    if &quot;&amp;#&quot; in p or &quot;\\x3c&quot; in p: where = &quot;only after HTML entity decode&quot;
+    elif &quot;%25&quot; in p:               where = &quot;only after TWO url decodes&quot;
+    elif &quot;%3C&quot; in p:               where = &quot;after ONE url decode&quot;
+    print(f&quot;  {p:&lt;38} {d:&lt;24} {where}&quot;)
+print()
+print(&quot;  The point: 'is this dangerous?' is the wrong question.&quot;)
+print(&quot;  The right question is 'in which component's parser is it live,'&quot;)
+print(&quot;  and that component is not the one you are holding.&quot;)
+PY
+cat 05-encoding.txt
+
+# --- 6. a proxy, with the CA installed properly ---
+cat &gt; 06-proxy.md &lt;&lt;'EOF'
+# Setting up an intercepting proxy
+
+## For the PortSwigger Academy labs (official targets)
+1. Download Burp Suite Community from portswigger.net/burp
+2. Start it; it listens on 127.0.0.1:8080 by default
+3. Firefox -&gt; Settings -&gt; Network -&gt; Manual proxy 127.0.0.1:8080
+4. Visit `http://burp` in the browser
+5. Download the CA certificate and install it into Firefox's Authorities
+6. Visit the academy target; the request now appears in Burp
+
+For an HTTPS target you also need the CA installed. `http://burp` gives it
+to you.
+
+## Doing it without a GUI proxy (for scripted, local work)
+```bash
+# mitmproxy, if installed
+mitmproxy --listen-host 127.0.0.1 --listen-port 8081 --mode regular
+export https_proxy=http://127.0.0.1:8081
+
+# or just capture raw bytes with a socket
+python3 - &lt;&lt;'PY'
+import socket
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
+s.bind((&quot;127.0.0.1&quot;, 9001)); s.listen(1)
+print(&quot;listening on 127.0.0.1:9001 - point curl at it with -x&quot;)
+c, a = s.accept()
+c.recv(8192)
+PY
+curl -x http://127.0.0.1:9001 --http1.1 http://127.0.0.1:8080/index.php
+</code></pre>
+<h2 id="what-to-do-with-the-visibility">What to do with the visibility</h2>
+<ul>
+<li>Read the RAW request, not the rendered page</li>
+<li>Change one header at a time; a diff beats a guess</li>
+<li>Replay a request that succeeded and change exactly one thing</li>
+<li>Look at the response for information disclosure before attacking<br />
+EOF<br />
+cat 06-proxy.md</li>
+</ul>
+<h1 id="-7-the-mental-model-to-carry-into-every-later-note-">--- 7. the mental model to carry into every later note ---</h1>
+<p>cat &gt; 07-model.md &lt;&lt;'EOF'</p>
+<h1 id="the-model-to-carry-into-tier-4">The model to carry into Tier 4</h1>
+<pre><code>  BROWSER --parse--&gt; [PROXY] --parse--&gt; [CACHE] --parse--&gt; SERVER
+     |                   |               |                 |
+  parser A           parser B        parser C          parser D
+     \                  |               |                 /
+      \                 |               |                /
+       \          ANY DISAGREEMENT BETWEEN THESE IS A BUG
+        --------------------------------------------------
+
+  ps-02  server's SQL parser   vs your input        -&gt; SQL injection
+  ps-03  browser's HTML parser vs server's output   -&gt; XSS
+  ps-05  the fetcher's URL parser vs the validator   -&gt; SSRF
+  ps-06  the filesystem's path parser vs the filter  -&gt; traversal
+  ps-08  two HTTP parsers, front and back            -&gt; smuggling
+</code></pre>
+<p><strong>One diagram explains the entire tier.</strong> Every vulnerability is a<br />
+disagreement between two components about what a string means. Finding<br />
+them means finding the places where a string crosses two components and<br />
+neither validates the crossing.<br />
+EOF<br />
+cat 07-model.md<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: nine encodings of the same idea, with the column that says<br />
+which component sees it as live. "Is this dangerous?" is the wrong question — "live in which<br />
+parser?" is the right one, and that reframing is what makes <code>ps-03</code>, <code>ps-06</code> and <code>ps-08</code><br />
+approachable rather than a list of tricks.</p>
+<p><strong>Step 7</strong> is the single diagram the whole tier hangs on: every vulnerability in Tier 4 is two<br />
+components disagreeing about what a string means.</p>
+<p><strong>Record:</strong> <code>02-ambiguity.txt</code> and <code>07-model.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the three parts of an HTTP request, and how are they separated?</li>
+<li>Why is a URL "ambiguous", and name three concrete ambiguities.</li>
+<li>Which header is most commonly abused for cache poisoning, and why?</li>
+<li>Why is <code>X-Forwarded-For</code> a security problem rather than a feature?</li>
+<li>What does double URL encoding enable, and which validation mistake does it exploit?</li>
+<li>What does a TLS-intercepting proxy need, and why might an engagement ban it?</li>
+<li>Give the "two parsers disagree" explanation for SSRF.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>HTTP Request/Response</strong> → <strong>URL Parsing</strong> → <strong>Proxy</strong> → <strong>OWASP Top 10</strong> →<br />
+<strong>Encoding vs Encryption</strong> → <strong>Cache Poisoning</strong>.<br />
+<code>ps-08</code> is where this note's URL-ambiguity table gets its payoff.</p>

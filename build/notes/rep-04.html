@@ -1,0 +1,353 @@
+<h1 id="remediation-guidance-and-executive-summary">Remediation Guidance and Executive Summary</h1>
+<h2 id="summary">Summary</h2>
+<p>Remediation guidance is where most reports fail. A finding that ends in "should be remediated"<br />
+has transferred the entire hard part to the client, who did not ask for it and does not have the<br />
+context you have.</p>
+<p>The framing: <strong>a recommendation the client can put in a sprint is<br />
+worth ten recommendations that describe a category of vulnerability.</strong></p>
+<h2 id="what-makes-a-remediation-usable">What makes a remediation usable</h2>
+<pre><code class="language-text">  THE FIVE THINGS, and the report must supply all five:
+
+  1. THE ACTION      specific enough to schedule. &quot;Remove the
+                     endpoint&quot; - not &quot;improve security&quot;.
+  2. THE OWNER       a named team, not &quot;the business&quot;.
+  3. THE EFFORT      a real estimate. &quot;1 sprint&quot; beats &quot;medium&quot;.
+  4. THE PRIORITY    and a sequence. Four remediations all marked
+                     &quot;Immediate&quot; is not prioritisation.
+  5. THE VERIFICATION  how the client confirms it is done, and how
+                     you will confirm it at re-test.
+
+  AND THE ONE MOST REPORTS OMIT:
+  6. THE ALTERNATIVE, when the fix has a cost
+     &quot;remove the endpoint (2 days) OR place it behind authentication
+      (4 days, ongoing maintenance)&quot;. Choosing is the client's job;
+     laying out both is yours.
+</code></pre>
+<h2 id="remediation-patterns-by-bug-class">Remediation patterns, by bug class</h2>
+<pre><code class="language-text">  SQL INJECTION
+    remove the concatenation -&gt; parameterise -&gt; whitelist identifiers
+    -&gt; least-privilege DB account -&gt; hide errors
+    -&gt; CI lint rule so the next one is caught before release
+
+  XSS
+    output-encode per context -&gt; CSP -&gt; HttpOnly + SameSite cookies
+    -&gt; a framework that escapes by default -&gt; a lint rule
+    NOTE: the first is the fix. The rest reduce impact.
+
+  BROKEN ACCESS CONTROL
+    add the ownership predicate TO THE QUERY, not as a post-fetch if:
+      SELECT * FROM invoices WHERE id = ? AND owner_id = ?
+    why: a check in application code is one `if` away from being
+    omitted, and it was. A predicate in the SQL is not optional.
+
+  SMB SIGNING NOT REQUIRED
+    GPO: require signing on all hosts -&gt; verify with a scan, per host
+    -&gt; consider SMB encryption on sensitive shares
+    -&gt; block inbound 445 between workstation segments (the strongest
+       control, and the one that stops the LAN attack entirely)
+
+  LDAP SIGNING / CHANNEL BINDING
+    GPO on the DCs -&gt; enforce channel binding (KB5012122) -&gt; close
+    636/6363 to clients -&gt; verify with an LDAP relay test
+
+  UNCONSTRAINED DELEGATION
+    remove it -&gt; constrained delegation bound to named SPNs -&gt; audit
+    for msDS-SecurityHistory as well as msDS-AllowedToDelegateTo -&gt;
+    run IIS app pools as least-privilege identities, not SYSTEM
+
+  KERBEROASTABLE ACCOUNTS
+    gMSA (120 random characters, DC-managed) -&gt; AES-only on service
+    accounts -&gt; remove unneeded SPNs -&gt; separate service accounts from
+    privileged groups
+    NOTE: &quot;set a longer password&quot; is NOT a remediation here.
+
+  GPO WRITE ABUSE
+    remove &quot;Create GPOs&quot; from the group -&gt; scope Group Policy Creator
+    Owners -&gt; audit every OU's delegation -&gt; enable Advanced GPO
+    auditing (5136 on GroupPolicy objects)
+
+  MISSING SECURITY HEADERS
+    CSP (nonces, not unsafe-inline) -&gt; HSTS with preload -&gt;
+    includeSubDomains -&gt; X-Content-Type-Options -&gt; Referrer-Policy
+    NOTE: a CSP nobody can deploy is not a remediation. Name the
+    framework (CSP Level 3 nonces) and the deployment step.
+
+  THE PATTERN IN ALL OF THEM:
+    remove the specific thing -&gt; reduce the class -&gt; limit the impact
+    -&gt; prevent the next one, in code review or CI
+</code></pre>
+<h2 id="the-executive-summary">The executive summary</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/rep-04 &amp;&amp; cd ~/aegis/labs/rep-04
+
+cat &gt; 01-summary-template.md &lt;&lt;'EOF'
+# Penetration Test — Executive Summary
+
+**Client:** [organisation]
+**Engagement:** [ref]   **Dates:** [start] – [end]
+**Assessor:** [name]    **Report version:** [x]   **Date:** [today]
+
+## Overall risk: [CRITICAL / HIGH / MEDIUM / LOW]
+
+## What we did
+[Two or three sentences. The scope in plain language, the number of
+systems, the approach, and — importantly — what we did NOT do, because
+&quot;we did not test X&quot; is information a reader needs.]
+
+## What we found
+| # | Finding | Severity | Business impact in one line |
+|---|---|---|---|
+| F-01 | | | |
+| F-02 | | | |
+| F-03 | | | |
+
+Full technical detail in section 3.
+
+## The three things that matter
+1. [One sentence each. Written so a board member who has never read a
+    pentest report understands both the risk and the action.]
+2.
+3.
+
+## What we recommend, in order
+| Priority | Action | Owner | Effort |
+|---|---|---|---|
+| 1 | | | |
+| 2 | | | |
+| 3 | | | |
+| 4 | | | |
+
+## What we did not test
+- [Denial of service — not authorised]
+- [Third-party and cloud services — not owned by the client]
+- [Physical and social engineering — out of scope]
+- [Any system outside the scope annex]
+This list is as important as the findings above. A reader who assumes
+an untested area was safe has been misled.
+
+## Limitations and caveats
+- Findings reflect the state of the systems on the dates tested
+- Internal testing was limited to [N] hours on [date]
+- [Credential exposure was observed but not exploited beyond
+  proving access]
+- [Any finding that could not be reproduced and why]
+
+## Confidentiality
+This document contains information about vulnerabilities in
+[organisation]'s systems and is provided under the terms of the
+engagement letter dated [date]. It must not be distributed further
+without written consent.
+EOF
+echo &quot;written: 01-summary-template.md&quot;
+
+cat &gt; 02-example-summary.md &lt;&lt;'EOF'
+## The three things that matter
+
+**1. One request reaches your customer data.** An unauthenticated
+HTTP request to WEB-01 returns the customer records table, including
+names, email addresses and partial card data. No credentials, no
+user interaction, no special tooling. We established this in one
+request and stopped there.
+
+**2. Compromising one host compromises all of them.** There is no
+segmentation between the web tier, the server tier and the database
+tier. We demonstrated movement from a VPN-connected workstation to the
+production database, two network segments apart, in under ten
+minutes, using only a credential recovered from the first host.
+Segmentation is the control that would have limited this. It does not
+currently exist.
+
+**3. Nothing here required a sophisticated attacker.** Every finding
+used standard tooling. Three of them required none at all — only a
+changed number in a request. The two most significant required a
+public wordlist that is available for free to anyone.
+
+## What we recommend, in order
+
+| Priority | Action | Owner | Effort |
+|---|---|---|---|
+| 1 | Remove or authenticate `/admin/records` on WEB-01 | Web Platform | Immediate (2 days) |
+| 2 | Require SMB signing domain-wide and block inbound 445 between workstation segments | Domain Admins / Network Ops | Immediate (GPO) |
+| 3 | Segment the web tier from the data tier; restrict WinRM to a management VLAN | Network Ops | 2 sprints |
+| 4 | Move all service accounts to gMSA and enforce AES-only Kerberos | Domain Admins | 1 sprint |
+| 5 | Deploy Credential Guard on all servers and workstations | Endpoint | 1 sprint |
+
+Recommendations 1, 2 and 4 are configuration changes that can be made
+by the client's own administrators without further engagement.
+Recommendation 3 is the one that materially changes the blast radius
+of every other finding, and it is the most expensive. That ordering
+is deliberate.
+
+## What we did not test
+
+- Denial of service of any kind. Not authorised, and we would
+  recommend against it in a business-hours window regardless.
+- Third-party, cloud and SaaS services. Not owned by the client.
+- Physical security and social engineering. Out of scope.
+- Any host outside the scope annex. Two hosts in the range did not
+  respond to any probe and are not assessed either way.
+- The effectiveness of the client's detection and response. We
+  produced log events; whether they were alerted on is a question
+  for the client (see F-11).
+
+## Limitations and caveats
+
+- Findings reflect the state of the systems on 14 October 2026.
+- Internal testing was limited to three hours on 14 October, outside
+  business hours, to avoid disruption.
+- We recovered credential material sufficient to demonstrate impact.
+  We did not use any credential outside the in-scope targets, and we
+  did not test whether the recovered credentials worked elsewhere.
+- Finding F-07 (kernel privilege escalation) could not be reproduced
+  on the version deployed. We are reporting it on the basis of the
+  version in use at the time of testing and the published advisory.
+  If the client has patched since 14 October, this finding should be
+  closed.
+EOF
+echo &quot;written: 02-example-summary.md&quot;
+
+cat &gt; 03-effort.md &lt;&lt;'EOF'
+# Estimating effort honestly
+
+```text
+  THE PROBLEM
+    &quot;Medium effort&quot; means nothing. It means the person reading it has
+    to go and find out how much work it is, which means they will
+    put it in the &quot;someday&quot; column.
+
+  THE SCALE, and it must fit on one line in a table:
+
+    Immediate        hours. A GPO, a config change, removing an
+                     endpoint. Someone can do it this week.
+    1 sprint         days to a couple of weeks. Code change, a
+                     feature flag, a package.
+    2 sprints        a quarter. Something with dependencies.
+    Programme        a quarter or more, needs its own planning.
+    Not scheduled    needs a business decision, not engineering
+                     capacity. Say so, and say what the decision is.
+
+  AND THE HONESTY REQUIREMENT
+    You do not know the client's codebase or change process. So:
+
+      GOOD   &quot;Remove the endpoint — estimated 2 days of Web Platform
+              time. The estimate assumes the endpoint is unused, which
+              we could not confirm from the application itself.&quot;
+
+      BAD    &quot;Remediation effort: low.&quot;
+
+    The parenthetical is the important part. It says what your
+    estimate assumes, so the client can tell you the assumption is
+    wrong and re-estimate in thirty seconds instead of finding out
+    six weeks later.
+</code></pre>
+<pre><code class="language-bash"># the remediation table, checked for the five required fields
+cat &gt; 04-check-remediation.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Every remediation row needs: action, owner, effort, priority, verification.&quot;&quot;&quot;
+import sys, re, pathlib
+
+REQUIRED = {
+    &quot;action&quot;:      r&quot;(?i)remove|disable|require|enable|restrict|rotate|&quot;
+                   r&quot;migrate|segment|patch|add|deploy|upgrade|change|set&quot;,
+    &quot;owner&quot;:       r&quot;(?i)web platform|network ops|linux ops|windows ops|&quot;
+                   r&quot;domain admins|endpoint|security|it ops|sre|dba&quot;,
+    &quot;effort&quot;:      r&quot;(?i)immediate|sprint|day|week|hour|quarter|programme|&quot;
+                   r&quot;program|month&quot;,
+    &quot;priority&quot;:    r&quot;(?i)immediate|high|medium|low|critical|p[0-3]\b&quot;,
+    &quot;verification&quot;:r&quot;(?i)confirm|verify|re-test|retest|scan|test|validate&quot;,
+}
+
+VAGUE = [
+    r&quot;(?i)\bimprove .{0,30}security\b&quot;,
+    r&quot;(?i)\bharden\b&quot;,
+    r&quot;(?i)\bbest practice&quot;,
+    r&quot;(?i)\breview (your |the )?(process|policies)&quot;,
+    r&quot;(?i)\bincrease awareness\b&quot;,
+    r&quot;(?i)\bconsider\b&quot;,
+    r&quot;(?i)\bshould be updated\b&quot;,
+]
+
+def check(path):
+    text = pathlib.Path(path).read_text(errors=&quot;ignore&quot;)
+    rows = [l for l in text.splitlines() if l.strip().startswith(&quot;|&quot;)
+            and l.count(&quot;|&quot;) &gt;= 4]
+    print(f&quot;  {len(rows)} table rows in {path}&quot;)
+    problems = 0
+    for i, row in enumerate(rows, 1):
+        if set(row.replace(&quot;|&quot;,&quot;&quot;).strip()) &lt;= set(&quot;-: &quot;): continue   # separator
+        if &quot;Action&quot; in row or &quot;---&quot; in row: continue                   # header
+        cells = [c.strip() for c in row.split(&quot;|&quot;)[1:-1]]
+        if len(cells) &lt; 4:
+            continue
+        missing = []
+        joined = &quot; &quot;.join(cells)
+        for field, rx in REQUIRED.items():
+            if not re.search(rx, joined): missing.append(field)
+        vague = [v for v in VAGUE if re.search(v, joined)]
+        if missing or vague:
+            problems += 1
+            print(f&quot;    row {i}: MISSING {', '.join(missing) or '-'}&quot;)
+            if vague:
+                print(f&quot;            VAGUE: {vague}&quot;)
+    if not problems:
+        print(&quot;  every row has an action, an owner, an effort, a priority&quot;)
+        print(&quot;  and a verification.&quot;)
+    return problems
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &lt; 2:
+        print(__doc__); sys.exit(0)
+    total = sum(check(p) for p in sys.argv[1:])
+    print(f&quot;\n  {total} rows need work.&quot;)
+    print()
+    print(&quot;  THE ONE THAT MATTERS MOST: 'verification'.&quot;)
+    print(&quot;  A remediation without a stated verification is how a&quot;)
+    print(&quot;  finding gets closed without being fixed, and how a re-test&quot;)
+    print(&quot;  becomes an argument rather than a check.&quot;)
+    sys.exit(1 if total else 0)
+PY
+echo &quot;written: 04-check-remediation.py&quot;
+
+python3 - &lt;&lt;'PY'
+import pathlib
+# two rows: one good, one vague
+good = &quot;&quot;&quot;| # | Action | Owner | Effort | Priority | Verification |
+|---|---|---|---|---|---|
+| 1 | Remove the unauthenticated endpoint | Web Platform | Immediate | P1 | Re-request returns 403 |
+| 2 | Require SMB signing on all hosts | Domain Admins | 1 sprint | P1 | Scan each host for signing mode |
+&quot;&quot;&quot;
+bad = &quot;&quot;&quot;| # | Action | Owner | Effort | Priority | Verification |
+|---|---|---|---|---|---|
+| 1 | Improve security posture and review processes | The business | Medium | High | |
+&quot;&quot;&quot;
+pathlib.Path(&quot;rows-good.md&quot;).write_text(good)
+pathlib.Path(&quot;rows-bad.md&quot;).write_text(bad)
+PY
+{ echo &quot;=== GOOD ROWS ===&quot;; python3 04-check-remediation.py rows-good.md
+  echo; echo &quot;=== BAD ROWS ===&quot;; python3 04-check-remediation.py rows-bad.md || true; } 2&gt;&amp;1 | tee 05-check.txt
+rm -f rows-good.md rows-bad.md 04-check-remediation.py
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: <code>02-example-summary.md</code>. The recommendation table explains <em>why</em><br />
+the order is that order — "recommendations 1, 2 and 4 are configuration changes the client's own<br />
+admins can make without further engagement; recommendation 3 is the one that materially changes<br />
+the blast radius of every other finding, and it is the most expensive. That ordering is<br />
+deliberate."</p>
+<p>And the <strong>"What we did not test"</strong> section is given equal weight to the findings, because <em>"a<br />
+reader who assumes an untested area was safe has been misled."</em> It even names two hosts that<br />
+responded to no probe and are not assessed either way.</p>
+<p><strong>Record:</strong> <code>02-example-summary.md</code> and <code>05-check.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What five fields does every remediation row need, plus the sixth most reports omit?</li>
+<li>What does a remediation recommendation need when the fix has a cost?</li>
+<li>Give the four-step remediation pattern for SQL injection.</li>
+<li>Why must an access-control fix be in the SQL query rather than in application code?</li>
+<li>Why is "set a longer password" not a remediation for Kerberoasting?</li>
+<li>Name the five effort bands and what fits in each.</li>
+<li>What must be in the parenthetical of an effort estimate?</li>
+<li>Why is "what we did not test" as important as the findings?</li>
+<li>Which recommendation is 'verification' for, and why is it the one that matters most?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Remediation</strong> → <strong>Pentest Reporting</strong> → <strong>Risk Likelihood Impact</strong> →<br />
+<strong>Retest</strong> → <strong>Risk Acceptance</strong>.<br />
+This closes the reporting tier. <code>cap-01</code>..<code>cap-06</code> is the capstone engagement.</p>

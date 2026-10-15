@@ -1,0 +1,453 @@
+<h1 id="course-overview-and-stream-ciphers">Course Overview and Stream Ciphers</h1>
+<h2 id="summary">Summary</h2>
+<p>Dan Boneh's online course opens with the framing that makes cryptography learnable rather than a<br />
+grab-bag of algorithms: <strong>cryptography is about problems, not about ciphers.</strong> Encryption is a<br />
+tool for solving the <em>one-way function</em> problem; hashing is a tool for the <em>collision<br />
+resistance</em> problem; signatures are for <em>non-repudiation</em>; MACs are for <em>authentication</em>.</p>
+<p>Start from the problem, and the primitive is determined. Start from the<br />
+primitive, and you have to memorise.</p>
+<blockquote>
+<p>Companion to <code>cs161-02</code>'s IND-CPA definition and the <code>mit858-13</code><br />
+secure-channel note. This is the <em>conceptual</em> layer; those are the<br />
+applied layers.</p>
+</blockquote>
+<h2 id="the-three-problems">The three problems</h2>
+<pre><code class="language-text">  PROBLEM                          WHAT YOU NEED        PRIMITIVE
+  -------------------------------   ------------------   ----------------
+  hide the contents of a message    forward secrecy,     one-way permutation
+                                    authenticity         + randomness
+  prove two messages are equal     integrity             collision resistance
+  prove who sent a message         non-repudiation       signature scheme
+  prove a message is untampered    authentication       MAC
+</code></pre>
+<p><strong>The single most important sentence in the course:</strong> you cannot get<br />
+all of these from one primitive. Every real protocol uses several,<br />
+because each one only buys part of the requirement.</p>
+<h2 id="three-requirements-three-separate-jobs">Three requirements, three separate jobs</h2>
+<pre><code class="language-text">  CONFIDENTIALITY   only the intended party can read it
+                    -&gt; encryption with a key the attacker does not have
+
+  INTEGRITY         nobody can change it without detection
+                    -&gt; MAC, or a signature. ENCRYPTION ALONE GIVES YOU
+                      NEITHER. AES-CBC without a MAC is not secure.
+
+  AUTHENTICATION    the receiver knows the sender
+                    -&gt; a MAC shared with that sender, or a signature
+
+  These are independent. A scheme can have any subset. Any design that
+  claims otherwise has a bug.
+</code></pre>
+<h2 id="encodings-are-not-encryption">Encodings are not encryption</h2>
+<pre><code class="language-text">  BASE64 IS NOT ENCRYPTION. It is a transport encoding.
+    'hello' -&gt; aGVsbG8=     which anyone can reverse in one command.
+
+  The confusion matters operationally: a &quot;secret&quot; in a config file that
+  is base64 is a plaintext secret with extra steps. You will see it.
+
+    $ echo aGVsbG8= | base64 -d
+    hello
+</code></pre>
+<h2 id="what-makes-a-function-one-way">What makes a function one-way</h2>
+<pre><code class="language-text">  A function f is ONE-WAY if computing y = f(x) is easy, and computing
+  x from y is hard.
+
+  EnCRYPTION needs a one-way PERMUTATION (a bijection) so decryption
+  works: the inverse is computable with the key.
+
+  HASHING needs a one-way FUNCTION (not necessarily a permutation) plus
+  collision resistance.
+
+  KEY DERIVATION needs one-wayness plus an OUTPUT LENGTH property:
+    the function must map a short password to a fixed-size key, and it
+    must be SLOW, because the input space is small.
+</code></pre>
+<p>The last point is the one that distinguishes the three uses. A fast<br />
+one-way function is right for encryption (you want to encrypt a lot) and<br />
+wrong for passwords (you want each guess to cost a lot).</p>
+<h2 id="stream-ciphers">Stream ciphers</h2>
+<pre><code class="language-text">  A stream cipher encrypts one symbol at a time:
+
+    c_i = m_i XOR S_i
+
+  where S is a pseudo-random keystream. Decryption is identical:
+    m_i = c_i XOR S_i
+
+  REQUIREMENTS ON THE KEYSTREAM:
+    - unpredictable (an attacker must not be able to predict S)
+    - never reused under the same key (see below - this is the big one)
+    - not itself secret (it is derived from the key)
+
+  THE ONE-TIME PAD:
+    if S is truly random, as long as the message, and never reused,
+    then it is PERFECTLY SECURE. Shannon proved it. No computational
+    assumption at all.
+    Every real stream cipher is &quot;an OTP with a bad keystream&quot;.
+</code></pre>
+<h3 id="the-keystream-generator">The keystream generator</h3>
+<pre><code class="language-text">  A PRG takes a short seed (the key) and stretches it into a long
+  keystream. It must be indistinguishable from random to anyone who
+  has not seen the seed.
+
+  Real generators are built from a PRF plus a statistical correction:
+
+    state = key
+    loop:
+      output one keystream byte
+      state = state * a + b   (mod 2^n)
+
+  That is a linear congruential generator. It is TERRIFYINGLY weak:
+    - low bits have short periods
+    - only the low ~log2(n) bits are usable
+    - with four consecutive outputs you can solve for a and b exactly
+    - Lagged Fibonacci generators fall to a much harder lattice attack
+
+  THIS IS NOT A PEDANTIC POINT. It is why &quot;I generated the nonce with
+  a seeded RNG&quot; is a real finding rather than a style comment.
+</code></pre>
+<pre><code class="language-python"># Demonstrate that an LCG is trivially broken. Four outputs, two unknowns.
+A, C, M = 1664525, 1013904223, 2**32
+# s1 = (A*s0 + C) % M ;  s2 = (A*s1 + C) % M
+# s2 - s1 = A*(s1 - s0)  (mod M)  -&gt;  A = (s2-s1) * inverse(s1-s0) mod M
+def recover_from_four(outs, modulus=2**32):
+    import math
+    (s0,s1,s2,s3) = outs
+    d1 = (s1 - s0) % modulus
+    d2 = (s2 - s1) % modulus
+    a = (d2 * pow(d1, -1, modulus)) % modulus
+    c = (s1 - a * s0) % modulus
+    # now PREDICT FORWARD
+    nxt = s3
+    for _ in range(5):
+        nxt = (a * nxt + c) % modulus
+        print(f&quot;    predicted next keystream byte: {nxt &amp; 0xff:02x}&quot;)
+    return a, c
+
+s = 12345
+outs = []
+for _ in range(4):
+    s = (A * s + C) % M
+    outs.append(s)
+print(&quot;  four observed keystream bytes (4 x 32 bits):&quot;)
+for o in outs: print(f&quot;    {o:08x}&quot;)
+print(&quot;  from those, the generator's parameters are:&quot;)
+a, c = recover_from_four(outs)
+print(f&quot;    a = {a}  c = {c}  (recovered from the seed, which the attacker never had)&quot;)
+</code></pre>
+<h2 id="keystream-reuse-the-single-most-common-real-failure">Keystream reuse: the single most common real failure</h2>
+<pre><code class="language-text">  c1 = m1 XOR S
+  c2 = m2 XOR S
+
+  c1 XOR c2 = m1 XOR m2
+
+  So one message plus the ciphertexts recovers the other message.
+  Every message under that keystream is compromised.
+
+  WHERE IT HAPPENS:
+    - a fixed IV with CBC/CFB/OFB/CTR
+    - a random nonce that repeats (birthday: 2^32 messages for 32 bits)
+    - a seeded PRG, so the keystream is the same every run
+    - a fixed keystream in a hand-rolled implementation
+
+  This is `cs161-02`'s nonce-reuse note in its purest form, and it is
+  what makes Kerberoasting work.
+</code></pre>
+<h2 id="encrypt-then-mac">Encrypt-then-MAC</h2>
+<pre><code class="language-text">  Encrypt-then-MAC:  E(M) then MAC(E(M)), verify MAC first
+  MAC-then-encrypt:  MAC(M) then E(...), verify after decrypting
+
+  Encrypt-then-MAC is the correct order, because:
+    - you can reject a tampered ciphertext WITHOUT decrypting it
+      (so a padding oracle, or any decryption error, is unreachable)
+    - you decrypt only data an attacker cannot have modified
+
+  MAC-then-encrypt leaves you decrypting attacker-controlled data
+  before you know whether it is authentic. That gap is a padding
+  oracle (see cry-d4).
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Confidentiality</strong></td>
+<td>Only the intended party can read it</td>
+</tr>
+<tr>
+<td><strong>Integrity</strong></td>
+<td>Unauthorised modification is detectable</td>
+</tr>
+<tr>
+<td><strong>Authenticity</strong></td>
+<td>The sender is known</td>
+</tr>
+<tr>
+<td><strong>One-way function</strong></td>
+<td>Easy forward, hard backward</td>
+</tr>
+<tr>
+<td><strong>Permutation</strong></td>
+<td>A bijection; decryption possible</td>
+</tr>
+<tr>
+<td><strong>Stream cipher</strong></td>
+<td>XOR with a keystream</td>
+</tr>
+<tr>
+<td><strong>Keystream</strong></td>
+<td>The pseudo-random sequence being XORed</td>
+</tr>
+<tr>
+<td><strong>PRG / PRF</strong></td>
+<td>Pseudo-random generator / function</td>
+</tr>
+<tr>
+<td><strong>LCG</strong></td>
+<td>Linear congruential generator; badly broken</td>
+</tr>
+<tr>
+<td><strong>One-time pad</strong></td>
+<td>Random keystream as long as the message, never reused</td>
+</tr>
+<tr>
+<td><strong>Perfect secrecy</strong></td>
+<td>Ciphertext gives no information at all</td>
+</tr>
+<tr>
+<td><strong>Encrypt-then-MAC</strong></td>
+<td>The correct composition order</td>
+</tr>
+<tr>
+<td><strong>Base64</strong></td>
+<td>An encoding, emphatically not encryption</td>
+</tr>
+<tr>
+<td><strong>Nonce</strong></td>
+<td>Unique per message; transmitted, not secret</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-01 &amp;&amp; cd ~/aegis/labs/cry-01
+
+# --- 1. base64 is not encryption ---
+{
+  echo &quot;=== base64 reversed in one command ===&quot;
+  printf 'c3VwZXItc2VjcmV0OnBhc3N3b3JkMTIz' | base64 -d; echo
+  echo
+  echo &quot;=== find base64-shaped 'secrets' in a repo ===&quot;
+  grep -rnE '[A-Za-z0-9+/]{24,}={0,2}' --include=&quot;*.env&quot; --include=&quot;*.yml&quot; --include=&quot;*.json&quot; \
+       --include=&quot;*.conf&quot; . 2&gt;/dev/null | head -5 | while read -r line; do
+    tok=$(echo &quot;$line&quot; | grep -oE '[A-Za-z0-9+/]{24,}={0,2}' | head -1)
+    dec=$(echo &quot;$tok&quot; | base64 -d 2&gt;/dev/null | head -c 40)
+    if [ $? -eq 0 ] &amp;&amp; echo &quot;$dec&quot; | grep -qP '[\x20-\x7e]{8,}'; then
+      printf &quot;  POSSIBLE PLAINTEXT: %s\n&quot; &quot;$(echo &quot;$line&quot; | cut -c1-70)&quot;
+    fi
+  done
+  echo &quot;  ^ a base64 value that decodes to readable text is a plaintext secret&quot;
+} 2&gt;&amp;1 | tee 01-base64.txt
+
+# --- 2. the LCG, broken in public ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-lcg.txt
+import math
+A, C, M = 1664525, 1013904223, 2**32
+s = 12345
+outs = []
+for _ in range(4):
+    s = (A * s + C) % M
+    outs.append(s)
+print(&quot;  the 'keystream', from seed 12345 (the attacker never sees this)&quot;)
+for i, o in enumerate(outs):
+    print(f&quot;    out[{i}] = {o:08x}&quot;)
+d1 = (outs[1] - outs[0]) % M
+d2 = (outs[2] - outs[1]) % M
+a = (d2 * pow(d1, -1, M)) % M
+c = (outs[1] - a * outs[0]) % M
+print(f&quot;\n  recovered from four outputs:  a = {a}, c = {c}&quot;)
+print(&quot;  (the parameters are the PUBLIC constants; the seed is what we solved)&quot;)
+print(&quot;\n  and now predict forward, which is what breaks a real cipher:&quot;)
+nxt = outs[3]
+for i in range(5):
+    nxt = (a * nxt + c) % M
+    print(f&quot;    predicted keystream byte {i}: {nxt &amp; 0xff:02x}&quot;)
+print()
+print(&quot;  Four 32-bit keystream words and the entire generator is yours.&quot;)
+print(&quot;  This is why seeded PRNGs are 'fine for a test fixture and&quot;)
+print(&quot;  catastrophic for a nonce'.&quot;)
+PY
+cat 02-lcg.txt
+
+# --- 3. keystream reuse, the real failure ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-reuse.txt
+import os
+def xor(a, b): return bytes(x ^ y for x, y in zip(a, b))
+
+print(&quot;  === keystream reuse recovers plaintext pairs ===\n&quot;)
+k = bytes(range(32))                      # a &quot;keystream&quot;
+m1 = b&quot;transfer 0100 to alice&quot;
+m2 = b&quot;transfer 9900 to mallory&quot;
+c1, c2 = xor(m1, k), xor(m2, k)
+xored = xor(c1, c2)
+print(f&quot;  m1            : {m1.decode()}&quot;)
+print(f&quot;  m2            : {m2.decode()}&quot;)
+print(f&quot;  c1            : {c1[:24].hex()}&quot;)
+print(f&quot;  c2            : {c2[:24].hex()}&quot;)
+print(f&quot;  c1 XOR c2     : {xored[:24].hex()}&quot;)
+print(f&quot;  m1 XOR m2     : {xor(m1,m2)[:24].hex()}&quot;)
+print()
+print(&quot;  IDENTICAL:&quot;, xored == xor(m1, m2))
+print()
+print(&quot;  Given c1, c2 and m1, the attacker recovers m2 exactly.&quot;)
+print(&quot;  No key, no cryptanalysis, no search. This is arithmetic.&quot;)
+print()
+print(&quot;  It is also, precisely, why Kerberoasting works:&quot;)
+print(&quot;    a service key, N tickets, the SAME keystream on the first&quot;)
+print(&quot;    two -&gt; the ticket's plaintext is recoverable -&gt; crack offline.&quot;)
+print()
+print(&quot;  === the one-time pad, done correctly, for contrast ===&quot;)
+key = os.urandom(len(m1))
+c = xor(m1, key)
+print(f&quot;  plaintext     : {m1.decode()}&quot;)
+print(f&quot;  ciphertext    : {c.hex()}&quot;)
+print(f&quot;  recovered     : {xor(c, key).decode()}   (only because WE have the key)&quot;)
+print()
+print(&quot;  Shannon proved: with a random key as long as the message, the&quot;)
+print(&quot;  ciphertext is independent of the plaintext. Not 'hard to&quot;)
+print(&quot;  break' - zero information, unconditionally.&quot;)
+PY
+cat 03-reuse.txt
+
+# --- 4. a real stream cipher, and its states ---
+{
+  echo &quot;=== ChaCha20 as an actual keystream generator ===&quot;
+  echo &quot;  chacha20 is in OpenSSL. 256-bit key, 96-bit nonce, 32-bit counter.&quot;
+  echo
+  echo &quot;  keystream, zero key, zero nonce (the standard test vector prefix):&quot;
+  printf '\x00%.0s' $(seq 1 32) &gt; k.bin
+  head -c 64 /dev/zero &gt; n.bin
+  openssl enc -chacha20 -K &quot;$(xxd -p -c 64 k.bin)&quot; -iv &quot;$(xxd -p -c 64 n.bin)&quot; \
+    -in /dev/zero -out ks.bin 2&gt;/dev/null \
+    &amp;&amp; xxd ks.bin | head -4 | sed 's/^/  /'
+  echo
+  echo &quot;  Same key, nonce incremented by one:&quot;
+  printf '\x00%.0s' $(seq 1 31) '\x01' &gt; n2.bin
+  openssl enc -chacha20 -K &quot;$(xxd -p -c 64 k.bin)&quot; -iv &quot;$(xxd -p -c 64 n2.bin)&quot; \
+    -in /dev/zero -out ks2.bin 2&gt;/dev/null &amp;&amp; xxd ks2.bin | head -2 | sed 's/^/  /'
+  echo
+  echo &quot;  Completely different. Nonce uniqueness is the entire security.&quot;
+  rm -f k.bin n.bin n2.bin ks.bin ks2.bin
+  echo
+  echo &quot;=== how to check a token's randomness yourself ===&quot;
+  python3 -c &quot;
+import os, collections, math
+b = open('ks.bin','rb').read() if __import__('os').path.exists('ks.bin') else os.urandom(4096)
+c = collections.Counter(b)
+H = -sum((v/len(b))*math.log2(v/len(b)) for v in c.values())
+print(f'  {len(b)} bytes, {len(c)} distinct values, entropy {H:.3f}/8.0 bits per byte')
+print(f'  a seeded LCG would show ~{len(b)*0.0:.0f}-8.0 but with a visible short period in low bits')
+print(f'  chi-square-ish check: max count {max(c.values())} (expected {len(b)/256:.1f})')
+&quot;
+} 2&gt;&amp;1 | tee 04-chacha.txt
+
+# --- 5. encrypt-then-MAC, versus the wrong order ---
+cat &gt; 05-etm.md &lt;&lt;'EOF'
+# Encrypt-then-MAC, and why the order matters
+
+## The two compositions
+
+```
+  ENCRYPT-THEN-MAC            MAC-THEN-ENCRYPT
+  c  = E(kE, m)               e  = E(kE, MAC(kM, m))
+  t  = MAC(kM, c)             d  = Dec(kE, e)
+                             verify MAC(kM, d)
+
+  VERIFY MAC FIRST            DECRYPT, THEN VERIFY
+```
+
+## Why MAC-then-encrypt is wrong
+
+You decrypt **attacker-supplied data before knowing whether it is
+authentic**. Everything an attacker can reach during that decryption is
+a gadget:
+
+- padding errors (the padding oracle, cry-d4)
+- decompression bombs before the MAC is checked
+- length fields that cause huge allocations before the MAC is checked
+- any error path that differs between &quot;bad MAC&quot; and &quot;bad plaintext&quot;
+
+## The rule
+
+```
+  NEVER process a received ciphertext or a decrypted value in any way
+  that an attacker can observe, before the integrity check has passed.
+
+  In practice:
+    1. read the MAC
+    2. verify it, in constant time
+    3. ONLY THEN decrypt
+    4. any error afterwards is a bug
+```
+
+## Where this shows up in real systems
+
+- early CBC constructions without a MAC (the POODLE-era problem)
+- JSON web tokens: the payload is decoded BEFORE the signature is checked
+- encrypted cookies with no integrity tag
+- archives (&quot;decrypt then untar&quot;) - Zip Slip and zip bombs are this bug
+EOF
+cat 05-etm.md
+
+# --- 6. the problem-to-primitive table, as a worksheet ---
+cat &gt; 06-worksheet.md &lt;&lt;'EOF'
+# Problems → primitives
+
+| Requirement | Primitive | Construction |
+|---|---|---|
+| confidentiality (with a shared key) | one-way permutation | stream cipher / block cipher in a secure mode |
+| confidentiality (with a public key) | trapdoor permutation | RSA, ECIES |
+| integrity from a shared key | PRF | HMAC, or encrypt-then-MAC |
+| integrity + authenticity from a public key | one-way function + trapdoor | signature scheme |
+| collision resistance | one-way function | hash function |
+| password storage | slow one-way function | Argon2id, scrypt, bcrypt |
+| key agreement | DDH-hard group | Diffie-Hellman, ECDH |
+| forward secrecy | ephemeral DDH keys | (EC)DHE in every handshake |
+| randomness | CSPRNG | /dev/urandom, not math.random, not rand() |
+
+## The question to ask about any crypto you read
+
+1. What requirement is this satisfying?
+2. Which assumption does it rest on? (computational hardness, information
+   theoretic, physical, or &quot;the key stayed secret&quot;)
+3. What is the KEY LENGTH in bits, for every key in the system?
+4. What is the lifetime of the data being protected?
+5. If the assumption breaks, what fails, and how long does it take?
+
+If you cannot answer 2 and 3 for a system you are asked to assess, you
+cannot assess it.
+EOF
+cat 06-worksheet.md
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong>: four 32-bit keystream words and the LCG's parameters recovered,<br />
+then the generator predicting forward. That is 12 lines and it demonstrates why "seeded RNG"<br />
+is a finding.</p>
+<p><strong>Step 3</strong> is the one that connects this note to real engagements — keystream reuse is<br />
+arithmetic, not cryptanalysis, and it is literally the mechanism behind Kerberoasting.</p>
+<p><strong>Record:</strong> <code>02-lcg.txt</code> and <code>03-reuse.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the three problems cryptography solves and the primitive for each.</li>
+<li>Why can encryption not give you integrity?</li>
+<li>What is the difference between an encoding and encryption?</li>
+<li>Why does a stream cipher need a one-way <em>permutation</em> while a hash does not?</li>
+<li>What does keystream reuse leak, and how is it recovered?</li>
+<li>Give the LCG's three weaknesses from memory.</li>
+<li>Why is encrypt-then-MAC the correct order, and what does MAC-then-encrypt expose?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Symmetric Encryption</strong> → <strong>Cipher</strong> → <strong>Encoding vs Encryption</strong> →<br />
+<strong>Entropy &amp; Randomness</strong> → <strong>Nonce</strong>.<br />
+<code>cry-02</code> is where the stream cipher gets replaced by a block cipher.</p>

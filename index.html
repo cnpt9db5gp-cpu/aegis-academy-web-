@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>AEGIS // Cyber Training System</title>
+<link rel="stylesheet" href="assets/css/fonts.css">
+<link rel="stylesheet" href="assets/css/tokens.css">
+<link rel="stylesheet" href="assets/css/theme.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23070b12'/><circle cx='16' cy='16' r='11' fill='none' stroke='%23b08d3f' stroke-width='2'/><path d='M16 7 L16 25 M7 16 L25 16' stroke='%23b08d3f' stroke-width='1'/></svg>">
+</head>
+<body>
+
+<div class="banner">
+  <span class="mark">AEGIS</span>
+  <span class="sys">// CYBER TRAINING SYSTEM</span>
+  <div class="spacer"></div>
+  <span class="tag">Training Use Only</span>
+  <span class="clock" id="clock"></span>
+  <button class="rail-toggle" id="rail-toggle">MENU</button>
+</div>
+
+<div class="app">
+  <aside class="rail" id="rail">
+    <div class="rail__head">
+      <div class="rail__title">AEGIS</div>
+      <div class="rail__sub">Offensive Training Environment</div>
+    </div>
+    <nav class="rail__nav" id="nav"></nav>
+    <div class="rail__foot">
+      <div class="rank">
+        <div class="rank__seal"><span id="rank-insignia">CD</span></div>
+        <div class="rank__meta">
+          <div class="rank__name" id="rank-name">CADET</div>
+          <div class="rank__xp" id="rank-xp">0 MERIT PTS</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main" id="main"></main>
+
+  <footer class="footer">
+    <span>AEGIS · OFFICIAL USE ONLY · LOCAL INSTANCE</span>
+    <span class="spacer"></span>
+    <span>CTRL+K COMMAND PALETTE</span>
+    <span>·</span>
+    <span id="persist-note">PROGRESS VERSION-CONTROLLED</span>
+  </footer>
+</div>
+
+<div class="palette" id="palette">
+  <div class="palette__box">
+    <input class="palette__input" id="p-input" placeholder="Search lectures, concepts, courses…" autocomplete="off">
+    <div class="palette__results" id="p-results"></div>
+    <div class="palette__foot'>↑↓ NAVIGATE · ENTER OPEN · ESC CLOSE <span style="float:right" id="p-close">CLOSE ✕</span></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* Surface failures instead of swallowing them.
+   A learner clicking a card that does nothing has no way to learn that
+   a script threw - the browser logs it somewhere they will never look.
+   This puts it on the page, in words, with the route they were on. */
+window.addEventListener("error", function (e) {
+  var m = document.getElementById("main");
+  if (!m || m.children.length) return;
+  var d = document.createElement("div");
+  d.className = "wrap";
+  d.innerHTML = "<div class='phead'><div class='phead__text'>" +
+    "<div class='phead__docket'>SCRIPT FAULT</div>" +
+    "<h1 class='phead__title'>Something broke while starting up</h1>" +
+    "<p class='phead__sub'><b>" + String(e.message || "") + "</b></p>" +
+    "<p class='phead__sub'>at " + String(e.filename || "").split("/").pop() +
+    ":" + e.lineno + ":" + e.colno + " — send that line and it is fixed.</p>" +
+    "</div></div>";
+  m.appendChild(d);
+});
+</script>
+<script src="assets/js/state.js"></script>
+<script src="assets/js/ui.js"></script>
+<script src="assets/js/views-a.js"></script>
+<script src="assets/js/views-b.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>

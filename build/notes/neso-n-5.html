@@ -1,0 +1,239 @@
+<h1 id="transport-layer-tcp-and-udp">Transport Layer: TCP and UDP</h1>
+<h2 id="summary">Summary</h2>
+<p>Ports, sockets, connection state and reliability. Transport is where "is it open" is decided and<br />
+where half the network attack surface lives.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Ports</strong> name applications; the 4-tuple (src ip, src port, dst ip, dst port) identifies a flow</li>
+<li><strong>TCP</strong>: connection-oriented, reliable, ordered, congestion-controlled, stateful</li>
+<li><strong>UDP</strong>: connectionless, no guarantees, 8-byte header, used by DNS, DHCP, QUIC</li>
+<li><strong>Sockets</strong> are the kernel objects; every flow is one</li>
+<li><strong>Port states</strong> (LISTEN, SYN_SENT, ESTABLISHED, TIME_WAIT) are what you read when diagnosing</li>
+<li><strong>Well-known vs ephemeral</strong>: knowing the range tells you whether a port is a service or a<br />
+  leftover client socket</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Port</strong></td>
+<td>16-bit application identifier</td>
+</tr>
+<tr>
+<td><strong>4-tuple</strong></td>
+<td>The fields that uniquely identify a TCP flow</td>
+</tr>
+<tr>
+<td><strong>Socket</strong></td>
+<td>Kernel object for an endpoint</td>
+</tr>
+<tr>
+<td><strong>Reliable / ordered</strong></td>
+<td>TCP's delivery guarantees</td>
+</tr>
+<tr>
+<td><strong>Congestion control</strong></td>
+<td>TCP's backpressure mechanism</td>
+</tr>
+<tr>
+<td><strong>Ephemeral port</strong></td>
+<td>Client's temporary source port</td>
+</tr>
+<tr>
+<td><strong>Well-known ports</strong></td>
+<td>0-1023</td>
+</tr>
+<tr>
+<td><strong>Registered ports</strong></td>
+<td>1024-49151</td>
+</tr>
+<tr>
+<td><strong>Half-close</strong></td>
+<td>One direction shut, the other still open</td>
+</tr>
+<tr>
+<td><strong>Port reuse</strong></td>
+<td><code>SO_REUSEADDR</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the port map, authoritative ---
+cat /etc/services | head -20
+grep -E &quot;^ssh|^http|^https|^smtp|^dns|^ftp|^mysql|^rdp&quot; /etc/services | head -12
+
+# --- nmap's own database, with more detail ---
+head -10 /usr/share/nmap/nmap-services
+grep -E &quot;^(http|https|ssh|smb|mysql|rdp|winrm)\b&quot; /usr/share/nmap/nmap-services | head -10
+
+# --- sockets and states on this host ---
+ss -tulpn | head -12
+ss -tan state time-wait | wc -l
+ss -s | head -6
+
+# --- ephemeral range ---
+cat /proc/sys/net/ipv4/ip_local_port_range
+ss -tan | awk '{print $4}' | grep -oE '[0-9]+$' | sort -n | awk '$1&gt;32768{c++} END{print &quot;ephemeral sockets:&quot;, c+0}'
+
+# --- which ports are actually LISTENING (not just connected) ---
+ss -tuln state listening | tail -n +2 | awk '{print $4}' | sort -t: -k2 -n
+
+# --- nmap's protocol database ---
+grep -E &quot;\b(https?|ssh|smb|microsoft-ds)\b&quot; /usr/share/nmap/nmap-protocols | head -10
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build the port map you will use for the rest of your career, and read live state.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-n-5 &amp;&amp; cd ~/aegis/labs/neso-n-5
+
+# --- 1. the ports you actually meet in assessments ---
+python3 - &lt;&lt;'PY' | tee 01-ports.txt
+import csv, collections
+INTEREST = {&quot;http&quot;,&quot;https&quot;,&quot;ssh&quot;,&quot;telnet&quot;,&quot;ftp&quot;,&quot;smtp&quot;,&quot;pop3&quot;,&quot;imap&quot;,
+            &quot;smb&quot;,&quot;netbios-ssn&quot;,&quot;rdp&quot;,&quot;winrm&quot;,&quot;mysql&quot;,&quot;postgresql&quot;,&quot;mssql&quot;,
+            &quot;redis&quot;,&quot;mongodb&quot;,&quot;ldap&quot;,&quot;ldaps&quot;,&quot;rpcbind&quot;,&quot;snmp&quot;,&quot;dns&quot;,&quot;kerberos&quot;,
+            &quot;vnc&quot;,&quot;smtp&quot;,&quot;imap&quot;,&quot;oracle&quot;,&quot;memcached&quot;,&quot;elasticsearch&quot;,&quot;docker&quot;}
+rows = []
+with open(&quot;/usr/share/nmap/nmap-services&quot;) as f:
+    for line in f:
+        parts = line.split()
+        if len(parts) &lt; 3 or line.startswith(&quot;#&quot;):
+            continue
+        try:
+            port = int(parts[1]); proto = parts[2]; name = parts[0]
+        except ValueError:
+            continue
+        if name in INTEREST:
+            rows.append((port, proto, name))
+rows.sort()
+print(f&quot;  {'PORT':&lt;8}{'PROTO':&lt;8}{'SERVICE':&lt;16}WHY IT MATTERS&quot;)
+print(&quot;  &quot; + &quot;-&quot;*72)
+WHY = {
+ &quot;http&quot;:&quot;web app testing, the most common finding class&quot;,
+ &quot;https&quot;:&quot;web app testing over TLS&quot;,
+ &quot;ssh&quot;:&quot;remote shell; password and key attacks&quot;,
+ &quot;ftp&quot;:&quot;cleartext credentials unless FTPS&quot;,
+ &quot;telnet&quot;:&quot;cleartext shell and credentials&quot;,
+ &quot;smtp&quot;:&quot;mail relay abuse, user enumeration&quot;,
+ &quot;pop3&quot;:&quot;cleartext credential capture&quot;,
+ &quot;smb&quot;:&quot;lateral movement, share enumeration&quot;,
+ &quot;netbios-ssn&quot;:&quot;same as SMB, used for discovery&quot;,
+ &quot;rdp&quot;:&quot;remote desktop, credential attacks&quot;,
+ &quot;winrm&quot;:&quot;remote execution, lateral movement&quot;,
+ &quot;mysql&quot;:&quot;unauthenticated access has happened repeatedly&quot;,
+ &quot;postgresql&quot;:&quot;same, plus file read as superuser&quot;,
+ &quot;mssql&quot;:&quot;xp_cmdshell, credential relay&quot;,
+ &quot;redis&quot;:&quot;often unauthenticated, command execution&quot;,
+ &quot;mongodb&quot;:&quot;often unauthenticated, full read/write&quot;,
+ &quot;ldap&quot;:&quot;anonymous bind exposes the whole directory&quot;,
+ &quot;rpcbind&quot;:&quot;information disclosure, amplification&quot;,
+ &quot;snmp&quot;:&quot;community strings, full device config&quot;,
+ &quot;dns&quot;:&quot;recon, zone transfer, amplification&quot;,
+ &quot;kerberos&quot;:&quot;the entire AD authentication model&quot;,
+ &quot;vnc&quot;:&quot;often unauthenticated or weakly authenticated&quot;,
+ &quot;oracle&quot;:&quot;default credentials are common&quot;,
+ &quot;memcached&quot;:&quot;unauthenticated, amplification, SSRF pivot&quot;,
+ &quot;elasticsearch&quot;:&quot;unauthenticated index read&quot;,
+ &quot;docker&quot;:&quot;API access = root equivalent&quot;,
+}
+seen=set()
+for port, proto, name in rows:
+    if name in seen: continue
+    seen.add(name)
+    print(f&quot;  {port:&lt;8}{proto:&lt;8}{name:&lt;16}{WHY.get(name,'')}&quot;)
+PY
+
+# --- 2. live state on this host ---
+{
+  echo &quot;=== listening sockets (services) ===&quot;
+  ss -tuln state listening | tail -n +2 | awk '{print $4, $6}' | sort -t: -k2 -n | head -12
+  echo
+  echo &quot;=== connection state histogram ===&quot;
+  ss -tan | awk 'NR&gt;1{print $1}' | sort | uniq -c | sort -rn
+  echo
+  echo &quot;=== established, with peer addresses ===&quot;
+  ss -tan state established | head -8
+  echo
+  echo &quot;=== time-wait count (a sign of churn or of a scan against you) ===&quot;
+  ss -tan state time-wait | wc -l
+  echo
+  echo &quot;=== summary from the kernel ===&quot;
+  ss -s | head -8
+} 2&gt;&amp;1 | tee 02-state.txt
+
+# --- 3. the 4-tuple, made concrete ---
+python3 - &lt;&lt;'PY' | tee 03-fourtuple.txt
+flow = {
+ &quot;source ip&quot;: &quot;192.168.56.5&quot;,
+ &quot;source port&quot;: 54321,        # ephemeral, chosen by the client
+ &quot;dest ip&quot;: &quot;192.168.56.101&quot;,
+ &quot;dest port&quot;: 445,            # well-known, the service
+}
+print(&quot;  A TCP connection is uniquely identified by four values:&quot;)
+for k, v in flow.items():
+    print(f&quot;    {k:&lt;12} = {v}&quot;)
+key = tuple(sorted([flow[&quot;source ip&quot;], flow[&quot;dest ip&quot;]])) + \
+      tuple(sorted([flow[&quot;source port&quot;], flow[&quot;dest port&quot;]]))
+print()
+print(&quot;  Ordering by value pair matters: (A:1 -&gt; B:2) is a different flow&quot;)
+print(&quot;  from (A:2 -&gt; B:1), even though the same four numbers are involved.&quot;)
+print()
+print(&quot;  Practically: a client can open thousands of connections to one port by&quot;)
+print(&quot;  varying only the source port. That is what a SYN flood does, and why&quot;)
+print(&quot;  you need SYN cookies, not just a firewall.&quot;)
+PY
+
+# --- 4. scan the ephemeral range question ---
+cat &gt; 04-loopback-ports.md &lt;&lt;'EOF'
+# Why `nmap -p- 127.0.0.1` shows hundreds of ports
+
+Those are almost all **ephemeral client sockets** created by local programs and
+browser connections, not listening services. The kernel picked those source ports
+temporarily.
+
+Lesson for reading scans:
+- `ss -tuln state listening` is the authoritative list of services.
+- A `nmap -sT` scan sees whatever has a bound socket, including transient clients.
+- When assessing a target, confirm with a listening-socket query before reporting
+  &quot;open port&quot; findings, or you will report noise.
+
+## The defensive side
+`net.ipv4.ip_local_port_range` controls the ephemeral range. Widening it slightly
+makes source-port exhaustion harder, and SYN cookies (`net.ipv4.tcp_syncookies`)
+protect against SYN floods without a full connection.
+EOF
+cat 04-loopback-ports.md
+echo
+n=$(ss -tuln state listening 2&gt;/dev/null | tail -n +2 | wc -l)
+e=$(ss -tan 2&gt;/dev/null | grep -c ESTAB)
+echo &quot;  this host: $n listening services, $e established connections&quot;
+echo &quot;  A full -p- scan of loopback will report hundreds of the latter.&quot;
+
+# --- 5. SYN cookies, and why they exist ---
+{
+  echo &quot;=== SYN flood protection on this host ===&quot;
+  echo &quot;  syncookies : $(cat /proc/sys/net/ipv4/tcp_syncookies 2&gt;/dev/null || echo n/a)&quot;
+  echo &quot;  (1 = enabled: the server encodes state in the ISN instead of keeping a table)&quot;
+  echo &quot;  tcp_synack_retries: $(cat /proc/sys/net/ipv4/tcp_synack_retries 2&gt;/dev/null)&quot;
+  echo &quot;  tcp_max_syn_backlog: $(cat /proc/sys/net/ipv4/tcp_max_syn_backlog 2&gt;/dev/null)&quot;
+} 2&gt;&amp;1 | tee 05-syncookies.txt
+</code></pre>
+<p><strong>Step 1 is the reference you will keep.</strong> Twenty-odd ports with the reason each one matters is<br />
+the vocabulary of a real assessment.</p>
+<p><strong>Record:</strong> <code>01-ports.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What four values identify a TCP connection?</li>
+<li>Why can a client open thousands of connections to one port?</li>
+<li>What does SYN cookies protect against, and how?</li>
+<li>Why does a full port scan of loopback report so many "open" ports?</li>
+<li>What makes UDP preferable for DNS and bad for large transfers?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Port</strong> → <strong>TCP State</strong> → <strong>Socket</strong> → <strong>Port Scanning</strong> → <strong>TCP-UDP</strong> → <strong>Firewall</strong> →<br />
+<strong>Reverse Shell</strong>.</p>

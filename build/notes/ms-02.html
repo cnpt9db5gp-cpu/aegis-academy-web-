@@ -1,0 +1,295 @@
+<h1 id="shell-tools-scripting">Shell Tools &amp; Scripting</h1>
+<h2 id="summary">Summary</h2>
+<p>Tools become weapons when you chain them. The shell's real power is that every tool's <strong>stdout is<br />
+data</strong>, and you can pipe that into the next tool's stdin. A human reading a 400-line nmap scan<br />
+takes minutes; a well-written pipeline extracts the three facts that matter in one second.</p>
+<p>This is also where shell scripting stops being optional: reconnaissance automation, evidence<br />
+collection, and every tool invocation you will script later.</p>
+<h2 id="the-six-tools-that-cover-90-of-shell-work">The six tools that cover 90% of shell work</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Job</th>
+<th>Think of it as</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>grep</code></td>
+<td>select lines</td>
+<td>SQL <code>WHERE</code></td>
+</tr>
+<tr>
+<td><code>cut</code> / <code>awk</code></td>
+<td>select columns</td>
+<td><code>SELECT col</code></td>
+</tr>
+<tr>
+<td><code>sort</code> / <code>uniq</code></td>
+<td>order and dedupe</td>
+<td><code>ORDER BY</code>, <code>DISTINCT</code></td>
+</tr>
+<tr>
+<td><code>head</code> / <code>tail</code></td>
+<td>limit rows</td>
+<td><code>LIMIT</code></td>
+</tr>
+<tr>
+<td><code>sed</code></td>
+<td>substitute / transform</td>
+<td><code>UPDATE</code></td>
+</tr>
+<tr>
+<td><code>xargs</code></td>
+<td>parallelise</td>
+<td>a <code>for</code> loop that respects spaces</td>
+</tr>
+</tbody>
+</table>
+<h2 id="quoting-the-thing-that-will-cost-you-an-hour">Quoting — the thing that will cost you an hour</h2>
+<pre><code class="language-bash">V=&quot;hello world&quot;
+
+echo &quot;$V&quot;      # &quot;hello world&quot;   &lt;- expansion happens
+echo $V        # &quot;hello&quot; &quot;world&quot; -&gt; two arguments! wrong
+echo '$V'       # '$V'            &lt;- literal
+echo &quot;$V&quot;       # &quot;$V&quot;            &lt;- literal
+
+# The practical rule: ALWAYS quote your variable expansions.
+# Unquoted: breaks on spaces, globs, and empty values (nullglob).
+ls $V          # ls: cannot access 'world': No such file
+ls &quot;$V&quot;        # correct
+</code></pre>
+<p><strong>Why security cares:</strong> an unquoted variable in a script that later becomes a command is how<br />
+shell injection works. <code>curl $URL</code> where URL contains <code>; rm -rf /</code> is a real vulnerability class.</p>
+<h2 id="everything-is-a-file-descriptor">Everything is a file descriptor</h2>
+<pre><code>fd 0 = stdin   fd 1 = stdout   fd 2 = stderr
+</code></pre>
+<pre><code class="language-bash">nmap -sV 127.0.0.1 &gt; out.txt          # stdout to file
+nmap -sV 127.0.0.1 2&gt; err.txt        # stderr to file
+nmap -sV 127.0.0.1 &amp;&gt; both.txt       # both to one file
+nmap -sV 127.0.0.1 2&gt;/dev/null       # throw away progress messages
+nmap -sV 127.0.0.1 | grep open       # stdout into another tool
+
+# tee: write to a file AND to the screen - you want both while scanning
+nmap -sV 127.0.0.1 | tee scan.txt
+</code></pre>
+<p><code>2&gt;/dev/null</code> appears in almost every security command in existence, because tools are chatty and<br />
+progress bars break pipelines.</p>
+<h2 id="process-substitution-and-command-substitution">Process substitution and command substitution</h2>
+<pre><code class="language-bash"># command substitution: run one command, use its output as text
+HASH=$(sha256sum /etc/passwd | cut -d' ' -f1)
+echo &quot;passwd hash: $HASH&quot;
+
+# process substitution: feed a command's output as if it were a file
+diff &lt;(sort a.txt) &lt;(sort b.txt)
+comm -12 &lt;(sort a.txt) &lt;(sort b.txt)
+
+# here-doc: multi-line text into a command
+cat &gt; report-header.txt &lt;&lt;EOF
+Engagement: $(hostname)
+Date:       $(date +%Y-%m-%d)
+Analyst:    $USER
+EOF
+</code></pre>
+<h2 id="a-real-reconnaissance-pipeline">A real reconnaissance pipeline</h2>
+<p>This is the pattern you will reuse forever. Scan once, parse carefully, keep the raw output.</p>
+<pre><code class="language-bash"># 1. scan, keep raw output (never re-scan because you lost it)
+nmap -sV -p- 192.168.56.101 -oN raw-scan.txt -oG raw-scan.gnmap
+
+# 2. what is open?
+grep &quot;open&quot; raw-scan.txt
+
+# 3. just the ports, sorted numerically (NOT alphabetically - 22 before 100 matters)
+grep &quot;open&quot; raw-scan.txt | awk -F/ '{print $1}' | sort -n
+
+# 4. service -&gt; version pairs, one per line
+grep &quot;open&quot; raw-scan.txt | awk '{print $2, $3, $4}'
+
+# 5. write findings out with headers
+{
+  echo &quot;=== SCAN SUMMARY $(date -Iseconds) ===&quot;
+  echo &quot;Target: 192.168.56.101&quot;
+  echo
+  echo &quot;--- open ports ---&quot;
+  grep &quot;open&quot; raw-scan.txt | awk -F/ '{print $1}'
+  echo
+  echo &quot;--- services ---&quot;
+  grep &quot;open&quot; raw-scan.txt | awk '{print $2, $3, $4}'
+} &gt; findings.txt
+</code></pre>
+<h2 id="a-proper-script">A proper script</h2>
+<pre><code class="language-bash">#!/usr/bin/env bash
+#
+# recon.sh - minimal host discovery + service inventory against an authorised target
+# Usage: ./recon.sh 192.168.56.0/24
+#
+set -euo pipefail          # -e exit on error, -u error on unset var, -o pipefail catch pipe fails
+
+TARGET=&quot;${1:-}&quot;
+OUTDIR=&quot;$HOME/aegis/labs/recon-$(date +%Y%m%d-%H%M%S)&quot;
+
+if [[ -z &quot;$TARGET&quot; ]]; then
+  echo &quot;usage: $0 &lt;cidr or ip&gt;&quot; &gt;&amp;2
+  exit 2
+fi
+
+# Refuse anything that is not a private range. This is the scope guard.
+case &quot;$TARGET&quot; in
+  192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*)
+    ;;
+  *)
+    echo &quot;REFUSING: $TARGET is not RFC1918 private space. See docs/RULES-OF-ENGAGEMENT.md&quot; &gt;&amp;2
+    exit 3
+    ;;
+esac
+
+mkdir -p &quot;$OUTDIR&quot;
+echo &quot;[*] scanning $TARGET -&gt; $OUTDIR&quot;
+
+# 1. discovery
+nmap -sn -oN &quot;$OUTDIR/hosts.txt&quot; &quot;$TARGET&quot; 2&gt;/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u &gt; &quot;$OUTDIR/alive.txt&quot;
+echo &quot;[+] $(wc -l &lt; &quot;$OUTDIR/alive.txt&quot;) hosts alive&quot;
+
+# 2. top ports on everything (fast first pass)
+while read -r host; do
+  [[ -z &quot;$host&quot; ]] &amp;&amp; continue
+  echo &quot;[*] $host&quot;
+  nmap -sT --top-ports 100 -T4 &quot;$host&quot; -oN &quot;$OUTDIR/$host-top100.txt&quot; 2&gt;/dev/null || true
+done &lt; &quot;$OUTDIR/alive.txt&quot;
+
+# 3. summarise
+{
+  echo &quot;RECON SUMMARY  $(date -Iseconds)&quot;
+  echo &quot;target: $TARGET&quot;
+  echo
+  for f in &quot;$OUTDIR&quot;/*-top100.txt; do
+    [[ -e &quot;$f&quot; ]] || continue
+    echo &quot;=== $(basename &quot;$f&quot; .txt) ===&quot;
+    grep &quot;open&quot; &quot;$f&quot; || echo &quot;  (no open ports in top 100)&quot;
+  done
+} &gt; &quot;$OUTDIR/SUMMARY.txt&quot;
+
+echo &quot;[+] summary: $OUTDIR/SUMMARY.txt&quot;
+</code></pre>
+<p>Note three things about that script that are worth more than the script itself:</p>
+<ol>
+<li><strong><code>set -euo pipefail</code></strong> — failures are loud.</li>
+<li><strong>The RFC1918 guard</strong> — the script refuses to scan outside private space. Safety in code.</li>
+<li><strong><code>|| true</code> on nmap</strong> — a per-host failure does not abort the whole run.</li>
+</ol>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- grep: the workhorse ---
+grep -i &quot;error&quot; /var/log/syslog
+grep -n &quot;sshd&quot; /var/log/auth.log | head
+grep -E &quot;^(GET|POST)&quot; access.log
+grep -v &quot;127.0.0.1&quot; access.log            # everything EXCEPT local
+grep -c &quot;Failed&quot; /var/log/auth.log       # count only
+
+# --- cut / awk / sed ---
+cut -d: -f1,7 /etc/passwd                # delimiter is :
+awk '{print $1, $2}' access.log          # whitespace-separated
+awk -F: '$3==0 {print $1}' /etc/passwd   # only UID 0 accounts
+sed -n '10,20p' /etc/passwd              # lines 10-20
+sed 's/password//g' input.txt            # substitute
+sed -E 's/^([0-9.]+).*/\1/' log.txt      # capture group
+
+# --- sort / uniq / count ---
+sort -t' ' -k2 -n scan.txt
+sort -u domains.txt
+awk '{print $1}' access.log | sort | uniq -c | sort -rn | head
+
+# --- xargs: parallel, but space-safe ---
+cat hosts.txt | xargs -n1 -P8 -I{} sh -c 'nmap -sT {} -oN /dev/null; echo &quot;{} done&quot;'
+seq 1 10 | xargs -I{} echo &quot;item {}&quot;
+
+# --- job control for real work ---
+nmap -sV -p- 192.168.56.101 &gt; scan.txt 2&gt;/dev/null &amp;
+echo $! &gt; scan.pid
+tail -f scan.txt
+
+# --- the scripts that ship with Kali ---
+locate recon   2&gt;/dev/null || find /usr/share -iname &quot;*recon*&quot;
+find /usr/share/seclists -iname &quot;*discovery*&quot; -type d
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build and run a scoped reconnaissance pipeline against your own lab range.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ms-02 &amp;&amp; cd ~/aegis/labs/ms-02
+
+# --- 1. quoting, demonstrated the painful way ---
+V=&quot;two words&quot;
+echo &quot;UNQUOTED:&quot;; ls $V 2&gt;&amp;1 | head -2
+echo &quot;QUOTED:&quot;;   ls &quot;$V&quot; 2&gt;&amp;1 | head -2
+
+# --- 2. loopback baseline scan, raw output preserved ---
+nmap -sV --version-light -p- 127.0.0.1 -oN raw-loopback.txt 2&gt;/dev/null
+
+# --- 3. parse it five different ways ---
+echo &quot;--- open ports (as nmap sees them) ---&quot;
+grep &quot;open&quot; raw-loopback.txt | awk -F/ '{print $1}'
+
+echo &quot;--- sorted NUMERICALLY (correct) ---&quot;
+grep &quot;open&quot; raw-loopback.txt | awk -F/ '{print $1}' | sort -t/ -k1 -n
+
+echo &quot;--- sorted ALPHABETICALLY (wrong - watch 100 sort before 22) ---&quot;
+grep &quot;open&quot; raw-loopback.txt | awk -F/ '{print $1}' | sort
+
+echo &quot;--- service/version pairs ---&quot;
+grep &quot;open&quot; raw-loopback.txt | awk '{print $2, $3, $4}'
+
+echo &quot;--- unique services only ---&quot;
+grep &quot;open&quot; raw-loopback.txt | awk '{print $2}' | sort -u
+
+# --- 4. the same pipeline against your lab range (if you built one) ---
+# (skip this if kr-06 is not done yet)
+nmap -sT --top-ports 50 192.168.56.101 -oN raw-vuln01.txt 2&gt;/dev/null || true
+grep &quot;open&quot; raw-vuln01.txt | awk -F/ '{print $1, $2}'
+
+# --- 5. write the recon.sh script from this lecture ---
+cat &gt; recon.sh &lt;&lt;'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+TARGET=&quot;${1:-}&quot;
+OUTDIR=&quot;$HOME/aegis/labs/recon-$(date +%Y%m%d-%H%M%S)&quot;
+if [[ -z &quot;$TARGET&quot; ]]; then echo &quot;usage: $0 &lt;cidr&gt;&quot; &gt;&amp;2; exit 2; fi
+case &quot;$TARGET&quot; in
+  192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*) ;;
+  *) echo &quot;REFUSING: not RFC1918 private space&quot; &gt;&amp;2; exit 3 ;;
+esac
+mkdir -p &quot;$OUTDIR&quot;
+nmap -sn &quot;$TARGET&quot; 2&gt;/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u &gt; &quot;$OUTDIR/alive.txt&quot;
+echo &quot;[+] $(wc -l &lt; &quot;$OUTDIR/alive.txt&quot;) hosts alive&quot;
+while read -r h; do
+  [[ -z &quot;$h&quot; ]] &amp;&amp; continue
+  nmap -sT --top-ports 100 -T4 &quot;$h&quot; -oN &quot;$OUTDIR/$h.txt&quot; 2&gt;/dev/null || true
+done &lt; &quot;$OUTDIR/alive.txt&quot;
+{ echo &quot;RECON $(date -Iseconds) -&gt; $TARGET&quot;
+  for f in &quot;$OUTDIR&quot;/*.txt; do [[ &quot;$f&quot; == *alive* ]] &amp;&amp; continue
+    echo &quot;=== $(basename &quot;$f&quot; .txt) ===&quot;; grep &quot;open&quot; &quot;$f&quot; || echo &quot;  (none)&quot;; done
+} &gt; &quot;$OUTDIR/SUMMARY.txt&quot;
+echo &quot;[+] $OUTDIR/SUMMARY.txt&quot;
+SCRIPT
+chmod +x recon.sh
+
+# --- 6. prove the scope guard works (it must REFUSE) ---
+./recon.sh 8.8.8.8 ; echo &quot;exit code: $?&quot;
+
+# --- 7. run it for real ---
+./recon.sh 127.0.0.0/30
+cat ~/aegis/labs/recon-*/SUMMARY.txt | tail -20
+</code></pre>
+<p><strong>Step 6 matters more than it looks.</strong> A tool that refuses to scan outside private space by<br />
+default is a tool you can run without pre-deciding whether you are allowed to.</p>
+<p><strong>Record:</strong> your <code>SUMMARY.txt</code>. Compare it against the raw scan later — the pipeline is the skill.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why must variable expansions always be quoted in a shell script?</li>
+<li>What are file descriptors 0, 1, 2, and what does <code>2&gt;/dev/null</code> actually do?</li>
+<li><code>sort</code> your ports alphabetically and identify the ordering bug. Why does it matter?</li>
+<li>What do <code>set -euo pipefail</code>'s three flags each do?</li>
+<li>Your <code>nmap</code> output vanished because you piped it into <code>head</code> and closed the pipe. What should<br />
+   you have done instead?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pipes &amp; Redirection</strong> → <strong>Text Processing Tools</strong> → <strong>Automation Pipelines</strong> → <strong>Tool Pipelines</strong>.<br />
+This lecture is the foundation for every recon tool you will build.</p>

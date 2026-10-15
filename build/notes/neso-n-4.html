@@ -1,0 +1,215 @@
+<h1 id="network-layer-ip-subnetting-routing">Network Layer: IP, Subnetting, Routing</h1>
+<h2 id="summary">Summary</h2>
+<p>The network layer's job is to move packets between networks. Its central design decision —<br />
+a connectionless, best-effort, header-based forwarding model — is exactly why it is the most<br />
+abused layer in security.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>IP is connectionless</strong>: no setup, no acknowledgement, no guarantee of delivery or order</li>
+<li><strong>Best effort</strong>: packets may be dropped, duplicated, reordered, or corrupted in transit</li>
+<li><strong>Routing is per-hop</strong>: each router decides independently using longest-prefix match</li>
+<li><strong>Decentralised control</strong> is the internet's strength and its security weakness: no authority<br />
+  can revoke a spoofed source address, because nobody checks</li>
+<li><strong>Fragmentation</strong> happens here; a router that needs to fragment and cannot decrements TTL and<br />
+  sends ICMP "frag needed"</li>
+<li><strong>IPv4 header fields that matter</strong>: TTL, protocol, source, destination, options (which can<br />
+  hide data)</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Connectionless</strong></td>
+<td>No setup, no state kept per flow</td>
+</tr>
+<tr>
+<td><strong>Best effort</strong></td>
+<td>No delivery guarantee</td>
+</tr>
+<tr>
+<td><strong>Hop-by-hop</strong></td>
+<td>Decided independently at each router</td>
+</tr>
+<tr>
+<td><strong>Header</strong></td>
+<td>The IPv4 header; fixed 20 bytes plus options</td>
+</tr>
+<tr>
+<td><strong>TTL</strong></td>
+<td>Hop limit, prevents infinite loops</td>
+</tr>
+<tr>
+<td><strong>Fragmentation</strong></td>
+<td>Splitting a packet to fit a smaller MTU</td>
+</tr>
+<tr>
+<td><strong>IP options</strong></td>
+<td>Rarely-used header space; abused for covert channels</td>
+</tr>
+<tr>
+<td><strong>Routing table</strong></td>
+<td>Destinations to next hops</td>
+</tr>
+<tr>
+<td><strong>Subnet mask</strong></td>
+<td>Separates network from host bits</td>
+</tr>
+<tr>
+<td><strong>ARP (adjacent)</strong></td>
+<td>Resolves the next hop's MAC</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- IP-level view of this host ---
+ip -br addr
+ip route
+cat /proc/net/route
+
+# --- the header, in hex, from the kernel's own traffic ---
+sudo timeout 8 tcpdump -i lo -n -X -c 1 icmp 2&gt;/dev/null | head -12
+
+# --- protocol numbers ---
+cat /etc/protocols | grep -E &quot;^ip|^icmp|^tcp|^udp&quot; | head
+python3 -c &quot;
+for n,v in [(0,'HOPOPT'),(1,'ICMP'),(6,'TCP'),(17,'UDP'),(41,'IPv6'),(47,'GRE'),(89,'OSPF'),(132,'SCTP')]:
+    print(f'  {n:&gt;4}  {v}')&quot;
+
+# --- fragmentation / MTU ---
+ping -c1 -W1 -M do -s 1472 8.8.8.8 2&gt;&amp;1 | tail -1
+ping -c1 -W1 -M do -s 1473 8.8.8.8 2&gt;&amp;1 | tail -1
+traceroute -n -m3 8.8.8.8 2&gt;/dev/null | head -3
+
+# --- what this host would do with a spoofed source ---
+# (documentation only - the SYN flag bit set in a crafted packet)
+python3 - &lt;&lt;'PY'
+import struct
+tcp = struct.pack(&quot;!HHIIBBHHH&quot;, 1234, 80, 1, 0, (5 &lt;&lt; 4), 0x02, 8192, 0, 0)
+ip  = struct.pack(&quot;!BBHHHBBH4s4s&quot;, 0x45, 0, 20+len(tcp), 1, 0, 64, 6, 0,
+                  bytes([1,2,3,4]), bytes([93,184,216,34]))
+print(f&quot;  IP header with a completely made-up source (1.2.3.4):&quot;)
+print(f&quot;   src=1.2.3.4  dst=93.184.216.34  ttl=64  proto=6&quot;)
+print(f&quot;  Nothing in this header proves the sender is 1.2.3.4.&quot;)
+print(f&quot;  That is the entire IP-spoofing problem.&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read a real IP header, prove TTL behaviour, and understand spoofing's root cause.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-n-4 &amp;&amp; cd ~/aegis/labs/neso-n-4
+
+# --- 1. decode a header by hand ---
+python3 - &lt;&lt;'PY' | tee 01-header.txt
+import struct
+# version, ihl, dscp/ecn, total len, id, flags/frag, ttl, proto, checksum, src, dst
+raw = bytes.fromhex(&quot;4500003c1c460000400101000a0a0a0aa0a0a0a01&quot;)
+v_ihl, dscp, tot, ident, flagsfrag, ttl, proto, csum = struct.unpack(&quot;!BBHHHBBH&quot;, raw[:12])
+src = &quot;.&quot;.join(map(str, raw[12:16])); dst = &quot;.&quot;.join(map(str, raw[16:20]))
+print(f&quot;  version      : {v_ihl &gt;&gt; 4}&quot;)
+print(f&quot;  ihl          : {v_ihl &amp; 0xf} words = {(v_ihl &amp; 0xf) * 4} bytes&quot;)
+print(f&quot;  dscp/ecn     : {dscp:#04x}&quot;)
+print(f&quot;  total length : {tot}&quot;)
+print(f&quot;  id           : {ident}&quot;)
+print(f&quot;  flags/frag   : {flagsfrag:#06x}&quot;)
+print(f&quot;  ttl          : {ttl}   &lt;- decremented by every router&quot;)
+print(f&quot;  protocol     : {proto}&quot;)
+print(f&quot;  checksum     : {csum:#06x}&quot;)
+print(f&quot;  source       : {src}&quot;)
+print(f&quot;  destination  : {dst}&quot;)
+print()
+print(&quot;  There is no checksum protecting the payload, and no signature on any&quot;)
+print(&quot;  field. Every value in this header is attacker-controlled if the sender&quot;)
+print(&quot;  chooses to lie.&quot;)
+PY
+
+# --- 2. TTL in action ---
+python3 - &lt;&lt;'PY' | tee 02-ttl.txt
+import socket, time
+def ttl_probe(dst, ttl):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1.0)
+    try:
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
+        s.sendto(b&quot;\x00\x00\x00\x00&quot;, (dst, 33434))
+        s.recv(1024); return &quot;reply&quot;
+    except socket.timeout: return &quot;x&quot;
+    except OSError: return &quot;!&quot;
+    finally: s.close()
+
+target = &quot;192.168.56.1&quot;
+print(f&quot;  probing {target} with increasing TTL\n&quot;)
+print(&quot;  ttl: &quot; + &quot;&quot;.join(f&quot;{t:&gt;4}&quot; for t in range(1, 10)))
+for t in range(1, 10):
+    print(f&quot;  {t:&gt;3}: {ttl_probe(target, t):&gt;4}&quot;, end=&quot;&quot;)
+    print()
+PY
+echo
+echo &quot;  A 'reply' at TTL N means the destination is exactly N hops away.&quot;
+echo &quot;  This is how traceroute works, done without any external tool.&quot;
+
+# --- 3. fragmentation behaviour ---
+{
+  echo &quot;=== payload sizes against the internet MTU ===&quot;
+  for sz in 1400 1472 1473 1500 2000; do
+    r=$(ping -c1 -W2 -M do -s $sz 8.8.8.8 2&gt;&amp;1 | tail -1)
+    printf &quot;  -s %-5s %s\n&quot; &quot;$sz&quot; &quot;$r&quot;
+  done
+  echo
+  echo &quot;1500 (MTU) - 20 (IP) - 8 (ICMP) = 1472 is the maximum.&quot;
+  echo &quot;Above that, a router must fragment - or drop and send ICMP 'frag needed'.&quot;
+} 2&gt;&amp;1 | tee 03-frag.txt
+
+# --- 4. IP options: a documented covert channel ---
+cat &gt; 04-ip-options.md &lt;&lt;'EOF'
+# IP options as a covert channel
+
+The IPv4 header is a fixed 20 bytes plus an optional `options` field, up to 40
+bytes, marked by a non-zero IHL. Almost nothing on the internet interprets
+those options. That makes them ideal for carrying data no middlebox inspects.
+
+Lab-only construction:
+```python
+import struct
+# option type 0x82 = loose source route (obsolete but still passed through
+# by some stacks), with 4 bytes of your own payload
+opt = bytes([0x82, 4]) + b&quot;\xde\xad\xbe\xef&quot;
+ihl = (20 + len(opt)) // 4
+ip = struct.pack(&quot;!BBHHHBBH4s4s&quot;, 0x40 | ihl, 0, 20+len(opt), 0, 0,
+                 64, 6, 0, src, dst) + opt
+```
+
+Defence: strip IP options at the perimeter. Most networks never need them.
+EOF
+cat 04-ip-options.md
+
+# --- 5. the routing decision, restated with this host's real table ---
+{
+  echo &quot;=== the routes this host has ===&quot;
+  ip route
+  echo
+  echo &quot;=== for three destinations, which route actually applies? ===&quot;
+  for d in 127.0.0.1 8.8.8.8 &quot;$(ip route | awk '/default/{print $3; exit}')&quot;; do
+    printf &quot;  %-18s &quot; &quot;$d&quot;
+    ip route get &quot;$d&quot; 2&gt;/dev/null | head -1 | cut -c1-90
+  done
+} 2&gt;&amp;1 | tee 05-routing.txt
+</code></pre>
+<p><strong>Step 2 builds traceroute from nothing.</strong> Watching TTL=1 time out and TTL=2 reply is the whole<br />
+mechanism, understood rather than remembered.</p>
+<p><strong>Record:</strong> <code>01-header.txt</code> and <code>02-ttl.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does "best effort" mean, in three concrete consequences?</li>
+<li>Why can IP not prevent source address spoofing?</li>
+<li>What does a router do when a packet is too large for the next link?</li>
+<li>How does TTL prevent routing loops, and what else does it give you?</li>
+<li>Why are IP options a covert channel risk?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>IP Addressing</strong> → <strong>CIDR</strong> → <strong>Routing</strong> → <strong>TTL</strong> → <strong>Classic TCP/IP Security Problems</strong> →<br />
+<strong>Spoofing</strong>.</p>

@@ -1,0 +1,186 @@
+<h1 id="ospf-routing-protocols-and-troubleshooting">OSPF, Routing Protocols and Troubleshooting</h1>
+<h2 id="summary">Summary</h2>
+<p>Dynamic routing: how routers learn paths instead of being configured one by one, and what an<br />
+attacker does to that conversation.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Static vs dynamic</strong>: static is safer and does not scale; dynamic converges automatically</li>
+<li><strong>IGP vs EGP</strong>: OSPF and RIP are interior (inside one AS); BGP is exterior (between ASes)</li>
+<li><strong>OSPF</strong>: link-state, areas, multicast 224.0.0.5/6, adjacency, LSA database. Runs on IP</li>
+<li><strong>Authentication exists</strong> (simple password, MD5, or cryptographic) — and is often absent</li>
+<li><strong>A neighbouring attacker can inject LSAs</strong> and steer traffic: a real routing attack</li>
+<li><strong>BGP</strong> is the internet's backbone; hijacking a prefix is a known, recurring incident type</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>IGP / EGP</strong></td>
+<td>Interior / exterior gateway protocol</td>
+</tr>
+<tr>
+<td><strong>OSPF</strong></td>
+<td>Open Shortest Path First; link-state IGP</td>
+</tr>
+<tr>
+<td><strong>Area</strong></td>
+<td>OSPF grouping; all areas touch area 0</td>
+</tr>
+<tr>
+<td><strong>LSA</strong></td>
+<td>Link State Advertisement — the unit of OSPF information</td>
+</tr>
+<tr>
+<td><strong>Cost</strong></td>
+<td>OSPF's metric; derived from bandwidth</td>
+</tr>
+<tr>
+<td><strong>AS / ASN</strong></td>
+<td>Autonomous System and its number</td>
+</tr>
+<tr>
+<td><strong>BGP</strong></td>
+<td>Path-vector EGP; the internet's routing protocol</td>
+</tr>
+<tr>
+<td><strong>Prefix hijack</strong></td>
+<td>Announcing someone else's address space</td>
+</tr>
+<tr>
+<td><strong>Convergence</strong></td>
+<td>The time for all routers to agree</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what this host knows about routing ---
+ip route
+cat /proc/net/route
+ip -6 route | head
+
+# --- is this box routing anything? ---
+sysctl net.ipv4.ip_forward
+cat /proc/sys/net/ipv4/ip_forward
+lsmod | grep -E &quot;ospf|quagga|frr|bird&quot;
+systemctl list-units --type=service 2&gt;/dev/null | grep -iE &quot;quagga|frr|bird|ospf&quot;
+
+# --- routing daemon configs on a box that has one ---
+ls -la /etc/quagga /etc/frr /etc/bird 2&gt;/dev/null
+
+# --- listening: OSPF is IP protocol 89 ---
+sudo tcpdump -i any -n &quot;proto 89&quot; 2&gt;/dev/null | head -10
+sudo nmap -sU -p 89 --open 192.168.56.101 2&gt;/dev/null
+
+# --- read the OSPF packets on your lab link ---
+echo &quot;  T1: sudo tcpdump -i vboxnet0 -n -vv 'ip proto 89'&quot;
+echo &quot;  T2: ping 192.168.56.101   # triggers adjacency attempts if OSPF is running&quot;
+
+# --- traceroute, the practical tool of this lecture ---
+traceroute -n -w1 -q1 -m6 192.168.56.101 2&gt;/dev/null
+traceroute -n -w1 -q1 -m4 8.8.8.8 2&gt;/dev/null | head -6
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read a routing table properly, and diagnose reachability the way a network<br />
+engineer (and an attacker) does.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccna-08 &amp;&amp; cd ~/aegis/labs/ccna-08
+
+cat &gt; troubleshoot.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Ordered reachability diagnostics. Run it against a target in YOUR lab.
+set -uo pipefail
+T=&quot;${1:?usage: ./troubleshoot.sh &lt;target&gt;}&quot;
+say(){ printf '\n=== %s ===\n' &quot;$*&quot;; }
+
+say &quot;layer 3 identity of this host&quot;
+ip -br addr
+ip route | head -5
+
+say &quot;is the target routable from here?&quot;
+ip route get &quot;$T&quot; 2&gt;/dev/null || { echo &quot;no route to $T&quot;; exit 1; }
+
+say &quot;layer 2: can we even complete an ARP?&quot;
+GW=$(ip route | awk '/default/{print $3; exit}')
+echo &quot;  gateway: ${GW:-none}&quot;
+ip neigh show &quot;$GW&quot; 2&gt;/dev/null || echo &quot;  (no ARP entry for the gateway yet)&quot;
+ping -c1 -W1 &quot;$GW&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo &quot;  gateway reachable&quot; || echo &quot;  gateway NOT reachable&quot;
+ip neigh show &quot;$GW&quot; 2&gt;/dev/null
+
+say &quot;layer 3: ICMP&quot;
+ping -c3 -W2 &quot;$T&quot;
+
+say &quot;layer 3 with a large payload (MTU / fragmentation test)&quot;
+ping -c2 -W2 -s 1400 &quot;$T&quot; 2&gt;/dev/null || echo &quot;  1400-byte payload failed - fragmentation or MTU issue&quot;
+
+say &quot;layer 3 with DF set (path MTU discovery)&quot;
+ping -c2 -W2 -M do -s 1472 &quot;$T&quot; 2&gt;/dev/null || echo &quot;  DF+1472 failed - a router on the path drops fragments&quot;
+
+say &quot;path&quot;
+traceroute -n -w1 -q1 -m8 &quot;$T&quot; 2&gt;/dev/null
+
+say &quot;layer 4: which ports answer&quot;
+for p in 22 53 80 443 445 3306; do
+  timeout 2 bash -c &quot;echo &gt; /dev/tcp/$T/$p&quot; 2&gt;/dev/null &amp;&amp; echo &quot;  $p open&quot; || echo &quot;  $p closed/filtered&quot;
+done
+
+say &quot;summary&quot;
+echo &quot;  Fill in: which layer failed first? That layer is your investigation.&quot;
+EOF
+chmod +x troubleshoot.sh
+
+echo &quot;=== run against yourself ===&quot;
+./troubleshoot.sh 127.0.0.1 2&gt;&amp;1 | tee 01-diagnose-self.txt
+
+echo
+echo &quot;=== and against your lab, if built ===&quot;
+if ip -br addr show vboxnet0 &gt;/dev/null 2&gt;&amp;1; then
+  ./troubleshoot.sh 192.168.56.101 2&gt;&amp;1 | tee 02-diagnose-lab.txt
+else
+  echo &quot;no lab yet - docs/LAB-SETUP.md&quot; | tee 02-diagnose-lab.txt
+fi
+
+# --- the routing-security lesson ---
+cat &gt; 03-routing-attacks.md &lt;&lt;'EOF'
+# Routing-layer attacks
+
+## OSPF adjacency poisoning
+1. Attacker on the segment sends OSPF Hello packets with a router ID of their choosing.
+2. Without authentication, the real router forms an adjacency.
+3. Attacker advertises LSAs claiming a shorter path (lower cost) to the destination network.
+4. Traffic is directed through the attacker: a full MITM with no host compromise.
+
+Defence: OSPF authentication (MD5 or better), passive interfaces on user ports,
+area design that does not expose user-facing segments to adjacency.
+
+## BGP prefix hijacking
+An attacker announces another organisation's prefix from a network they legitimately operate.
+Routers that accept it send traffic to the attacker.
+
+Detection: route collectors and RPKI validation compare what is announced against what is
+registered. Defence at the registry level, not the network level.
+
+## The transferable lesson
+Routing trusts *participation*. Every protocol that discovers neighbours by broadcasting is
+trusting whoever answers first. That is the same shape as rogue DHCP and evil-twin WiFi.
+EOF
+cat 03-routing-attacks.md
+</code></pre>
+<p><strong><code>troubleshoot.sh</code> is a genuinely reusable tool</strong> — run it against every host in an assessment<br />
+and the output is half your reconnaissance report.</p>
+<p><strong>Record:</strong> <code>03-routing-attacks.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between an IGP and an EGP, and which protocol is which?</li>
+<li>Why is OSPF authentication a security control and not just a compatibility option?</li>
+<li>Describe OSPF adjacency poisoning in four steps.</li>
+<li>What does the <code>-M do</code> flag on ping test?</li>
+<li>Why does BGP hijacking have to be defended at the registry level?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Routing</strong> → <strong>Classic TCP/IP Security Problems</strong> → <strong>TTL</strong> → <strong>Segmentation</strong> →<br />
+<strong>Firewalls &amp; Filtering</strong> → <strong>Spoofing</strong>.</p>

@@ -1,0 +1,289 @@
+<h1 id="network-security-and-firewalls">Network Security and Firewalls</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161 treats the network as hostile by assumption and asks what security is possible at each<br />
+layer. The lecture's conclusion is that almost nothing is possible below the transport layer<br />
+without cryptography, and firewalls are a <em>policy</em> control rather than a <em>security</em> control.</p>
+<blockquote>
+<p>Companion to <code>ccna-01</code>..<code>ccna-08</code> and <code>mit858-12</code>. Those teach the<br />
+protocols; this note is about what a filter can and cannot achieve.</p>
+</blockquote>
+<h2 id="what-a-firewall-can-do">What a firewall can do</h2>
+<p>A packet filter makes a decision per packet (or per flow) on a tuple:</p>
+<pre><code class="language-text">  src IP, dst IP, src port, dst port, protocol, flags, interface, direction
+</code></pre>
+<p>Actions: allow, deny, reject, log, rate-limit, or reset the connection.</p>
+<p><strong>That is the entire expressive power of a stateless filter.</strong> It cannot<br />
+know who the user is, what the data contains, or whether the request is<br />
+authorised. It is an <em>access control list over packets</em>.</p>
+<h2 id="stateless-versus-stateful">Stateless versus stateful</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Stateless</th>
+<th>Stateful</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Decisions on</td>
+<td>each packet independently</td>
+<td>connection state</td>
+</tr>
+<tr>
+<td>Example</td>
+<td><code>ip6tables</code></td>
+<td><code>iptables -m conntrack</code>, <code>nftables</code></td>
+</tr>
+<tr>
+<td>Knows "is this a reply?"</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Can permit replies</td>
+<td>no — you must write an inbound rule</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Evaded by</td>
+<td>UDP any-any rules</td>
+<td>harder</td>
+</tr>
+<tr>
+<td>Cost</td>
+<td>low</td>
+<td>high (memory per flow)</td>
+</tr>
+</tbody>
+</table>
+<p>Stateful inspection was invented because <strong>UDP has no handshake</strong>. Without<br />
+state, permitting outbound UDP requires permitting inbound UDP, which means<br />
+an arbitrary UDP source can reach you. This is why "block all UDP" was the<br />
+default posture for twenty years.</p>
+<h2 id="application-layer-firewalls">Application-layer firewalls</h2>
+<p>An L7 filter understands HTTP, SMTP or DNS and can make decisions on method,<br />
+path, header, or protocol structure.</p>
+<p><strong>This is where the real security value is</strong>, because it is the only place you<br />
+can see the application's own semantics. It is also trivially defeated by<br />
+TLS, unless it terminates TLS itself — which then makes it a TLS-terminating<br />
+proxy and a high-value target itself.</p>
+<h2 id="firewalls-are-not-a-security-boundary">Firewalls are not a security boundary</h2>
+<pre><code class="language-text">  what a firewall DOES prevent:
+    - accidental exposure
+    - wide scanning from outside
+    - noisy services on the wrong interface
+    - policy enforcement and auditability
+
+  what a firewall does NOT prevent:
+    - an attacker already inside the network
+    - anything over an allowed port
+    - attacks at the application layer on allowed ports
+    - data exfiltration over an allowed channel
+    - itself: it is a privileged, network-facing, complex device
+</code></pre>
+<p>The last point is the one people forget. A firewall is a high-value target<br />
+precisely because it decides what is reachable.</p>
+<h2 id="where-a-filter-actually-belongs">Where a filter actually belongs</h2>
+<pre><code class="language-text">  network edge        - coarse policy, direction separation
+  host firewall       - protect a single host, default-deny inbound
+  segment boundary    - limit lateral movement (this is the real value)
+  egress filtering    - stop both malware and exfiltration
+  ingress filtering   - BCP 38: drop spoofed sources at your edge
+</code></pre>
+<p><strong>Egress filtering is the most underrated control.</strong> Most intrusions and most<br />
+exfiltration succeed because outbound traffic is unrestricted.</p>
+<h2 id="filtering-expressions-concretely">Filtering expressions, concretely</h2>
+<pre><code class="language-text">  default deny all, then allow what is needed  &lt;- fail closed
+  never allow any/any on the last rule         &lt;- leaves the default open
+
+  nftables:
+    table inet filter {
+      chain input { type filter hook input priority 0; policy drop;
+        iif lo accept
+        ct state established,related accept
+        tcp dport 22 ip saddr 192.168.56.0/24 accept
+      }
+    }
+</code></pre>
+<p>Note the three properties: <code>policy drop</code> (fail closed), loopback first,<br />
+established connections before anything else.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Packet filter</strong></td>
+<td>ACL over packets by tuple</td>
+</tr>
+<tr>
+<td><strong>Stateless</strong></td>
+<td>No connection state tracked</td>
+</tr>
+<tr>
+<td><strong>Stateful</strong></td>
+<td>Tracks flows; permits replies</td>
+</tr>
+<tr>
+<td><strong>Conntrack</strong></td>
+<td>Linux connection tracking table</td>
+</tr>
+<tr>
+<td><strong>Default deny</strong></td>
+<td>Drop everything not explicitly allowed</td>
+</tr>
+<tr>
+<td><strong>Egress filtering</strong></td>
+<td>Restrict what leaves</td>
+</tr>
+<tr>
+<td><strong>Ingress filtering / BCP 38</strong></td>
+<td>Drop traffic with impossible source addresses</td>
+</tr>
+<tr>
+<td><strong>L7 firewall</strong></td>
+<td>Decides on application protocol content</td>
+</tr>
+<tr>
+<td><strong>Fail closed</strong></td>
+<td>Deny on error</td>
+</tr>
+<tr>
+<td><strong>NAT</strong></td>
+<td>Address translation; not a security control</td>
+</tr>
+<tr>
+<td><strong>Spoofed source</strong></td>
+<td>Source address the sender does not own</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what is filtering on this machine? ---
+{
+  echo &quot;=== iptables (IPv4) ===&quot;
+  sudo iptables -S 2&gt;/dev/null | head -20
+  echo
+  echo &quot;=== nftables (modern) ===&quot;
+  sudo nft list ruleset 2&gt;/dev/null | head -25
+  echo
+  echo &quot;=== connection tracking ===&quot;
+  sudo conntrack -L 2&gt;/dev/null | head -5 || \
+    cat /proc/net/nf_conntrack 2&gt;/dev/null | head -5 || echo &quot;  (conntrack not available)&quot;
+  echo
+  echo &quot;=== the policy on each chain: fail closed or open? ===&quot;
+  sudo iptables -S 2&gt;/dev/null | grep -- &quot;-P&quot; | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 01-filters.txt
+
+# --- what is exposed, regardless of policy ---
+{
+  echo &quot;=== REACHABLE LISTENERS ===&quot;
+  ss -tulpn | awk 'NR&gt;1{print &quot;  &quot;$1, $4, $5, $7}'
+  echo
+  echo &quot;  A firewall that allows a port makes that service reachable.&quot;
+  echo &quot;  The firewall does not make it safe.&quot;
+} 2&gt;&amp;1 | tee 02-exposure.txt
+
+# --- the stateful problem, demonstrated ---
+python3 - &lt;&lt;'PY' | tee 03-stateful.txt
+# Why stateful inspection exists: UDP has no handshake, so a stateless
+# filter permitting outbound UDP must also permit inbound UDP.
+print(&quot;  stateless filter for DNS (UDP 53), as most orgs wrote it:&quot;)
+print(&quot;    ALLOW udp --dport 53 OUT&quot;)
+print(&quot;    ALLOW udp --dport 53 IN      &lt;- necessary! nothing tracks replies&quot;)
+print()
+print(&quot;  Consequence: ANY host may send UDP/53 to you, for ANY source port.&quot;)
+print(&quot;  That is a UDP amplification reflector - see mit858-12.&quot;)
+print()
+print(&quot;  stateful equivalent:&quot;)
+print(&quot;    ct state NEW,ESTABLISHED udp dport 53 OUT&quot;)
+print(&quot;    ct state ESTABLISHED          IN   &lt;- only replies to tracked flows&quot;)
+print()
+print(&quot;  Measured cost of state: conntrack needs memory per flow.&quot;)
+import os
+try:
+    print(&quot;  conntrack max:&quot;,
+          open(&quot;/sys/module/nf_conntrack/parameters/max&quot;).read().strip())
+    with open(&quot;/proc/sys/net/netfilter/nf_conntrack_count&quot;) as f:
+        print(&quot;  conntrack in use:&quot;, f.read().strip())
+except Exception:
+    print(&quot;  (conntrack not loaded)&quot;)
+PY
+cat 03-stateful.txt
+
+# --- nftables: the default-deny skeleton, applied to loopback only ---
+if command -v nft &gt;/dev/null &amp;&amp; sudo -n true 2&gt;/dev/null; then
+  sudo nft -f - &lt;&lt;'NFT'
+table inet aegis_lab {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif lo accept
+    ct state established,related accept
+  }
+}
+NFT
+  echo &quot;=== aegis_lab table installed, default DENY on input ===&quot;
+  sudo nft list ruleset 2&gt;/dev/null | sed 's/^/  /' | head -12
+  echo
+  echo &quot;=== what is now blocked? (loopback must still work) ===&quot;
+  curl -s -o /dev/null -w &quot;  loopback 8080: %{http_code}\n&quot; --max-time 2 http://127.0.0.1:8080/ || echo &quot;  loopback 8080: no service&quot;
+  sudo nft delete table inet aegis_lab 2&gt;/dev/null &amp;&amp; echo &quot;  (removed)&quot;
+else
+  echo &quot;  nft not available or no passwordless sudo - see 01-filters.txt for what IS active&quot;
+fi
+
+# --- egress filtering, the underrated control ---
+cat &gt; 04-egress.md &lt;&lt;'EOF'
+# Egress filtering
+
+Most organisations filter inbound carefully and outbound not at all. That
+asymmetry is why:
+- command-and-control works: the malware needs to reach the internet
+- exfiltration works: the data can leave on any port, any protocol
+- lateral movement works: internal traffic is unrestricted
+
+## What to allow outbound
+- DNS, only to your internal resolvers (never directly from endpoints)
+- HTTPS, to the destinations your users need
+- NTP, only to your internal servers
+- mail, only through your relay
+- nothing else
+
+## What this buys
+1. DNS tunnelling stops working (no direct resolver access)
+2. Most C2 stops working (beacon destinations are not on the allowlist)
+3. Exfiltration is contained to approved channels
+4. Compromised hosts are visibly talking to somewhere they should not
+
+## The measurement to start with
+    sudo ss -tunap | grep -v &quot;127.0.0.1\|::1&quot; | awk '{print $5}' | sort | uniq -c | sort -rn
+
+What is this machine actually talking to? Most answers are surprising, and
+every surprise is either a dependency you forgot or something you want to know
+about. This is the single highest-value network finding in an assessment.
+EOF
+cat 04-egress.md
+
+echo
+echo &quot;=== what is this host actually talking to? ===&quot;
+sudo timeout 10 ss -tunap 2&gt;/dev/null | grep -v &quot;127.0.0.1\|::1&quot; | head -12 | sed 's/^/  /'
+</code></pre>
+<p><strong>Step 5 is the practical finding</strong>: ask what the host is actually talking to. Most<br />
+assessments start here and skip the harder work.</p>
+<p><strong>Record:</strong> <code>01-filters.txt</code> and <code>04-egress.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What tuple can a stateless packet filter decide on, and what can it never know?</li>
+<li>Why does stateful inspection exist, and what specifically forces it?</li>
+<li>Why is UDP so hard to filter statelessly?</li>
+<li>What does egress filtering buy that ingress filtering does not?</li>
+<li>Why is a firewall itself a high-value target?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Firewalls &amp; Filtering</strong> → <strong>TCP-UDP</strong> → <strong>IDS / IPS</strong> → <strong>Egress Filtering</strong> →<br />
+<strong>Network Security Problems</strong> → <strong>Segmentation</strong>.</p>

@@ -1,0 +1,215 @@
+<h1 id="application-layer-dns-dhcp-http-smtp">Application Layer: DNS, DHCP, HTTP, SMTP</h1>
+<h2 id="summary">Summary</h2>
+<p>Where data becomes meaningful. Application-layer protocols are what you actually test, and they<br />
+are overwhelmingly cleartext.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>DNS</strong> names, <strong>DHCP</strong> configures, <strong>HTTP</strong> transfers, <strong>SMTP</strong> sends</li>
+<li>Most of it is <strong>plaintext</strong>: HTTP, FTP, Telnet, POP3, IMAP, SMTP — and SNMP v1/v2c</li>
+<li><strong>TLS</strong> adds encryption and server authentication; it does not add user authentication</li>
+<li><strong>HTTP semantics</strong>: stateless, verbs, status codes, headers, cookies. Everything in Tier 4<br />
+  is a misbehaviour of one of those</li>
+<li><strong>SMTP</strong> is a conversation, not a transaction: the server speaks first</li>
+<li>Encrypted variants exist for all of them and are almost always used in practice</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Protocol</strong></td>
+<td>An agreed message format at the application layer</td>
+</tr>
+<tr>
+<td><strong>Cleartext</strong></td>
+<td>Readable without decryption</td>
+</tr>
+<tr>
+<td><strong>Request / response</strong></td>
+<td>The HTTP pattern</td>
+</tr>
+<tr>
+<td><strong>Stateless</strong></td>
+<td>Each request stands alone; sessions are simulated by cookies</td>
+</tr>
+<tr>
+<td><strong>Status code</strong></td>
+<td>1xx-5xx; the first digit is the class</td>
+</tr>
+<tr>
+<td><strong>Header</strong></td>
+<td>Metadata preceding the body</td>
+</tr>
+<tr>
+<td><strong>Verb / method</strong></td>
+<td>GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS</td>
+</tr>
+<tr>
+<td><strong>Banner</strong></td>
+<td>The first thing a service says</td>
+</tr>
+<tr>
+<td><strong>TLS</strong></td>
+<td>Encryption and server authentication in transit</td>
+</tr>
+<tr>
+<td><strong>Well-defined vs ad hoc</strong></td>
+<td>Protocol rigor versus something improvised</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- HTTP: the whole protocol, by hand ---
+curl -v --max-time 5 http://127.0.0.1:8080/ 2&gt;&amp;1 | head -20
+curl -I --max-time 5 http://127.0.0.1:8080/ 2&gt;&amp;1 | head -8
+curl -s -o /dev/null -w &quot;code=%{http_code} size=%{size_download} time=%{time_total}\n&quot; \
+     --max-time 5 http://127.0.0.1:8080/
+
+# --- what a server says before you say anything ---
+printf 'QUIT\r\n' | timeout 3 nc -v 127.0.0.1 21 2&gt;&amp;1 | head -3
+timeout 3 nc -v 127.0.0.1 25 2&gt;&amp;1 | head -3
+timeout 3 nc -v 127.0.0.1 110 2&gt;&amp;1 | head -3
+
+# --- DNS ---
+dig +short example.com
+dig +short MX example.com
+
+# --- HTTP verbs, what each means ---
+for m in GET HEAD POST PUT DELETE PATCH OPTIONS TRACE; do
+  printf &quot;  %-8s %s\n&quot; &quot;$m&quot; &quot;$(curl -s -o /dev/null -w '%{http_code}' -X $m --max-time 3 http://127.0.0.1:8080/ 2&gt;/dev/null || echo '-')&quot;
+done
+
+# --- what is plaintext here ---
+ss -tulpn | grep -E &quot;:(21|23|25|53|80|110|143|389|1433|3306)&quot; | head
+echo &quot;  ports above with no TLS: credentials traverse the network in clear&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> speak each protocol by hand, then judge your own machine's exposure.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-n-6 &amp;&amp; cd ~/aegis/labs/neso-n-6
+
+# --- 1. HTTP, written by hand in Python (no library) ---
+python3 - &lt;&lt;'PY' | tee 01-http.txt
+import socket
+def raw_get(host, port, path=&quot;/&quot;, host_header=None):
+    host_header = host_header or (f&quot;{host}:{port}&quot; if port != 80 else host)
+    req = (f&quot;GET {path} HTTP/1.1\r\nHost: {host_header}\r\n&quot;
+           f&quot;User-Agent: aegis/1.0\r\nConnection: close\r\n\r\n&quot;)
+    with socket.create_connection((host, port), timeout=3) as s:
+        s.sendall(req.encode())
+        data = b&quot;&quot;
+        while chunk := s.recv(4096):
+            data += chunk
+    head, _, body = data.partition(b&quot;\r\n\r\n&quot;)
+    return head.decode(&quot;utf8&quot;,&quot;replace&quot;), body
+
+for port in (8080, 80):
+    try:
+        head, body = raw_get(&quot;127.0.0.1&quot;, port)
+        print(f&quot;  --- {host if False else '127.0.0.1'}:{port} ---&quot;)
+        print(&quot;  &quot; + &quot;\n  &quot;.join(head.splitlines()[:8]))
+        print(f&quot;  body: {len(body)} bytes&quot;)
+        print()
+        break
+    except OSError as e:
+        print(f&quot;  {port}: {type(e).__name__}&quot;)
+PY
+
+# --- 2. the status code classes, and why they matter for reporting ---
+cat &gt; 02-status.txt &lt;&lt;'EOF'
+HTTP status classes - and what each one tells an assessor
+
+1xx  informational     request received, continuing
+2xx  success           200 OK, 201 Created, 204 No Content, 206 Partial
+3xx  redirection       301 moved permanently, 302 found, 304 not modified,
+                        307/308 preserve method (unlike 302)
+4xx  client error      the REQUESTER is wrong
+      400 bad request        malformed syntax
+      401 unauthorized       needs authentication (different from 403)
+      403 forbidden          understood but refused
+      404 not found          absent - or deliberately disguised
+      405 method not allowed  the verb is wrong for this resource
+      429 too many requests   you are being rate limited
+5xx  server error      the SERVER is wrong
+      500 internal error     often leaks a stack trace
+      502 bad gateway        an upstream failed
+      503 unavailable        overloaded or down
+
+Reporting notes:
+- 200 on a login page that should be 302 = the authentication check is missing
+- 404 vs 403 difference reveals whether a resource exists
+- 405 means the endpoint exists and is simply not meant for that verb
+- 500 with a stack trace is an information disclosure finding on its own
+EOF
+cat 02-status.txt
+
+# --- 3. SMTP: the server speaks first ---
+python3 - &lt;&lt;'PY' | tee 03-smtp.txt
+import socket
+try:
+    with socket.create_connection((&quot;127.0.0.1&quot;, 25), timeout=2) as s:
+        s.settimeout(2)
+        def rd(tag):
+            d = s.recv(1024).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()
+            print(f&quot;  {tag:&lt;8} {d[:110]}&quot;)
+            return d
+        def wr(line, tag):
+            print(f&quot;  {tag:&lt;8} {line}&quot;)
+            s.sendall((line + &quot;\r\n&quot;).encode())
+        rd(&quot;server:&quot;)
+        wr(&quot;EHLO aegis.local&quot;, &quot;client:&quot;)
+        rd(&quot;server:&quot;)
+        wr(&quot;QUIT&quot;, &quot;client:&quot;)
+except OSError as e:
+    print(f&quot;  no SMTP on loopback ({type(e).__name__})&quot;)
+print()
+print(&quot;  Note the pattern: the SERVER sends a 220 banner unprompted. That is&quot;)
+print(&quot;  why banners are such a cheap enumeration primitive - no request needed.&quot;)
+PY
+
+# --- 4. POP3 / IMAP banners, same idea ---
+python3 - &lt;&lt;'PY' | tee 04-banners.txt
+import socket
+for port, label in ((110,&quot;POP3&quot;), (143,&quot;IMAP&quot;), (21,&quot;FTP&quot;), (23,&quot;TELNET&quot;)):
+    try:
+        with socket.create_connection((&quot;127.0.0.1&quot;, port), timeout=1.0) as s:
+            s.settimeout(1.0)
+            try: banner = s.recv(128).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()
+            except socket.timeout: banner = &quot;(no banner - waits for the client)&quot;
+            print(f&quot;  {label:&lt;7} :{port:&lt;6} {banner[:60]}&quot;)
+    except ConnectionRefusedError:
+        pass
+    except OSError:
+        pass
+PY
+
+# --- 5. your own cleartext exposure ---
+{
+  echo &quot;=== plaintext-capable services on this machine ===&quot;
+  ss -tulpn | grep -E &quot;:(21|23|25|53|80|110|143|3306|5432)\b&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== all listeners, bound to anything but loopback ===&quot;
+  ss -tulpn | awk '$5 !~ /^127\./ {print &quot;  &quot; $1, $5, $7}'
+  echo
+  echo &quot;=== the single question to ask of each one ===&quot;
+  echo &quot;  Is this reachable from the network? Is it encrypted? Does it need auth?&quot;
+} 2&gt;&amp;1 | tee 05-cleartext.txt
+</code></pre>
+<p><strong>Step 3 is the pattern worth internalising: the server speaks first.</strong> Banners are free<br />
+information, which is why <code>nc -v host port</code> is the fastest enumeration you will ever run.</p>
+<p><strong>Record:</strong> <code>02-status.txt</code> and <code>05-cleartext.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name four application-layer protocols that transmit credentials in cleartext.</li>
+<li>What does TLS provide, and what does it not provide?</li>
+<li>Why is 401 different from 403, and why does the difference matter?</li>
+<li>Which party speaks first in SMTP, and why does that matter for enumeration?</li>
+<li>What does a 405 response tell you that a 404 does not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>HTTP Request</strong> → <strong>DNS</strong> → <strong>DHCP</strong> → <strong>Banner Grabbing</strong> → <strong>OWASP Top 10</strong> →<br />
+<strong>TLS Handshake</strong>.</p>

@@ -1,0 +1,143 @@
+<h1 id="io-structure-and-system-calls">I/O Structure and System Calls</h1>
+<h2 id="summary">Summary</h2>
+<p>How a program actually gets bytes from a device to itself, and where the OS inserts itself. The<br />
+I/O path is the most security-relevant path in any system: <strong>every byte a web server serves and<br />
+every packet a sniffer reads passed through it.</strong></p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Programmed I/O</strong> — CPU polls the device. Slow, simple.</li>
+<li><strong>Interrupt-driven I/O</strong> — device raises an interrupt; CPU handles it later. The standard model.</li>
+<li><strong>DMA</strong> — device writes directly to RAM; CPU is interrupted only at completion.</li>
+<li><strong>Spooling</strong> — a daemon holds a device exclusively (printer), serialising access.</li>
+<li><strong>The I/O path</strong>: device → driver → buffer → kernel → syscall → user buffer.</li>
+<li><strong>Why it matters</strong>: buffer sizes, TOCTOU on device files, and <code>/dev/*</code> permissions are all<br />
+  attack surface.</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Driver</strong></td>
+<td>Kernel code controlling one device class</td>
+</tr>
+<tr>
+<td><strong>Interrupt</strong></td>
+<td>Signal from device asking for CPU attention</td>
+</tr>
+<tr>
+<td><strong>DMA</strong></td>
+<td>Direct memory access, bypassing CPU</td>
+</tr>
+<tr>
+<td><strong>Buffering</strong></td>
+<td>Absorbing speed differences between device and CPU</td>
+</tr>
+<tr>
+<td><strong>Spooling</strong></td>
+<td>Daemon-owned exclusive device access</td>
+</tr>
+<tr>
+<td><strong>Device file</strong></td>
+<td><code>/dev/*</code> node used to talk to a driver</td>
+</tr>
+<tr>
+<td><strong><code>/dev/shm</code></strong></td>
+<td>Shared memory tmpfs</td>
+</tr>
+<tr>
+<td><strong>ioctl</strong></td>
+<td>Device-specific control syscall</td>
+</tr>
+<tr>
+<td><strong>Blocking / non-blocking</strong></td>
+<td>Whether a read waits for data</td>
+</tr>
+<tr>
+<td><strong>Readahead</strong></td>
+<td>Kernel prefetching, relevant to forensics</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">ls -la /dev | head -20
+ls -la /dev/sd* /dev/nvme* 2&gt;/dev/null
+lsmod | head -10
+ls -la /dev/shm/
+# device permissions ARE a security boundary
+ls -l /dev/mem /dev/kmem /dev/sda 2&gt;/dev/null
+# who has raw socket / packet capabilities?
+getcap /usr/bin/tcpdump /usr/bin/wireshark /usr/bin/nmap 2&gt;/dev/null
+# interrupt-driven IO in action
+cat /proc/interrupts | head -5
+grep -E &quot;tty|eth|enp&quot; /proc/interrupts | head -5
+# buffered IO: compare sequential vs random reads
+dd if=/dev/zero of=/tmp/t bs=1M count=64 2&gt;/dev/null
+dd if=/tmp/t of=/dev/null bs=4k 2&gt;&amp;1 | tail -1
+dd if=/tmp/t of=/dev/null bs=4k iflag=direct 2&gt;&amp;1 | tail -1
+rm -f /tmp/t
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> trace the I/O path from a file read down to the block device, and audit <code>/dev</code>.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-os-2 &amp;&amp; cd ~/aegis/labs/neso-os-2
+
+# --- 1. watch a read cross the boundary ---
+strace -e trace=openat,read,close /bin/ls 2&gt;&amp;1 | head -12 | tee 01-io-path.txt
+echo &quot;That is: syscalls -&gt; kernel -&gt; page cache -&gt; device. Every read, every time.&quot;
+
+# --- 2. buffered vs direct, the performance cost of the abstraction ---
+sudo dd if=/dev/zero of=/tmp/t bs=1M count=128 conv=fsync 2&gt;/dev/null
+{
+  echo &quot;=== buffered read (through the page cache) ===&quot;
+  dd if=/tmp/t of=/dev/null bs=4k 2&gt;&amp;1 | tail -1
+  echo &quot;=== direct read (bypassing cache, reaching the device) ===&quot;
+  dd if=/tmp/t of=/dev/null bs=4k iflag=direct 2&gt;&amp;1 | tail -1
+  echo &quot;The gap between these two numbers IS the page cache.&quot;
+} | tee -a 01-io-path.txt
+rm -f /tmp/t
+
+# --- 3. audit /dev: who can touch devices directly? ---
+{
+  echo &quot;=== device nodes and their modes ===&quot;
+  ls -la /dev/sd* /dev/nvme* /dev/mem /dev/kmem /dev/shm 2&gt;/dev/null
+  echo
+  echo &quot;=== block devices ===&quot;
+  lsblk -o NAME,MAJ:MIN,SIZE,TYPE,MOUNTPOINT
+  echo
+  echo &quot;=== capabilities on capture tools ===&quot;
+  getcap /usr/bin/tcpdump /usr/bin/nmap /usr/bin/wireshark /usr/bin/ettercap 2&gt;/dev/null
+  echo &quot;(empty = these still need root; capabilities would let them run without it)&quot;
+} 2&gt;&amp;1 | tee 02-dev-audit.txt
+
+# --- 4. interrupts: the I/O completion path ---
+{
+  echo &quot;=== interrupt sources ===&quot;
+  head -2 /proc/interrupts
+  grep -iE &quot;eth|enp|tty&quot; /proc/interrupts | head -5
+  echo
+  echo &quot;=== softirq (deferred processing) ===&quot;
+  grep -E &quot;SOFTIRQ|RCU|SCHED&quot; /proc/interrupts | head -4
+} 2&gt;&amp;1 | tee 03-interrupts.txt
+
+# --- 5. the spooling model in practice ---
+ls -la /var/spool/ 2&gt;/dev/null
+lpstat -p 2&gt;/dev/null || echo &quot;(no cups; the spooling model is the same for any exclusive device)&quot;
+</code></pre>
+<p><strong><code>02-dev-audit.txt</code> is a real finding sheet.</strong> Any device node that is world-writable on a<br />
+multi-user machine is a local escalation path, which is exactly what <code>pr-01</code> hunts for.</p>
+<p><strong>Record:</strong> <code>02-dev-audit.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Compare programmed, interrupt-driven, and DMA I/O in one sentence each.</li>
+<li>Why does the kernel buffer I/O instead of passing data straight through?</li>
+<li>What does <code>/dev/mem</code> do, and why is it dangerous?</li>
+<li>What is spooling, and what does it protect against?</li>
+<li>Why does <code>iflag=direct</code> change the read path?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>System Call</strong> → <strong>File Descriptors</strong> → <strong>Kernel vs Userspace</strong> → <strong>Mounts &amp; /proc</strong>.</p>

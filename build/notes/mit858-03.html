@@ -1,0 +1,295 @@
+<h1 id="user-authentication">User Authentication</h1>
+<h2 id="summary">Summary</h2>
+<p>Lecture 3 asks how you know who is talking. The answer has three independent parts, and most<br />
+systems get the third one wrong.</p>
+<p>The lecture's own reading is telling: <em>Your password doesn't matter</em>.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Authentication</strong> (who) is separate from <strong>authorisation</strong> (what)</li>
+<li>Three factors: something you <strong>know</strong>, something you <strong>have</strong>, something you <strong>are</strong></li>
+<li>Passwords fail because of reuse, phishing, and poor storage, not because they are weak math</li>
+<li><strong>Offline attackability</strong> is the property that matters: can the verifier be attacked at leisure?<br />
+  Password hashes: yes. Biometrics: yes. Online-attempt-limited factors: harder</li>
+<li><strong>Session handling</strong> is where authentication actually breaks</li>
+<li><strong>Second factors</strong> work when the second factor is not also phishable or replayable</li>
+<li>Trust recovery and account recovery are security functions, not UX details</li>
+</ul>
+<h2 id="why-passwords-fail">Why passwords fail</h2>
+<ol>
+<li>Users reuse them across sites → one breach unlocks many</li>
+<li>They are phishable → a look-alike login page captures them</li>
+<li>They are typed on compromised machines → keyloggers</li>
+<li>They are stored poorly by services → offline cracking</li>
+<li>They are transmitted in the clear by legacy protocols → sniffing</li>
+</ol>
+<p>Fixing the <em>math</em> (longer, random) helps far less than fixing <strong>1-4</strong>.</p>
+<h2 id="storage">Storage</h2>
+<table>
+<thead>
+<tr>
+<th>Scheme</th>
+<th>Storage</th>
+<th>Offline attackable?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>plaintext</td>
+<td>nothing</td>
+<td>trivially</td>
+</tr>
+<tr>
+<td>salted fast hash (MD5/SHA1)</td>
+<td>one hash per user</td>
+<td>yes, extremely fast</td>
+</tr>
+<tr>
+<td>unsalted fast hash</td>
+<td>one hash for all users</td>
+<td>yes, and rainbow tables work</td>
+</tr>
+<tr>
+<td>bcrypt / scrypt / Argon2</td>
+<td>slow hash + salt</td>
+<td>yes, but expensive</td>
+</tr>
+<tr>
+<td>FIDO2 / passkey</td>
+<td>nothing to steal server-side</td>
+<td><strong>no</strong></td>
+</tr>
+<tr>
+<td>client-side (age, PGP)</td>
+<td>nothing server-side</td>
+<td>no, until the client is compromised</td>
+</tr>
+</tbody>
+</table>
+<p>The pivot: <strong>FIDO2 binds the credential to the origin</strong>, so a phishing site gets nothing.</p>
+<h2 id="sessions-are-the-real-attack-surface">Sessions are the real attack surface</h2>
+<p>Even with perfect authentication, session handling fails:</p>
+<ul>
+<li>session IDs must be <strong>unguessable</strong> (128 bits of entropy, at minimum)</li>
+<li>must be <strong>rotated on privilege change</strong> (session fixation)</li>
+<li>must be tied to <strong>TLS</strong> and marked <code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code></li>
+<li><strong>logout must invalidate server-side</strong>, not just clear a cookie</li>
+<li><strong>expiry must be absolute as well as idle</strong></li>
+<li>Watch for session IDs in URLs (they end up in logs and <code>Referer</code> headers)</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Authentication</strong></td>
+<td>Proving identity</td>
+</tr>
+<tr>
+<td><strong>Authorisation</strong></td>
+<td>Deciding permissions</td>
+</tr>
+<tr>
+<td><strong>MFA / 2FA</strong></td>
+<td>Multiple independent factors</td>
+</tr>
+<tr>
+<td><strong>Something you know/have/are</strong></td>
+<td>The three factor categories</td>
+</tr>
+<tr>
+<td><strong>Offline attackable</strong></td>
+<td>Verifier can be attacked without rate limits</td>
+</tr>
+<tr>
+<td><strong>Salt / pepper</strong></td>
+<td>Per-user randomness preventing precomputation</td>
+</tr>
+<tr>
+<td><strong>bcrypt / Argon2</strong></td>
+<td>Deliberately slow password hashes</td>
+</tr>
+<tr>
+<td><strong>FIDO2 / passkey</strong></td>
+<td>Public-key credential bound to the origin</td>
+</tr>
+<tr>
+<td><strong>Session fixation</strong></td>
+<td>Attacker sets the session ID before login</td>
+</tr>
+<tr>
+<td><strong>Replay attack</strong></td>
+<td>Reusing a captured authentication exchange</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- hash identification and rate ---
+hashid --identify hash.txt
+john --wordlist=/usr/share/wordlists/rockyou.txt --show hash.txt
+hashcat -m 1400 hash.txt /usr/share/wordlists/rockyou.txt --session=aegis
+
+# --- the offline-vs-online distinction, demonstrated ---
+python3 - &lt;&lt;'PY'
+import hashlib, time
+pw = b&quot;correct horse battery staple&quot;
+for algo in (&quot;md5&quot;, &quot;sha1&quot;, &quot;sha256&quot;):
+    t = time.perf_counter()
+    for _ in range(200_000):
+        h = getattr(hashlib, algo)(pw).hexdigest()
+    dt = (time.perf_counter() - t) / 200_000 * 1e6
+    print(f&quot;  {algo:&lt;8} {h[:24]}...  {dt:.2f} us/hash -&gt; ~{1/dt*1e6:,.0f} guesses/sec/core&quot;)
+print()
+print(&quot;  A GPU does ~1e10/sec. A 25-character random passphrase does not care.&quot;)
+print(&quot;  A reused 8-character password is found in seconds. Length beats complexity.&quot;)
+PY
+
+# --- sessions: what does this host do? ---
+ss -tan state established | wc -l
+ls -la ~/.config/mozilla/firefox/*/cookies.sqlite 2&gt;/dev/null
+grep -rn &quot;session&quot; /etc/apache2 /etc/nginx 2&gt;/dev/null | head -3
+
+# --- account recovery is a security surface ---
+# (read your own policies)
+grep -rn &quot;recovery\|reset&quot; /etc/ssh/sshd_config 2&gt;/dev/null | head
+
+# --- 2FA implementations on this host ---
+command -v google-authenticator pam_google_authenticator 2&gt;/dev/null
+ls /etc/pam.d/ | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> measure offline attack rates against different hash schemes, and audit your own<br />
+session hygiene.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-03 &amp;&amp; cd ~/aegis/labs/mit858-03
+
+# --- 1. how fast is a hash, really? ---
+python3 - &lt;&lt;'PY' | tee 01-hash-speed.txt
+import hashlib, time
+pw = b&quot;password123&quot;
+N = 300_000
+print(f&quot;  {'algorithm':&lt;10}{'us/hash':&gt;10}{'guesses/sec/core':&gt;20}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*40)
+for algo in (&quot;md5&quot;, &quot;sha1&quot;, &quot;sha256&quot;, &quot;sha512&quot;):
+    fn = getattr(hashlib, algo)
+    t = time.perf_counter()
+    for i in range(N):
+        fn(pw + str(i).encode()).hexdigest()
+    dt = (time.perf_counter() - t) / N * 1e6
+    print(f&quot;  {algo:&lt;10}{dt:&gt;10.2f}{1/dt*1e6:&gt;20,.0f}&quot;)
+print()
+print(&quot;  Fast hashes are designed for speed. Password storage must be the opposite.&quot;)
+PY
+cat 01-hash-speed.txt
+
+# --- 2. a slow hash, compared ---
+cat &gt; slow.py &lt;&lt;'PY'
+import time, os, hashlib, hmac
+def argon_like(n=5000):
+    &quot;&quot;&quot;Stand-in for a deliberately slow KDF: iterated hashing.&quot;&quot;&quot;
+    t = time.perf_counter()
+    for i in range(n):
+        hashlib.sha256(b&quot;pw&quot; + str(i).encode()).hexdigest()
+    return (time.perf_counter() - t) / n * 1e6
+def bcrypt_like(n=5000):
+    &quot;&quot;&quot;Stand-in for scrypt/argon2: memory-hard iteration.&quot;&quot;&quot;
+    t = time.perf_counter()
+    for i in range(n):
+        p = hashlib.pbkdf2_hmac(&quot;sha256&quot;, b&quot;pw&quot; + str(i).encode(), b&quot;salt&quot;, 10000)
+    return (time.perf_counter() - t) / n * 1e6
+print(&quot;  (real bcrypt/argon2 are slower still, and deliberately so)&quot;)
+PY
+python3 slow.py
+
+# --- 3. salt: why it matters, demonstrated ---
+python3 - &lt;&lt;'PY' | tee 02-salt.txt
+import hashlib
+pw = b&quot;password123&quot;
+print(&quot;  NO SALT - every user with this password has the same hash:&quot;)
+for user in (&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;):
+    print(f&quot;    {user:&lt;8} {hashlib.md5(pw).hexdigest()}&quot;)
+print(&quot;  -&gt; precompute once, look up all three. Rainbow tables exploit this.&quot;)
+print()
+print(&quot;  WITH SALT - one hash per user, all different:&quot;)
+for user in (&quot;alice&quot;, &quot;bob&quot;, &quot;carol&quot;):
+    salt = user.encode()               # stand-in; real salts are random
+    print(f&quot;    {user:&lt;8} {hashlib.md5(salt + pw).hexdigest()}&quot;)
+print(&quot;  -&gt; the precomputation no longer applies. Crack each separately.&quot;)
+PY
+cat 02-salt.txt
+
+# --- 4. session hygiene, on your own machine ---
+{
+  echo &quot;=== cookie flags in your browser profile ===&quot;
+  for db in ~/.mozilla/firefox/*/cookies.sqlite ~/.config/google-chrome/*/Cookies; do
+    [ -f &quot;$db&quot; ] || continue
+    echo &quot;  profile: $db&quot;
+    sqlite3 &quot;$db&quot; &quot;SELECT name, host, isSecure, isHttpOnly FROM cookies LIMIT 10;&quot; 2&gt;/dev/null | sed 's/^/    /'
+  done
+  echo
+  echo &quot;=== what a session cookie SHOULD look like ===&quot;
+  cat &lt;&lt;'EOF'
+    Set-Cookie: sessionid=&lt;128 bits of entropy&gt;; Secure; HttpOnly; SameSite=Lax; Path=/
+    - Secure     : only over TLS
+    - HttpOnly   : JavaScript cannot read it (kills XSS cookie theft)
+    - SameSite   : limits CSRF
+    - rotated    : a new value at login, and at every privilege change
+    - absolute expiry as well as idle timeout
+EOF
+} 2&gt;&amp;1 | tee 03-sessions.txt
+
+# --- 5. the design question, written out ---
+cat &gt; 04-design.md &lt;&lt;'EOF'
+# Designing authentication for something real
+
+## If you can use passkeys: use them
+- Nothing phishable: the credential is bound to the origin
+- Nothing to steal server-side: only a public key is stored
+- No database breach gives a usable credential
+
+## If you must use passwords
+1. length over complexity (NIST guidance: allow at least 64 characters)
+2. no composition rules (no &quot;one uppercase, one symbol&quot;) - they push users to
+   predictable substitutions, and do not meaningfully raise resistance
+3. no forced rotation (it produces `Password1!`, `Password2!`)
+4. check against a breach corpus at the service, not in the client's head
+5. store with a memory-hard KDF: Argon2id, scrypt, or bcrypt with a high cost
+6. rate-limit per account and per source, without account lockout
+   (lockout is a denial-of-service against the user)
+7. support a password manager by allowing paste and long input
+
+## Second factor
+- TOTP codes: phishable, replayable within the window
+- push approval: bound to the request, safer
+- FIDO2: the only factor that resists phishing by design
+
+## Sessions
+- 128+ bits of entropy, from a CSPRNG
+- rotate on login and on every privilege change (fixes session fixation)
+- invalidate server-side on logout
+- absolute and idle expiry
+
+## Recovery
+Account recovery is an authentication path and must be as strong as login.
+A &quot;security question&quot; whose answer is on your public social media is not a factor.
+EOF
+cat 04-design.md
+</code></pre>
+<p><strong>Step 1 is the argument for length over complexity</strong>: a fast hash does millions of guesses per<br />
+second per core, so the only defence is either a slow KDF or a password long enough that guessing<br />
+is hopeless.</p>
+<p><strong>Record:</strong> <code>04-design.md</code> — this is the checklist for Tier 4.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the three authentication factor categories?</li>
+<li>Why do long passphrases beat complex short passwords?</li>
+<li>What makes a hash "offline attackable", and why does that matter?</li>
+<li>What does FIDO2 do that a password plus a code cannot?</li>
+<li>Name three things that must happen to a session ID at login.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Password Hashing</strong> → <strong>Authentication Bypass</strong> → <strong>JWT</strong> → <strong>Session Fixation</strong> →<br />
+<strong>Credential Exposure</strong>.</p>

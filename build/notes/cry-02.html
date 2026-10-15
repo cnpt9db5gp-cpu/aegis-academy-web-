@@ -1,0 +1,433 @@
+<h1 id="block-ciphers-modes-of-operation-and-security-notions">Block Ciphers, Modes of Operation and Security Notions</h1>
+<h2 id="summary">Summary</h2>
+<p>A block cipher is a permutation on 128-bit blocks. That is all it is — a function with no<br />
+security properties of its own. Everything about <em>how you use it</em> is called a <strong>mode of<br />
+operation</strong>, and nearly every real-world crypto failure is a bad mode.</p>
+<p>The course's framing: the block cipher is the primitive, the mode is the<br />
+protocol, and the protocol is what has security properties.</p>
+<blockquote>
+<p>Companion to <code>cs161-02</code>'s IND-CPA. This note covers modes in depth;<br />
+that one covers the definition they must satisfy.</p>
+</blockquote>
+<h2 id="the-block-cipher-itself">The block cipher itself</h2>
+<pre><code class="language-text">  AES: 128-bit blocks, 128/192/256-bit keys
+        operates on ONE block, independently
+        is a permutation: every input has exactly one output
+        has NO security property on its own beyond being hard to invert
+        without the key
+
+  THE PADDING PROBLEM:
+        plaintext is not a multiple of 16 bytes
+        ISO 10126 / PKCS#7 adds bytes of value n, n+1 times
+        if the padding is valid on decryption, you learn something
+
+  THE TIV (random initialisation vector):
+        AES-CTR and AES-GCM accept a random IV.
+        with a uniform random IV over a large space, the scheme is
+        IND-CPA secure for very many messages. That is the formal
+        justification for &quot;use a random IV&quot;.
+</code></pre>
+<h2 id="the-five-modes-and-what-each-one-is-good-for">The five modes, and what each one is good for</h2>
+<pre><code class="language-text">  MODE     SCRAMBLES?   RANDOMISED?   INTEGRITY?   USE IT FOR
+  ECB      no           no            no           NOTHING
+  CBC      yes          yes (IV)      no           legacy only
+  CTR      yes          yes (nonce)   no           bulk data, disk
+  CFB/OFB  yes          yes (IV)      no           legacy streaming
+  GCM      yes          yes (nonce)   YES          almost everything
+</code></pre>
+<h3 id="ecb-and-why-it-is-the-textbook-example">ECB, and why it is the textbook example</h3>
+<pre><code class="language-text">  ECB encrypts each block independently:
+
+    plaintext : [P1][P2][P3][P4]
+    ciphertext: [E(P1)][E(P2)][E(P3)][E(P4)]
+
+  Identical plaintext blocks give identical ciphertext blocks, always.
+  So the structure of the plaintext is VISIBLE in the ciphertext.
+
+  For a picture of a penguin, you can see the penguin. Not because you
+  decrypted anything, but because you can see where the colours repeat.
+
+  ECB FAILS IND-CPA trivially and it is the most famous image in
+  cryptography. Run the demo.
+</code></pre>
+<pre><code class="language-python"># ECB vs CBC, the actual difference, in 20 lines
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+import os, collections
+key = os.urandom(32); iv = os.urandom(16)
+# &quot;records&quot; where several are identical - like a database, like a filesystem
+pt = b&quot;&quot;.join([b&quot;user:alice:role:a&quot;]*6 + [b&quot;user:bob__:role:_&quot;]*6)
+def enc(m, data):
+    c = Cipher(algorithms.AES(key), m, backend=default_backend())
+    e = c.encryptor(); e.update(data) or None
+    return e.update(b&quot;&quot;) if False else e.__class__ and _run(e, data)
+def _run(e, data): return e.update(data) + (e.finalize() if e.finalize else b&quot;&quot;)
+# (simplified for readability)
+def run(mode, ivb, data):
+    c = Cipher(algorithms.AES(key), mode(ivb), backend=default_backend())
+    e = c.encryptor(); ct = e.update(data) + e.finalize()
+    return ct
+ecb = run(modes.ECB(), None, pt)
+cbc = run(modes.CBC(), iv, pt)
+for name, ct in ((&quot;ECB&quot;, ecb), (&quot;CBC&quot;, cbc)):
+    blocks = [ct[i:i+16] for i in range(0, len(ct), 16)]
+    d = collections.Counter(blocks)
+    print(f&quot;  {name}: {len(blocks)} blocks, {len(d)} distinct, &quot;
+          f&quot;max repeat {max(d.values())}x&quot;)
+print(f&quot;\n  plaintext has 12 identical pairs. ECB shows it. CBC does not.&quot;)
+</code></pre>
+<h3 id="cbc">CBC</h3>
+<pre><code class="language-text">  C1 = E(P1 XOR IV)
+  C2 = E(P2 XOR C1)
+  ...
+
+  Properties:
+    + identical plaintext blocks give DIFFERENT ciphertext (chaining)
+    - serial: block N cannot be encrypted until block N-1 is done
+    - a corrupted ciphertext block corrupts the NEXT plaintext block too
+    - bit flipping: flip a bit in C1, and P2 changes in a chosen way
+    - NO integrity: the attacker CAN modify your plaintext predictably
+
+  BIT FLIPPING, precisely:
+    C1 = E(P1 XOR IV)
+    P1' = D(C1) XOR IV'      where IV' is the attacker's
+    So: the attacker cannot change C1, but they can choose IV' to
+    control P1 arbitrarily.
+    In a session token, flipping &quot;role=user&quot; into &quot;role=adm &quot; is a
+    textbook CBC attack. This is why CBC needs a MAC.
+</code></pre>
+<h3 id="ctr">CTR</h3>
+<pre><code class="language-text">  Ci = Pi XOR E(k, nonce || counter_i)
+
+  + parallelisable (the whole point, for disk and network throughput)
+  + random access: decrypt block N without touching blocks 1..N-1
+  + no padding (XOR a keystream, so length need not be a multiple)
+  - the counter MUST NOT REPEAT under a key (nonce reuse = keystream reuse)
+  - NO integrity (the attacker XORs whatever they like into your plaintext)
+
+  THE COUNTER RULE:
+    if the counter is w bits and the block is 128 bits, you may encrypt
+    2^w messages under one key. 32-bit counters =&gt; birthday collision at
+    2^16 messages. Choose the counter width accordingly, or rotate keys.
+</code></pre>
+<h3 id="gcm-the-one-you-should-default-to">GCM: the one you should default to</h3>
+<pre><code class="language-text">  GCM is CTR mode plus GHASH (a polynomial MAC over GF(2^128)).
+
+  YOU GET: confidentiality AND integrity in one pass, with an
+  optional additional authenticated data (AAD) field.
+
+  THE CATASTROPHE: GCM's authentication strength degrades FAST with
+  message reuse under one nonce.
+    nonce reuse #1:  ~1/2^32 forgery chance
+    nonce reuse #2:  ~1/2^24
+    (each reuse gives an independent equation)
+  So a few thousand reused nonces degrades it meaningfully.
+
+  This is the reason libraries have an explicit &quot;never reuse a nonce&quot;
+  invariant, and the reason random 96-bit nonces exist (birthday at
+  2^48 messages is safe enough for realistic volumes).
+
+  THE OTHER FAILURE: if the authentication TAG is not checked, or is
+  checked after the plaintext is used, GCM degrades to unauthenticated
+  CTR. Verify the tag, first, in constant time.
+</code></pre>
+<h2 id="security-notions-and-what-they-mean-in-practice">Security notions, and what they mean in practice</h2>
+<pre><code class="language-text">  IND-CPA      an eavesdropper learns nothing
+               satisfied by: AES-GCM with a random nonce, AES-CTR
+               NOT by: ECB, or CTR with a fixed nonce
+
+  IND-CCA2     an adversary can ask for decryptions and still learns
+               nothing; chosen-ciphertext resistant
+               satisfied by: GCM (with the tag checked), HMAC-then-encrypt
+               NOT by: CBC with no MAC, or anything with a padding oracle
+
+  AEAD         authenticated encryption with associated data: one
+               construction that gives both at once
+               this is what &quot;encrypt this HTTP header along with the
+               body, and prove it was not changed&quot; means
+
+  THE PRACTICAL TRANSLATION:
+    - the mode gives you IND-CPA or IND-CCA2
+    - the nonce/IV handling decides whether you actually GET it
+    - the tag check decides whether an attacker can TELL you are using
+      an AEAD at all
+</code></pre>
+<h2 id="choosing-honestly">Choosing, honestly</h2>
+<pre><code class="language-text">  NEW SYSTEM:      AES-256-GCM or ChaCha20-Poly1305. Nothing else.
+                   Not because AES is better, but because the mode
+                   question disappears when it is not yours to answer.
+
+  LEGACY CBC:      keep it, but add encrypt-then-MAC with a separate key
+                   and a constant-time tag comparison.
+
+  NEVER:           ECB. Ever. For any reason, including &quot;the data is
+                   small&quot;.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Block cipher</strong></td>
+<td>A permutation on fixed-size blocks</td>
+</tr>
+<tr>
+<td><strong>Mode of operation</strong></td>
+<td>How you apply a block cipher to a message</td>
+</tr>
+<tr>
+<td><strong>ECB</strong></td>
+<td>Independent blocks; leaks structure</td>
+</tr>
+<tr>
+<td><strong>CBC</strong></td>
+<td>Chained with an IV; serial; malleable</td>
+</tr>
+<tr>
+<td><strong>CTR</strong></td>
+<td>Keystream from encrypting a counter; parallel, random access</td>
+</tr>
+<tr>
+<td><strong>GCM</strong></td>
+<td>CTR + GHASH; authenticated encryption</td>
+</tr>
+<tr>
+<td><strong>AEAD</strong></td>
+<td>Authenticated encryption with associated data</td>
+</tr>
+<tr>
+<td><strong>Nonce / IV</strong></td>
+<td>Unique per key for CTR/GCM; random per message for CBC</td>
+</tr>
+<tr>
+<td><strong>TIV</strong></td>
+<td>The "random IV" that makes CTR/CBC IND-CPA secure</td>
+</tr>
+<tr>
+<td><strong>Padding oracle</strong></td>
+<td>Distinguishable padding errors leak the plaintext</td>
+</tr>
+<tr>
+<td><strong>Bit flipping</strong></td>
+<td>Modifying the IV/previous block to control plaintext</td>
+</tr>
+<tr>
+<td><strong>IND-CCA2</strong></td>
+<td>Resistant to chosen-ciphertext attack</td>
+</tr>
+<tr>
+<td><strong>Nonce reuse</strong></td>
+<td>Two messages under one nonce; catastrophic for GCM</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-02 &amp;&amp; cd ~/aegis/labs/cry-02
+pip install --quiet cryptography 2&gt;/dev/null || echo &quot;  (pip install cryptography)&quot;
+
+# --- 1. ECB vs CBC: the structure leak, demonstrated ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-ecb-vs-cbc.txt
+import os, collections
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+key, iv = os.urandom(32), os.urandom(16)
+# six identical blocks, then six different ones - a &quot;table&quot; shape
+pt = b&quot;&quot;.join([b&quot;user:alice:aa&quot;]*6 + [b&quot;user:bobbob:bb&quot;]*6)
+
+def run(mode, ivb, data):
+    c = Cipher(algorithms.AES(key), mode(ivb), backend=default_backend())
+    e = c.encryptor()
+    return e.update(data) + e.finalize()
+
+for name, ct in ((&quot;ECB&quot;, run(modes.ECB(), None, pt)),
+                 (&quot;CBC&quot;, run(modes.CBC(), iv, pt)),
+                 (&quot;CTR&quot;, run(modes.CTR(iv), None, pt))):
+    blocks = [ct[i:i+16] for i in range(0, len(ct), 16)]
+    c = collections.Counter(blocks)
+    print(f&quot;  {name}: {len(blocks)} blocks -&gt; {len(c)} distinct, &quot;
+          f&quot;largest run of identical ciphertext blocks: {max(c.values())}x&quot;)
+print()
+print(&quot;  The plaintext has SIX pairs of identical blocks.&quot;)
+print(&quot;  ECB reproduces that structure exactly. CBC and CTR do not.&quot;)
+print(&quot;  An attacker learns this without decrypting anything at all.&quot;)
+print(&quot;  This is precisely why 'ECB fails IND-CPA' - it reveals a&quot;)
+print(&quot;  function of the plaintext, which is the definition of failure.&quot;)
+PY
+cat 01-ecb-vs-cbc.txt
+
+# --- 2. CBC bit flipping, done on purpose ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-bitflip.txt
+import os
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+key = os.urandom(32)
+def enc(iv, pt):
+    c = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend()).encryptor()
+    return iv, c.update(pt) + c.finalize()
+def dec(iv, ct):
+    d = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend()).decryptor()
+    return d.update(ct) + d.finalize()
+
+pt = b&quot;role=user;admin=0\n&quot;
+iv, ct = enc(os.urandom(16), pt)
+print(f&quot;  plaintext : {pt}&quot;)
+print(f&quot;  ciphertext: {ct.hex()}&quot;)
+print()
+print(&quot;  Now pretend we are an attacker who cannot decrypt and cannot&quot;)
+print(&quot;  re-encrypt. We cannot touch C1. But we CAN replace the IV,&quot;)
+print(&quot;  because IV is not authenticated and not secret.\n&quot;)
+# build the desired plaintext, XOR against the original to derive the new IV
+want = b&quot;role=user;admin=1\n&quot;
+new_iv = bytes(a ^ b ^ c for a, b, c in zip(iv, pt, want))
+print(f&quot;  desired   : {want}&quot;)
+print(f&quot;  new IV    : {new_iv.hex()}&quot;)
+print(f&quot;  decrypted with that IV: {dec(new_iv, ct)}&quot;)
+print()
+print(&quot;  CBC has NO integrity. The attacker did not break AES. They&quot;)
+print(&quot;  changed the IV, and the plaintext changed by their choice.&quot;)
+print(&quot;  A session token is exactly this shape: attacker-chosen fields&quot;)
+print(&quot;  inside a CBC-encrypted blob. Hence: MAC it.&quot;)
+PY
+cat 02-bitflip.txt
+
+# --- 3. nonce reuse under GCM: the forgery table ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-gcm-reuse.txt
+print(&quot;  === GCM authentication under nonce reuse ===&quot;)
+print()
+print(&quot;  GCM's tag is a polynomial in the ciphertext and the keystream.&quot;)
+print(&quot;  Reusing a nonce reuses the keystream, so each reused pair gives&quot;)
+print(&quot;  an independent forgery equation for the GHASH key.&quot;)
+print()
+print(f&quot;  {'reuse count':&lt;14} {'forgery probability':&lt;24} note&quot;)
+print(&quot;  &quot; + &quot;-&quot;*66)
+for k, note in [(1,&quot;~1/2^32&quot;), (2,&quot;~1/2^24&quot;), (3,&quot;~1/2^20&quot;),
+                (4,&quot;~1/2^18&quot;), (10,&quot;~1/2^13&quot;), (100,&quot;~1/2^7&quot;)]:
+    p = 2.0 ** (-32 + 4 * (k - 1)) if k &gt; 1 else 2.0**-32
+    print(f&quot;  {k:&lt;14} {note:&lt;24} {'unusable' if k &gt;= 10 else 'still strong' if k &lt; 3 else 'degrading'}&quot;)
+print()
+print(&quot;  GCM is only safe with UNIQUE nonces. Random 96-bit nonces are&quot;)
+print(&quot;  the standard answer: a birthday collision needs ~2^48 messages,&quot;)
+print(&quot;  which no realistic system encrypts under one key.&quot;)
+print()
+print(&quot;  What does NOT work: 'nonce = counter that resets on restart'.&quot;)
+print(&quot;  What does NOT work: 'nonce = random(md5(timestamp))'.&quot;)
+print(&quot;  What does NOT work: 'nonce = uuid4()' if the RNG is seeded.&quot;)
+print()
+print(&quot;  THE LIBRARY INVARIANT, and it is not advisory:&quot;)
+print(&quot;    any nonce reuse under one key = the key is burned&quot;)
+print(&quot;    libraries often track this and refuse to proceed&quot;)
+PY
+cat 03-gcm-reuse.txt
+
+# --- 4. the tag check, and where it goes wrong ---
+cat &gt; 04-tag-order.md &lt;&lt;'EOF'
+# Where the tag check goes wrong
+
+```python
+# WRONG: decrypt first, verify later
+pt = decrypt(ciphertext, key)          # attacker-controlled data, now live
+if verify_tag(pt, tag, key): ...
+# The decryption already happened. Any error path, any allocation, any
+# decompression has already run on unauthenticated data.
+
+# RIGHT: verify first, decrypt second
+if not verify_tag(ciphertext, tag, key):
+    raise InvalidTag()                 # constant time, no branch on content
+pt = decrypt(ciphertext, key)
+```
+
+## The three ways GCM is misconfigured
+
+| Mistake | Consequence |
+|---|---|
+| Tag not verified | AEAD degrades to unauthenticated CTR; the attacker can flip bits in your plaintext with no detection |
+| Tag verified after the plaintext is used | You have already acted on forged data (SSRF, SQL, a redirect) |
+| Nonce reused | Forgery probability rises roughly 2^4 per reuse |
+| Tag compared non-constant-time | A timing oracle on authentication |
+
+## What to look for in a code review
+
+- [ ] the tag is verified before any use of the plaintext
+- [ ] the tag comparison is constant time (`hmac.compare_digest`,
+      `crypto.verify`, or the AEAD primitive itself — not `==`)
+- [ ] the nonce comes from the library, not from a counter you wrote
+- [ ] the AAD includes anything that must not be modifiable (a record
+      id, a tenant id, a protocol version) — this is the whole point
+      of &quot;associated data&quot;
+- [ ] the key is 32 bytes and from a CSPRNG
+
+## AAD is underused and it matters
+
+```
+  AEAD(plaintext, aad) -&gt; (ciphertext, tag)
+
+  The AAD is authenticated but not encrypted. Put in it:
+    - the API endpoint path
+    - the user or tenant id
+    - a record id or a version number
+    - a protocol version
+
+  Then a ciphertext stolen from /user/42 cannot be replayed to
+  /user/43, and a downgrade to an old protocol is detected.
+```
+EOF
+cat 04-tag-order.md
+
+# --- 5. what the mode table means for an audit ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. find the crypto in use ===&quot;
+grep -rniE &quot;AES|DES|3DES|ChaCha|RC4|Blowfish|cipher|CBC|ECB|GCM|CTR|PKCS&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.go&quot; \
+     --include=&quot;*.java&quot; --include=&quot;*.rb&quot; . 2&gt;/dev/null | head -20 | sed 's/^/  /'
+
+echo; echo &quot;=== 2. flag the mode (ECB and RC4 are instant findings) ===&quot;
+grep -rniE &quot;ECB|MODE_ECB|M_ECB|RC4|DES[^C]|/ECB/|DESede&quot; . 2&gt;/dev/null | sed 's/^/  FINDING: /'
+
+echo; echo &quot;=== 3. look for home-grown composition ===&quot;
+grep -rniE &quot;encrypt\(.*decrypt\(|pad\(|unpad\(|pkcs|padding&quot; --include=&quot;*.py&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 4. look for a manual tag check (it should not exist) ===&quot;
+grep -rniE &quot;verify.*tag|check.*tag|== *tag|tag *==&quot; . 2&gt;/dev/null | sed 's/^/  /'
+
+echo; echo &quot;=== 5. nonce/IV handling ===&quot;
+grep -rniE &quot;nonce|iv *=|iv=|random_bytes\(16\)|os\.urandom&quot; . 2&gt;/dev/null | head -15 | sed 's/^/  /'
+echo
+echo &quot;  FLAG: iv = b'\\x00' * 16   or  iv = 0   or  iv = os.urandom(0)&quot;
+grep -rniE &quot;iv *= *(b?['\&quot;]0|b['\&quot;]\\\\x00|0 *[,)]|None)&quot; . 2&gt;/dev/null | sed 's/^/  FINDING: /'
+
+echo; echo &quot;=== 6. in the shell, for a config file ===&quot;
+grep -rniE &quot;cipher *[:=] *(aes|des|rc4|3des)|mode *[:=] *(ecb|cbc)|iv *[:=]&quot; \
+     /etc/ssh/sshd_config /etc/hosts 2&gt;/dev/null | grep -v &quot;^ *#&quot; | sed 's/^/  /'
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+</code></pre>
+<p><strong>Step 1 is the deliverable</strong>: three modes, the same plaintext, and the block-structure<br />
+comparison. ECB reproduces the plaintext's equality pattern; CBC and CTR do not. That is<br />
+IND-CPA failure demonstrated without decrypting anything.</p>
+<p><strong>Step 2</strong> is the one that connects to real token formats — CBC bit flipping changes a plaintext<br />
+field by <em>choice</em>, using only the ability to set the IV. No key, no decryption.</p>
+<p><strong>Record:</strong> <code>01-ecb-vs-cbc.txt</code> and <code>02-bitflip.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is a block cipher, and what security property does it have on its own?</li>
+<li>Why does ECB fail IND-CPA? Describe the failure without using the word "encrypt".</li>
+<li>How does CBC bit flipping let an attacker choose a plaintext?</li>
+<li>Give CTR's three advantages over CBC and its one fatal rule.</li>
+<li>What is GCM's weakness, and how does forgery probability grow with reuse?</li>
+<li>Why must the tag be verified before the plaintext is decrypted?</li>
+<li>What is AAD for, and give two things you would put in it?</li>
+<li>Name the mode you would default to for a new system and why.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>AES</strong> → <strong>Modes of Operation</strong> → <strong>ECB</strong> → <strong>Symmetric Encryption</strong> →<br />
+<strong>Padding Oracle</strong> → <strong>AEAD</strong>.<br />
+<code>cry-04</code> is where modes meet public-key crypto and padding oracles get their name.</p>

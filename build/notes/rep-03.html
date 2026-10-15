@@ -1,0 +1,264 @@
+<h1 id="risk-rating-business-impact-and-prioritisation">Risk Rating, Business Impact and Prioritisation</h1>
+<h2 id="summary">Summary</h2>
+<p>Severity is a judgement about business impact, not a score. The lecture's framing is that a<br />
+CVSS score measures the technical severity of a class of bug, while a risk rating measures the<br />
+damage a specific instance of it would do to a specific organisation — and those are different<br />
+numbers.</p>
+<p>The framing: <strong>severity is a sentence about the business, and the<br />
+number is at the end of it.</strong> A rating with no prerequisite and no<br />
+business impact is a number in search of a meaning.</p>
+<blockquote>
+<p>Companion to <code>cs161-01</code>'s threat model and <code>tcm-07</code>. This note is<br />
+the rating discipline specifically.</p>
+</blockquote>
+<h2 id="the-two-numbers-and-what-each-measures">The two numbers, and what each measures</h2>
+<pre><code class="language-text">  CVSS (and its successors)
+    measures the TECHNICAL SEVERITY OF A CLASS OF BUG
+    Attack Vector, Attack Complexity, Privileges Required,
+    User Interaction, Scope, Confidentiality/Integrity/Availability
+
+    Useful for: consistent internal language, prioritising a bug
+                backlog, comparing two instances of the same CVE
+    NOT useful for: deciding what your organisation should fix first
+    WHY: it does not know whether you have a database with
+         customer data behind that endpoint, whether the exploit is
+         one HTTP request away, or whether a WAF is in the way.
+
+  RISK RATING (yours)
+    measures THE DAMAGE THIS BUG WOULD DO HERE, TO THIS ORGANISATION
+    Likelihood (exploitability in this context)
+    × Impact (what it would cost this business)
+    with the prerequisite stated, so the reader can disagree
+
+  THE RELATIONSHIP: a Critical CVSS can be a Medium finding here, and
+  a Medium CVSS can be a Critical finding here. Both happen weekly.
+</code></pre>
+<h2 id="likelihood-five-factors-not-one">Likelihood: five factors, not one</h2>
+<pre><code class="language-text">  1. REACHABILITY
+     Is there a path from the internet, from an employee, from a
+     phishing email? Or is it only reachable after five other
+     compromises?
+
+  2. AUTHENTICATION
+     Unauthenticated &gt; any valid account &gt; a specific account &gt;
+     a privileged account &gt; physical access with the right equipment.
+
+  3. USER INTERACTION
+     None &gt; one click on a link you sent &gt; opening a document you
+     were sent &gt; entering credentials you were asked for.
+
+  4. COMPLEXITY
+     One HTTP request &gt; a specific payload &gt; a race condition &gt; a
+     chain of three other vulnerabilities.
+
+  5. DETECTION AND MITIGATION PRESENT
+     Does a WAF block it? Is the segment isolated? Would the SOC
+     see an attempt? A finding with a reliable mitigation in place
+     is lower likelihood - and the mitigation is itself a finding if
+     it is the only thing standing there.
+
+  AND THE ONE PEOPLE FORGET:
+  6. EXPLOITABILITY TRACK RECORD
+     Is there a public exploit? Is it in Metasploit? Is it in a
+     scanner's default module set? A public exploit changes
+     likelihood more than anything else on this list.
+</code></pre>
+<h2 id="impact-what-it-costs-in-the-organisations-language">Impact: what it costs, in the organisation's language</h2>
+<pre><code class="language-text">  CONFIDENTIALITY
+    what data, how much, how sensitive
+    &quot;the customer database, 41,882 records including partial card
+     data&quot; is an impact statement.
+    &quot;data may be exposed&quot; is not.
+
+  INTEGRITY
+    what can be changed, by whom, and what does a wrong change do
+    &quot;an unauthenticated user can change a customer's delivery
+     address&quot; is very different from &quot;an unauthenticated user can
+     change a customer's delivery address, which affects billing
+     and, for address-change fraud, is a regulated notification in
+     [jurisdiction]&quot;.
+
+  AVAILABILITY
+    how long, how recoverable, and who notices
+    &quot;the service is unavailable until someone restarts it&quot; is very
+     different from &quot;the service is unavailable and the loss is
+     4 hours of trading, £X, with a [regulator] notification
+     requirement&quot;.
+
+  THE TEST: could you write the impact sentence with a NUMBER in it,
+  and would that number mean something to someone's finance team?
+  If not, it is not an impact statement yet.
+</code></pre>
+<h2 id="the-matrix-and-why-the-prerequisite-is-the-real-answer">The matrix, and why the prerequisite is the real answer</h2>
+<pre><code class="language-text">                      IMPACT
+                  low        high
+             +-----------+-----------+
+   LIKELY    |  Medium   |  CRITICAL |
+   (one req) |           |           |
+             +-----------+-----------+
+   POSSIBLE  |  Low      |  Medium   |
+   (a chain) |           |           |
+             +-----------+-----------+
+   UNLIKELY  |  Info     |  Low      |
+   (needs X) |           |           |
+             +-----------+-----------+
+
+  THE PREREQUISITE IS WHERE THE MATRIX IS APPLIED.
+  Every cell is conditional on &quot;given that &lt;prerequisite&gt;&quot;.
+  Without that clause, the matrix has no meaning, because the reader
+  cannot tell whether their environment has the prerequisite.
+</code></pre>
+<h2 id="the-two-errors-and-the-corrective-for-each">The two errors, and the corrective for each</h2>
+<pre><code class="language-text">  ERROR 1: INFLATED
+    &quot;Critical&quot; for something with no reachable path.
+    WHY IT HAPPENS: the CVSS was 9.8 and nobody checked whether the
+    port was open.
+    THE CORRECTIVE: answer, in the finding, &quot;what must be true for
+    this to be exploited?&quot; If the answer is &quot;the attacker must
+    already be domain administrator&quot;, the finding is Medium at best,
+    and probably an aggregation of other findings.
+
+  ERROR 2: DEFLATED
+    &quot;Informational&quot; for something the client will not fix.
+    WHY IT HAPPENS: the tester could not demonstrate it.
+    THE CORRECTIVE: severity is about the business, not about your
+    ability to demonstrate it. &quot;The backup files are world-readable
+    and contain the full user database&quot; is Critical whether or not
+    you read them - and saying &quot;I did not read them&quot; is a strength,
+    not a weakness.
+
+  THE SAME CORRECTIVE FOR BOTH:
+    state the prerequisite explicitly, and let the reader apply the
+    matrix themselves. A finding that says &quot;exploitable by any
+    authenticated user, no user interaction&quot; can be rated correctly
+    by anyone in five seconds. A finding that says &quot;Critical&quot; can be
+    rated correctly by nobody.
+</code></pre>
+<h2 id="prioritisation-fixing-the-right-thing-first">Prioritisation: fixing the right thing first</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/rep-03 &amp;&amp; cd ~/aegis/labs/rep-03
+
+cat &gt; 01-matrix.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Score and prioritise. The NUMBER is the last thing; the
+prerequisite column is the first.&quot;&quot;&quot;
+FINDINGS = [
+ dict(id=&quot;F-01&quot;, title=&quot;Unauthenticated RCE on WEB-01 -&gt; customer DB&quot;,
+      reach=&quot;internal network&quot;, auth=&quot;none&quot;, interaction=&quot;none&quot;,
+      complexity=&quot;one HTTP request&quot;, exploit_public=True,
+      detect=False, impact_data=&quot;customer records, partial card data&quot;,
+      impact_int=&quot;&quot;, impact_avail=&quot;&quot;),
+ dict(id=&quot;F-02&quot;, title=&quot;SMB signing not required on 34 hosts&quot;,
+      reach=&quot;internal network&quot;, auth=&quot;any valid logon (relayed)&quot;,
+      interaction=&quot;one click on a link&quot;, complexity=&quot;one packet&quot;,
+      exploit_public=True, detect=False, impact_data=&quot;any account on the LAN&quot;,
+      impact_int=&quot;&quot;, impact_avail=&quot;&quot;),
+ dict(id=&quot;F-03&quot;, title=&quot;Kernel privesc, needs local admin first&quot;,
+      reach=&quot;already an admin&quot;, auth=&quot;administrator&quot;, interaction=&quot;none&quot;,
+      complexity=&quot;local exploit, offsets required&quot;, exploit_public=False,
+      detect=True, impact_data=&quot;unrestricted host access&quot;,
+      impact_int=&quot;&quot;, impact_avail=&quot;&quot;),
+ dict(id=&quot;F-04&quot;, title=&quot;HTTP headers missing CSP and HSTS&quot;,
+      reach=&quot;any client&quot;, auth=&quot;none&quot;, interaction=&quot;none&quot;,
+      complexity=&quot;none&quot;, exploit_public=False, detect=True,
+      impact_data=&quot;none directly&quot;, impact_int=&quot;none directly&quot;,
+      impact_avail=&quot;none directly&quot;),
+]
+
+def likelihood(f):
+    s = 0
+    s += {&quot;internet&quot;: 4, &quot;internal network&quot;: 3, &quot;any client&quot;: 2,
+          &quot;already an admin&quot;: 0}.get(f[&quot;reach&quot;], 1)
+    s += {&quot;none&quot;: 3, &quot;any valid logon (relayed)&quot;: 2, &quot;administrator&quot;: 0,
+          &quot;specific account&quot;: 1}.get(f[&quot;auth&quot;], 1)
+    s += {&quot;none&quot;: 2, &quot;one click on a link&quot;: 1, &quot;enter credentials&quot;: 0,
+          &quot;open a document&quot;: 0}.get(f[&quot;interaction&quot;], 1)
+    s += {&quot;one HTTP request&quot;: 3, &quot;one packet&quot;: 3, &quot;local exploit, offsets required&quot;: 0,
+          &quot;none&quot;: 3}.get(f[&quot;complexity&quot;], 1)
+    s += 2 if f[&quot;exploit_public&quot;] else 0
+    s -= 1 if f[&quot;detect&quot;] else 0
+    return max(s, 0)
+
+def impact(f):
+    s = 0
+    for v in (f[&quot;impact_data&quot;], f[&quot;impact_int&quot;], f[&quot;impact_avail&quot;]):
+        t = v.lower()
+        if any(k in t for k in (&quot;none&quot;, &quot;&quot;)): s -= 1
+        elif any(k in t for k in (&quot;customer&quot;, &quot;card&quot;, &quot;password&quot;,
+                                  &quot;any account&quot;, &quot;unrestricted&quot;)): s += 2
+        else: s += 1
+    return max(s, 0)
+
+MATRIX = {  # (likelihood, impact) -&gt; rating
+ (0,0):&quot;Informational&quot;,(0,1):&quot;Low&quot;,(0,2):&quot;Low&quot;,
+ (1,0):&quot;Low&quot;,         (1,1):&quot;Medium&quot;,(1,2):&quot;Medium&quot;,
+ (2,0):&quot;Low&quot;,         (2,1):&quot;Medium&quot;,(2,2):&quot;High&quot;,
+ (3,0):&quot;Medium&quot;,      (3,1):&quot;High&quot;,  (3,2):&quot;Critical&quot;,
+ (4,0):&quot;Medium&quot;,      (4,1):&quot;High&quot;,  (4,2):&quot;Critical&quot;,
+}
+
+print(f&quot;  {'ID':&lt;5} {'L':&lt;3} {'I':&lt;3} {'RATING':&lt;14} TITLE&quot;)
+print(&quot;  &quot; + &quot;-&quot;*84)
+rows = []
+for f in FINDINGS:
+    L, I = likelihood(f), impact(f)
+    rating = MATRIX.get((min(L,4), min(I,2)), &quot;Medium&quot;)
+    rows.append((L+I, L, I, rating, f))
+for tot, L, I, rating, f in sorted(rows, reverse=True):
+    print(f&quot;  {f['id']:&lt;5} {L:&lt;3} {I:&lt;3} {rating:&lt;14} {f['title']}&quot;)
+
+print()
+print(&quot;  THE PREREQUISITE, WHICH IS WHAT THE NUMBER IS CONDITIONAL ON:&quot;)
+for _, L, I, rating, f in sorted(rows, reverse=True):
+    print(f&quot;  {f['id']}: {rating}&quot;)
+    print(f&quot;    given: reachable from the {f['reach']}, requires {f['auth']},&quot;)
+    print(f&quot;    user interaction: {f['interaction']}, complexity: {f['complexity']}&quot;)
+    print(f&quot;    public exploit: {'yes' if f['exploit_public'] else 'no'}, &quot;
+          f&quot;detectability: {'yes' if f['detect'] else 'no'}&quot;)
+print()
+print(&quot;  NOTE F-03 and F-04. A kernel privesc that needs admin first is&quot;)
+print(&quot;  rated below a signing misconfiguration, because the signing&quot;)
+print(&quot;  misconfiguration is reachable by every user on the LAN with one&quot;)
+print(&quot;  click. That is usually right, and it is never what a CVSS&quot;)
+print(&quot;  score would have told you.&quot;)
+print()
+print(&quot;  NOTE F-04. No direct impact on any axis, so it scores Low on&quot;)
+print(&quot;  both and lands Informational - and it is STILL worth fixing,&quot;)
+print(&quot;  because it is the control that limits F-01 and F-02. Say that&quot;)
+print(&quot;  in the finding rather than pretending it is a High.&quot;)
+PY
+python3 01-matrix.py 2&gt;&amp;1 | tee 02-matrix.txt
+rm -f 01-matrix.py
+</code></pre>
+<h2 id="the-severity-sentence">The severity sentence</h2>
+<pre><code class="language-text">  WRITE IT AS A SENTENCE WITH THE NUMBER AT THE END.
+
+  GOOD  &quot;Any authenticated user on the internal network can relay an
+         authentication to any of 34 file servers and read every file
+         they can read. No user interaction beyond opening a link the
+         attacker sends. A public exploit exists. CRITICAL.&quot;
+
+  BAD   &quot;SMB signing issue. Severity: High. CVSS: 8.1.&quot;
+
+  WHY THE FIRST IS BETTER:
+    it contains the reachability, the authentication requirement, the
+    user interaction, the exploit availability, and the impact - all
+    of them - and a reader who disagrees with &quot;CRITICAL&quot; can identify
+    exactly which factor they disagree with. A reader who disagrees
+    with a bare number has nothing to push back on.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does CVSS measure, and what does a risk rating measure?</li>
+<li>Give the six likelihood factors, including the one people forget.</li>
+<li>What does an impact statement need in it to be useful?</li>
+<li>Draw the likelihood × impact matrix and state its axes.</li>
+<li>Why is the prerequisite clause the real content of the matrix?</li>
+<li>What causes inflated severity, and what is the corrective?</li>
+<li>What causes deflated severity, and what is the corrective?</li>
+<li>Why is an unfixable-proving finding often higher severity than a demonstrable one?</li>
+<li>What makes a severity sentence better than a bare number?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Risk Likelihood Impact</strong> → <strong>Pentest Reporting</strong> → <strong>Threat Model</strong> →<br />
+<strong>Remediation</strong> → <strong>Prioritisation</strong>.<br />
+<code>rep-04</code> turns these into the summary and the plan.</p>

@@ -1,0 +1,329 @@
+<h1 id="metaprogramming-and-build-systems">Metaprogramming and Build Systems</h1>
+<h2 id="summary">Summary</h2>
+<p>Software is built by programs, not people. <strong>Build systems</strong> turn source into artefacts in a<br />
+repeatable way, and <strong>dependency managers</strong> fetch and pin the libraries your build needs.</p>
+<p>For a security student this is not busywork. Three concrete reasons:</p>
+<ol>
+<li><strong>You will compile vulnerable programs</strong> (Tier 3) and need to know which flags disable which<br />
+   mitigations.</li>
+<li><strong>You will need to install Python tooling correctly</strong> — <code>pipx</code>, venvs, and dependency<br />
+   conflicts are a daily annoyance on Kali (see <code>kr-05</code>).</li>
+<li><strong>Reproducibility is a professional skill.</strong> "It worked on my machine" is not acceptable<br />
+   when you hand someone a tool.</li>
+</ol>
+<h2 id="compiling-c-the-flags-that-decide-whether-an-exploit-works">Compiling C: the flags that decide whether an exploit works</h2>
+<pre><code class="language-bash">gcc -g -O0 -fno-stack-protector -no-pie -z execstack vuln.c -o vuln
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Effect</th>
+<th>Why you care</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-g</code></td>
+<td>debug symbols</td>
+<td>gdb can show you variable names</td>
+</tr>
+<tr>
+<td><code>-O0</code> / <code>-O2</code></td>
+<td>no optimisation / optimise</td>
+<td>Optimisation removes patterns to match</td>
+</tr>
+<tr>
+<td><code>-fno-stack-protector</code></td>
+<td><strong>removes stack canaries</strong></td>
+<td>An overflow no longer aborts</td>
+</tr>
+<tr>
+<td><code>-fno-pie</code> / <code>-no-pie</code></td>
+<td><strong>fixed load address</strong></td>
+<td>Hardcoded addresses work</td>
+</tr>
+<tr>
+<td><code>-z execstack</code></td>
+<td><strong>executable stack</strong></td>
+<td>Shellcode can run directly</td>
+</tr>
+<tr>
+<td><code>-static</code></td>
+<td>link everything</td>
+<td>No GOT/PLT to overwrite, bigger binary</td>
+</tr>
+<tr>
+<td><code>-m32</code></td>
+<td>32-bit build</td>
+<td>x86 shellcode and classic exploit courses are 32-bit</td>
+</tr>
+</tbody>
+</table>
+<p>Check what you got:</p>
+<pre><code class="language-bash">checksec --file=./vuln
+readelf -l ./vuln | grep GNU_STACK
+file ./vuln
+</code></pre>
+<p><strong>This one command is the bridge to Tier 3.</strong> Every mitigation lecture exists because these flags<br />
+can turn it off.</p>
+<h2 id="make-the-smallest-useful-build-system">make: the smallest useful build system</h2>
+<pre><code class="language-make"># Makefile
+CC      = gcc
+CFLAGS  = -g -O0 -Wall -fno-stack-protector -no-pie
+TARGET  = vuln
+SRC     = vuln.c
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+    $(CC) $(CFLAGS) -o $@ $&lt;
+
+clean:
+    rm -f $(TARGET)
+
+.PHONY: all clean
+</code></pre>
+<pre><code class="language-bash">make            # build
+make clean      # tidy
+</code></pre>
+<p>The rule <code>target: dependencies</code> followed by a tab-indented recipe is the entire concept. <code>make</code> is<br />
+older than most people's careers and still runs most C and C++ builds on earth.</p>
+<h2 id="python-dependency-management-the-kali-relevant-part">Python dependency management (the Kali-relevant part)</h2>
+<pre><code class="language-bash"># WRONG: system-wide install, fights apt, breaks the OS
+sudo pip install requests
+
+# RIGHT: single CLI tool, fully isolated
+pipx install yt-dlp
+pipx list
+pipx upgrade-all
+
+# RIGHT: project-scoped
+python3 -m venv ~/aegis/venvs/project
+source ~/aegis/venvs/project/bin/activate
+pip install requests
+pip freeze &gt; requirements.txt      # pin versions = reproducibility
+deactivate
+
+# Reading requirements:
+cat requirements.txt
+# requests==2.31.0
+# urllib3==2.0.7
+</code></pre>
+<p><code>pip freeze &gt; requirements.txt</code> is the single highest-value habit in Python work. A script that<br />
+worked on your machine will work on someone else's if you ship the freeze file.</p>
+<h2 id="dependency-risk-a-security-property-not-a-bookkeeping-one">Dependency risk — a security property, not a bookkeeping one</h2>
+<pre><code class="language-bash">pip list                                   # what do I have?
+pip show requests                          # what depends on what?
+pipdeptree -g                              # the dependency graph
+pip install --dry-run some-package         # what WOULD it change?
+pip download some-package --no-deps        # inspect without installing
+pip-audit                                  # known CVEs in installed packages (needs: pipx install pip-audit)
+pip index versions some-package            # available versions
+</code></pre>
+<p><strong>Threat model for supply chain:</strong> installing a package runs arbitrary code from the maintainer<br />
+(and transitively from everyone they depend on). A typosquatted package name is a real attack. In<br />
+a work context, <code>pip install</code> should be a deliberate, reviewable act — not something a script does<br />
+on its own.</p>
+<h2 id="makefiles-shell-and-python-as-metaprogramming">Makefiles, shell and Python as metaprogramming</h2>
+<p>All three are "programs that write or drive programs":</p>
+<ul>
+<li>a <code>Makefile</code> is a program that decides what to compile and in what order</li>
+<li>a shell script that emits commands is metaprogramming</li>
+<li>Python's decorators, metaclasses and generators are metaprogramming in the strict sense</li>
+</ul>
+<p>You already use the first two every day. You will meet the third in <code>angr</code> (Tier 3), which<br />
+synthesises program paths rather than running them.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Compile / build</strong></td>
+<td>Transform source into an executable artefact</td>
+</tr>
+<tr>
+<td><strong>Toolchain</strong></td>
+<td>compiler + linker + libc + headers</td>
+</tr>
+<tr>
+<td><strong>Static vs dynamic linking</strong></td>
+<td>copy code into the binary vs resolve at runtime</td>
+</tr>
+<tr>
+<td><strong>GOT / PLT</strong></td>
+<td>Dynamic linking's function resolution machinery</td>
+</tr>
+<tr>
+<td><strong><code>make</code></strong></td>
+<td>Dependency-driven build tool</td>
+</tr>
+<tr>
+<td><strong>Dependency</strong></td>
+<td>A library your program requires</td>
+</tr>
+<tr>
+<td><strong>Virtual environment</strong></td>
+<td>Isolated Python site-packages directory</td>
+</tr>
+<tr>
+<td><strong><code>pipx</code></strong></td>
+<td>Package manager for isolated Python CLI tools</td>
+</tr>
+<tr>
+<td><strong>Metaprogramming</strong></td>
+<td>Writing programs that generate or transform other programs</td>
+</tr>
+<tr>
+<td><strong>Lock/freeze file</strong></td>
+<td>Pinned dependency versions for reproducibility</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- is a compiler even installed? (it usually is not on a slim install) ---
+command -v gcc g++ make
+gcc --version | head -1
+
+# --- compile with explicit mitigations off, then audit ---
+cat &gt; /tmp/t.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+int main(void){ printf(&quot;hello\n&quot;); return 0; }
+EOF
+gcc -Wall -Wextra -g -O0 -fno-stack-protector -no-pie -z execstack /tmp/t.c -o /tmp/t
+checksec --file=/tmp/t
+file /tmp/t
+readelf -h /tmp/t | grep -E 'Type|Entry'
+
+# --- python tooling, correctly ---
+command -v pipx pip3 python3
+pipx list 2&gt;/dev/null
+python3 -m venv /tmp/venv-demo &amp;&amp; /tmp/venv-demo/bin/pip install --quiet requests
+/tmp/venv-demo/bin/pip freeze
+rm -rf /tmp/venv-demo /tmp/t /tmp/t.c
+
+# --- dependency security ---
+pipx install pip-audit 2&gt;/dev/null &amp;&amp; pip-audit 2&gt;&amp;1 | head -20
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> compile a deliberately vulnerable binary with known mitigations off, and inspect<br />
+the result — the setup for every Tier 3 exploitation lecture.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ms-06 &amp;&amp; cd ~/aegis/labs/ms-06
+
+# --- 1. toolchain inventory ---
+{
+  echo &quot;=== compilers and build tools ===&quot;
+  for t in gcc g++ cc make cmake clang rustc go javac; do
+    printf &quot;%-8s %s\n&quot; &quot;$t&quot; &quot;$(command -v $t || echo 'not installed')&quot;
+  done
+  echo
+  echo &quot;=== gcc version ===&quot;; gcc --version | head -1
+  echo &quot;=== glibc ===&quot;; ldd --version | head -1
+} | tee 01-toolchain.txt
+
+# --- 2. write a deliberately vulnerable program ---
+cat &gt; vuln.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+
+void vulnerable(const char *input) {
+    char buffer[32];
+    strcpy(buffer, input);            /* unbounded copy - the bug */
+    printf(&quot;copied: %s\n&quot;, buffer);
+}
+
+int safe(const char *input) {
+    char buffer[32];
+    strncpy(buffer, input, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0'; /* null terminate - still bounded */
+    printf(&quot;copied safely: %s\n&quot;, buffer);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc &lt; 2) { fprintf(stderr, &quot;usage: %s &lt;string&gt;\n&quot;, argv[0]); return 1; }
+    if (getenv(&quot;SAFE&quot;)) safe(argv[1]); else vulnerable(argv[1]);
+    return 0;
+}
+EOF
+
+# --- 3. build it THREE ways: hardened, default, and weaponised ---
+gcc -Wall -Wextra -g -O0 -fno-stack-protector -no-pie -z execstack vuln.c -o vuln-weak
+gcc -Wall -Wextra -g -O0 vuln.c -o vuln-default
+gcc -Wall -Wextra -g -O0 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pie -fPIE vuln.c -o vuln-hard
+
+# --- 4. audit all three ---
+{
+  for b in vuln-hard vuln-default vuln-weak; do
+    echo &quot;==========================================&quot;
+    echo &quot;BINARY: $b&quot;
+    echo &quot;==========================================&quot;
+    file ./$b
+    checksec --file=./$b 2&gt;/dev/null || echo &quot;(install checksec: sudo apt install checksec)&quot;
+    echo
+  done
+} | tee 02-hardening-comparison.txt
+
+# --- 5. the difference is observable ---
+./vuln-hard &quot;$(python3 -c 'print(&quot;A&quot;*200)')&quot; ; echo &quot;hard exit:   $?&quot;
+./vuln-default &quot;$(python3 -c 'print(&quot;A&quot;*200)')&quot; ; echo &quot;default exit:$?&quot;
+./vuln-weak &quot;$(python3 -c 'print(&quot;A&quot;*200)')&quot;   ; echo &quot;weak exit:   $?&quot;
+
+# --- 6. write the Makefile ---
+cat &gt; Makefile &lt;&lt;'MAKE'
+CC     := gcc
+WARN   := -Wall -Wextra
+DEBUG  := -g -O0
+WEAK   := -fno-stack-protector -no-pie -z execstack
+TARGETS := vuln-weak vuln-default vuln-hard
+
+all: $(TARGETS)
+
+vuln-weak: vuln.c
+    $(CC) $(WARN) $(DEBUG) $(WEAK) -o $@ $&lt;
+
+vuln-default: vuln.c
+    $(CC) $(WARN) $(DEBUG) -o $@ $&lt;
+
+vuln-hard: vuln.c
+    $(CC) $(WARN) $(DEBUG) -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pie -fPIE -o $@ $&lt;
+
+clean:
+    rm -f $(TARGETS)
+
+.PHONY: all clean
+MAKE
+make clean &amp;&amp; make
+ls -la vuln-*
+
+# --- 7. reproducibility ---
+{
+  echo &quot;=== versions this build depends on ===&quot;
+  gcc --version | head -1
+  ldd --version | head -1
+  echo
+  echo &quot;=== linked libraries (vuln-hard) ===&quot;
+  ldd ./vuln-hard
+} | tee 03-reproducibility.txt
+</code></pre>
+<p><strong>Read the <code>02-hardening-comparison.txt</code> table carefully.</strong> You have now, with your own hands,<br />
+turned each mitigation off one at a time. Every Tier 3 lecture about canaries, NX, PIE and RELRO<br />
+refers to exactly this output.</p>
+<p><strong>Record:</strong> which protections did <code>gcc</code> enable <em>by default</em> on Kali, and which needed a flag?</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What do <code>-fno-stack-protector</code>, <code>-no-pie</code> and <code>-z execstack</code> each disable?</li>
+<li>Why must you compile with <code>-g</code> before gdb can show variable names?</li>
+<li><code>pip install --user</code> versus <code>pipx install</code> versus a venv — when is each correct?</li>
+<li>What does <code>pip freeze &gt; requirements.txt</code> protect you from?</li>
+<li>Why is <code>sudo pip install</code> actively harmful on a Debian/Kali system?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>ELF &amp; PE Formats</strong> → <strong>Exploit Mitigation Audit</strong> → <strong>checksec</strong> → <strong>Buffer Overflow</strong>.<br />
+<code>ex-01</code> in Tier 3 is this lab, applied deliberately.</p>

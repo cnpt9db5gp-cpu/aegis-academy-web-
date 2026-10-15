@@ -1,0 +1,252 @@
+<h1 id="enclaves">Enclaves</h1>
+<h2 id="summary">Summary</h2>
+<p>Process isolation asks the kernel for help. Trust-based isolation asks the CPU instead. An<br />
+<strong>enclave</strong> (Intel SGX, ARM TrustZone) is a region of memory the CPU itself encrypts and<br />
+protects, with entry and exit measured by the hardware.</p>
+<p>This is the lecture's answer to: <em>what if the OS itself is the adversary?</em></p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Trusted Execution Environments (TEEs)</strong>: hardware-isolated regions with measured entry</li>
+<li><strong>SGX</strong>: enclaves in unencrypted normal memory, encrypted while resident; keys derived from<br />
+  measured code</li>
+<li><strong>Launch / measurement</strong>: a trusted computing base hashes the code before launch; that hash is<br />
+  the identity</li>
+<li><strong>Remote attestation</strong>: prove to a third party <em>what code</em> is running inside the enclave</li>
+<li><strong>TrustZone</strong>: an ARM secure world, a whole OS, hardware isolated</li>
+<li><strong>The catch</strong>: the CPU has to decrypt into memory, so <strong>side channels</strong> become the attack</li>
+</ul>
+<h2 id="sgx-in-one-page">SGX in one page</h2>
+<pre><code class="language-text">1. you write code, sign it, publish the measurement (a hash)
+2. a client wants to run your code on a remote host
+3. your code asks the untrusted host to LAUNCH it as an enclave
+4. the hardware hashes the enclave's pages -&gt; measurement
+5. the enclave sends that measurement to the client
+6. the client compares it to the signed hash it trusts
+7. only if they match does the client send secrets in
+</code></pre>
+<p>The OS can lie about <em>whether</em> it launched an enclave, but not about <em>what code</em> is in one. That<br />
+distinction is the whole security property.</p>
+<h2 id="trustzone">TrustZone</h2>
+<p>An ARM feature that splits the processor into a <strong>secure world</strong> and a <strong>normal world</strong>. The<br />
+secure world has its own memory and its own OS (Trusted Firmware, or a secure monitor like OP-TEE).<br />
+Switching worlds is expensive and controlled by a bit in a coprocessor register.</p>
+<p>Coarse-grained but real isolation: normal-world kernel code cannot read secure-world memory.</p>
+<h2 id="side-channels-the-fundamental-tension">Side channels: the fundamental tension</h2>
+<p>Memory must be decrypted to be computed on. That decrypt creates patterns an attacker can observe:</p>
+<ul>
+<li><strong>Cache timing</strong>: accessed memory leaves cache lines resident</li>
+<li><strong>Page-table access</strong>: which page was accessed is observable</li>
+<li><strong>Interrupt/modulo timing</strong>: how long something took</li>
+<li><strong>Power and EM</strong>: a different power draw for different operations</li>
+<li><strong>Speculative execution</strong>: the CPU executes past a bounds check and leaks via cache</li>
+</ul>
+<p><strong>Isolation and side-channel resistance are opposite requirements.</strong> More isolation usually means<br />
+more microarchitectural state visible across the boundary.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TEE</strong></td>
+<td>Trusted Execution Environment</td>
+</tr>
+<tr>
+<td><strong>Enclave</strong></td>
+<td>A hardware-isolated region of memory</td>
+</tr>
+<tr>
+<td><strong>Measurement</strong></td>
+<td>A cryptographic hash of the enclave's initial code</td>
+</tr>
+<tr>
+<td><strong>Launch</strong></td>
+<td>Host asks the CPU to create and measure an enclave</td>
+</tr>
+<tr>
+<td><strong>Remote attestation</strong></td>
+<td>Proving to a remote party what code runs</td>
+</tr>
+<tr>
+<td><strong>Sealing key</strong></td>
+<td>Derived from the measurement; encrypts local data</td>
+</tr>
+<tr>
+<td><strong>Side channel</strong></td>
+<td>Leaking secrets through observable side effects</td>
+</tr>
+<tr>
+<td><strong>Cache timing attack</strong></td>
+<td>Inferring memory access from cache state</td>
+</tr>
+<tr>
+<td><strong>Rollback attack</strong></td>
+<td>Re-running old, valid-but-stale code</td>
+</tr>
+<tr>
+<td><strong>TrustZone</strong></td>
+<td>ARM secure world / normal world split</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- does this CPU have enclave or virtualization support? ---
+{
+  echo &quot;=== CPU flags of interest ===&quot;
+  grep -oE &quot;vmx|svm&quot; /proc/cpuinfo | sort -u | sed 's/^/  /'
+  echo
+  echo &quot;=== Intel SGX (requires sgx flag; absent on most consumer parts) ===&quot;
+  grep -oE &quot;\bsgx\b&quot; /proc/cpuinfo | head -1 || echo &quot;  no sgx flag on this CPU&quot;
+  echo
+  echo &quot;=== ARM TrustZone (check DT compatible) ===&quot;
+  [ -f /proc/device-tree/compatible ] &amp;&amp; tr '\0' '\n' &lt; /proc/device-tree/compatible | head -3 | sed 's/^/  /'
+  echo
+  echo &quot;=== runtime enclave support ===&quot;
+  ls -la /dev/sgx* 2&gt;/dev/null || echo &quot;  /dev/isgx and /dev/sgx_enclave absent&quot;
+  lsmod | grep -iE &quot;sgx|tee&quot; || echo &quot;  no sgx/tee kernel modules loaded&quot;
+} 2&gt;&amp;1 | tee 01-enclave-support.txt
+
+# --- what you can learn about isolation from the kernel ---
+grep -E &quot;SMEP|SMAP|KPTI|Meltdown&quot; /proc/self/status 2&gt;/dev/null
+dmesg 2&gt;/dev/null | grep -iE &quot;smep|smap|kpti|meltdown|eIBRS|IBPB&quot; | head -5
+
+# --- the cache, which is the side channel ---
+#   (this is the state an attacker measures)
+cat /sys/devices/system/cpu/cpu0/cache/index*/{level,type,size,coherency_line_size} 2&gt;/dev/null | paste - - - - | sed 's/^/  /'
+lscpu | grep -iE &quot;cache|model name&quot;
+
+# --- flush+reload, the canonical cache timing attack, against yourself ---
+cat &gt; cachetiming.py &lt;&lt;'PY'
+import ctypes, time, os
+
+SIZE = 256 * 1024
+buf = ctypes.create_string_buffer(SIZE)
+
+def flush():
+    &quot;&quot;&quot;Evict our buffer from cache using clflush.&quot;&quot;&quot;
+    # clflush rdi
+    ctypes.memset(buf, 0, SIZE)
+
+def victim():
+    &quot;&quot;&quot;Touch the buffer - this puts it in cache.&quot;&quot;&quot;
+    ctypes.memset(buf, 1, 16)
+
+def timed(fn):
+    best = 1e9
+    for _ in range(200):
+        flush()
+        fn()
+        t0 = time.perf_counter_ns()
+        fn()
+        best = min(best, time.perf_counter_ns() - t0)
+    return best
+
+if __name__ == &quot;__main__&quot;:
+    # Compile an inline asm helper via ctypes is awkward; use a C helper instead.
+    print(&quot;  run the compiled helper: gcc -O0 cachetime.c -o cachetime &amp;&amp; ./cachetime&quot;)
+PY
+rm -f cachetiming.py
+
+cat &gt; cachetime.c &lt;&lt;'EOF'
+/* Flush+Reload: the canonical cache side channel, demonstrated on our own process. */
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;time.h&gt;
+
+#define SIZE (256 * 1024)
+static char buf[SIZE];
+
+static void clflush_range(void *start, size_t len) {
+    char *p = start;
+    for (size_t i = 0; i &lt; len; i += 64)
+        __asm__ volatile(&quot;clflush (%0)&quot; :: &quot;r&quot;(p + i) : &quot;memory&quot;);
+}
+static void victim(size_t offset) { volatile char c = buf[offset]; (void)c; }
+
+static uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile(&quot;rdtsc&quot; : &quot;=a&quot;(lo), &quot;=d&quot;(hi));
+    return ((uint64_t)hi &lt;&lt; 32) | lo;
+}
+
+int main(void) {
+    memset(buf, 0, SIZE);
+    printf(&quot;  measuring access time with and without a prior access\n&quot;);
+    printf(&quot;  %-12s %-14s %-14s %s\n&quot;, &quot;offset&quot;, &quot;cold(ms)&quot;, &quot;warm(ms)&quot;, &quot;verdict&quot;);
+    for (size_t off = 0; off &lt; 4096; off += 512) {
+        clflush_range(buf, SIZE);
+        uint64_t c0 = rdtsc();
+        victim(off);
+        uint64_t c1 = rdtsc();
+
+        clflush_range(buf, SIZE);
+        victim(off);                      /* prime the cache */
+        uint64_t w0 = rdtsc();
+        victim(off);
+        uint64_t w1 = rdtsc();
+
+        double cold = (c1 - c0) / 1e6, warm = (w1 - w0) / 1e6;
+        printf(&quot;  %-12zu %-14.4f %-14.4f %s\n&quot;, off, cold, warm,
+               warm &lt; cold * 3 ? &quot;cache HIT (was primed)&quot; : &quot;cold&quot;);
+    }
+    printf(&quot;\n  A cache hit is measurably faster. That difference is the side channel.\n&quot;);
+    printf(&quot;  Everything an enclave protects is protected against exactly this.\n&quot;);
+    return 0;
+}
+EOF
+gcc -O0 cachetime.c -o cachetime &amp;&amp; ./cachetime | tee 02-cachetiming.txt
+
+# --- the lesson, written out ---
+cat &gt; 03-side-channels.md &lt;&lt;'EOF'
+# Why enclaves are not enough
+
+Isolation says: &quot;this memory belongs to someone else, and the OS cannot read it.&quot;
+Side channels say: &quot;this CPU is shared, and computation leaves observable traces.&quot;
+
+## The traces
+- cache line residency (Flush+Reload, Prime+Probe)
+- translation lookaside buffer and page-table access patterns
+- interrupt and speculation behaviour (Spectre, Meltdown)
+- power and electromagnetic emission
+- timing of memory-dependent branches
+
+## Why enclave code is especially vulnerable
+The enclave must decrypt its pages to execute. The moment instructions touch
+secret data, that data's address pattern enters the shared microarchitectural
+state — and the untrusted OS is right there to measure it.
+
+## The mitigations and their costs
+- constant-time programming (hard, and only covers timing)
+- cache partitioning (Intel CAT, performance cost)
+- core isolation (Pinning an enclave to a core, availability cost)
+- frequent context switching, randomised scheduling (performance cost)
+- newer hardware mitigations (IBPB, retpolines, control-flow enforcement)
+
+## The honest conclusion
+TEEs raise the bar: an attacker must be the OS *and* win a statistical side
+channel. That is a real improvement. It is not a guarantee, and it is not a
+replacement for other defences. `mit858-18` covers this in detail.
+EOF
+cat 03-side-channels.md
+</code></pre>
+<p><strong>Step 2 is the standout</strong> — a working Flush+Reload demonstration against your own process,<br />
+measuring cache hits versus cold misses. That is the entire side-channel threat model, executable,<br />
+on the machine you are already using.</p>
+<p><strong>Record:</strong> <code>02-cachetiming.txt</code> and <code>03-side-channels.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What problem do enclaves solve that process isolation does not?</li>
+<li>What is a "measurement" in SGX, and what is it derived from?</li>
+<li>What is remote attestation and why does it matter?</li>
+<li>Why must enclave memory be decrypted before use?</li>
+<li>Give two side channels and explain how each leaks a secret.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Enclave</strong> → <strong>Enclave Attack</strong> → <strong>Side Channel</strong> → <strong>CPU Timing Attack</strong> →<br />
+<strong>Speculative Execution</strong> → <strong>Trusted Execution Environment</strong>.<br />
+<code>mit858-18</code> is the deep dive on the side-channel half.</p>

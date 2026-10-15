@@ -1,0 +1,331 @@
+<h1 id="concurrency-and-threads">Concurrency and Threads</h1>
+<h2 id="summary">Summary</h2>
+<p>Concurrency is where the abstraction of "one process, one logical thread of control" breaks down.<br />
+When several threads or processes touch shared state, the interleaving of their operations decides<br />
+the outcome — and an attacker can influence that interleaving.</p>
+<p>Two practical threads for this course:</p>
+<ol>
+<li><strong>Understand race conditions</strong>, because they are a real privilege escalation class (<code>pr-03</code>)</li>
+<li><strong>Understand desynchronisation</strong>, because it is the root cause of HTTP request smuggling<br />
+   (Tier 4) and of cache attacks</li>
+</ol>
+<h2 id="processes-vs-threads">Processes vs threads</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Processes</th>
+<th>Threads</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Memory</td>
+<td>Isolated address spaces</td>
+<td><strong>Shared</strong></td>
+</tr>
+<tr>
+<td>Creation cost</td>
+<td><code>fork()</code> is expensive</td>
+<td>Cheap</td>
+</tr>
+<tr>
+<td>Communication</td>
+<td>IPC: pipes, sockets, shared memory</td>
+<td>Shared variables</td>
+</tr>
+<tr>
+<td>Failure</td>
+<td>Contained</td>
+<td>One thread can corrupt everything</td>
+</tr>
+<tr>
+<td>Security</td>
+<td>Strong boundary</td>
+<td>Weak boundary</td>
+</tr>
+</tbody>
+</table>
+<p>A crash or memory corruption in a thread can take down the whole process, because the address<br />
+space is shared.</p>
+<h2 id="the-race-window">The race window</h2>
+<pre><code class="language-c">// NOT thread-safe
+int balance = 1000;
+
+void withdraw(int amount) {
+    if (balance &gt;= amount) {      // check
+        balance -= amount;        // use
+    }
+}
+</code></pre>
+<p>Two threads can both pass the check before either updates, and both withdraw. In POSIX terms this<br />
+is a <strong>data race</strong> — and the C standard makes it <em>undefined behaviour</em>, so the compiler is free to<br />
+optimise the check away entirely.</p>
+<h2 id="fixes-and-their-cost">Fixes, and their cost</h2>
+<pre><code class="language-c">pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+void withdraw(int amount) {
+    pthread_mutex_lock(&amp;lock);
+    if (balance &gt;= amount) balance -= amount;
+    pthread_mutex_unlock(&amp;lock);
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Guarantees</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mutex</td>
+<td>Mutual exclusion</td>
+<td>Deadlock if lock order is inconsistent</td>
+</tr>
+<tr>
+<td>Atomic ops</td>
+<td>Single instruction (compare-and-swap)</td>
+<td>Limited to small operations</td>
+</tr>
+<tr>
+<td>Semaphore</td>
+<td>Counting permits</td>
+<td>More complexity</td>
+</tr>
+<tr>
+<td>Lock-free (CAS loops)</td>
+<td>No blocking</td>
+<td>Subtle, easy to get wrong</td>
+</tr>
+<tr>
+<td>Files lock (<code>flock</code>)</td>
+<td>Cross-process</td>
+<td>Advisory only</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Deadlock</strong> is the price of locks: hold A, wait for B; hold B, wait for A. The cure is a strict,<br />
+global lock ordering.</p>
+<h2 id="inter-process-shared-memory">Inter-process shared memory</h2>
+<pre><code class="language-c">// map a file into both processes' address space
+int fd = open(&quot;/tmp/shared&quot;, O_CREAT | O_RDWR, 0666);
+ftruncate(fd, 4096);
+void *p = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+</code></pre>
+<p>Shared memory is fast and has <strong>no access control</strong> — anything that can open the file can read<br />
+and write it. In practice, shared-memory services (<code>/dev/shm</code>, <code>/run/shm</code>) are a recurring local<br />
+privilege escalation vector on multi-user machines.</p>
+<h2 id="concurrency-in-security-concretely">Concurrency in security, concretely</h2>
+<ol>
+<li><strong>Race conditions</strong> — symlink swaps, temp files, <code>check-then-act</code> in shell scripts</li>
+<li><strong>TOCTOU</strong> — covered in <code>os-07</code></li>
+<li><strong>Request smuggling</strong> — two HTTP parsers disagree about message boundaries</li>
+<li><strong>Side channels</strong> — another thread's timing reveals a secret</li>
+<li><strong>Thread injection</strong> — <code>ptrace</code> into a multithreaded target, where each thread has its own stack</li>
+</ol>
+<h2 id="deterministic-scheduling">Deterministic scheduling</h2>
+<pre><code class="language-bash"># Go's runtime makes the race visible on demand
+go run -race main.go
+
+# ThreadSanitizer for C/C++
+gcc -fsanitize=thread -g prog.c -o prog-tsan &amp;&amp; ./prog-tsan
+
+# Valgrind's helgrind finds unsynchronised access
+valgrind --tool=helgrind ./prog
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Thread</strong></td>
+<td>Independent execution stream in one address space</td>
+</tr>
+<tr>
+<td><strong>Data race</strong></td>
+<td>Unsynchronised concurrent access to shared data</td>
+</tr>
+<tr>
+<td><strong>TOCTOU</strong></td>
+<td>Check-then-use race</td>
+</tr>
+<tr>
+<td><strong>Mutex</strong></td>
+<td>Mutual exclusion lock</td>
+</tr>
+<tr>
+<td><strong>Semaphore</strong></td>
+<td>Counting synchronisation primitive</td>
+</tr>
+<tr>
+<td><strong>Atomic / CAS</strong></td>
+<td>Compare-and-swap; indivisible read-modify-write</td>
+</tr>
+<tr>
+<td><strong>Deadlock</strong></td>
+<td>Circular wait on locks</td>
+</tr>
+<tr>
+<td><strong>Starvation</strong></td>
+<td>A thread never gets scheduled</td>
+</tr>
+<tr>
+<td><strong>Shared memory</strong></td>
+<td><code>mmap(MAP_SHARED)</code> — fast, ungoverned</td>
+</tr>
+<tr>
+<td><strong>ThreadSanitizer</strong></td>
+<td>Runtime detector for data races</td>
+</tr>
+<tr>
+<td><strong>Reentrancy</strong></td>
+<td>Re-entering a function before it finished</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what is running on this box right now ---
+ps -eLf | wc -l                       # threads, not processes
+ps -eLf | head -10
+top -H -b -n1 | head -12               # per-thread CPU
+ls /proc/self/task | wc -l
+
+# --- shared memory is ungoverned ---
+ls -la /dev/shm/
+df -h /dev/shm
+ipcs -m 2&gt;/dev/null | head
+ipcs -s 2&gt;/dev/null | head             # SysV semaphores
+
+# --- detection tools ---
+go version 2&gt;/dev/null &amp;&amp; echo &quot;Go available: go run -race&quot;
+gcc -fsanitize=thread -x c -o /tmp/tsan - &lt;&lt;'EOF' 2&gt;/dev/null &amp;&amp; /tmp/tsan 2&gt;&amp;1 | head -8
+#include &lt;pthread.h&gt;
+int shared;
+void *worker(void *_) { shared++; return 0; }
+int main(void){ pthread_t t[4];
+  for(int i=0;i&lt;4;i++) pthread_create(&amp;t[i],0,worker,0);
+  for(int i=0;i&lt;4;i++) pthread_join(t[i],0); return shared==4?0:1; }
+EOF
+rm -f /tmp/tsan
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> demonstrate a real data race, detect it automatically, and inspect shared memory.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-08 &amp;&amp; cd ~/aegis/labs/os-08
+
+# --- 1. count threads vs processes ---
+{
+  echo &quot;=== processes: $(ps -e --no-headers | wc -l) ===&quot;
+  echo &quot;=== threads:    $(ps -eLf --no-headers | wc -l) ===&quot;
+  echo
+  echo &quot;=== my threads ===&quot;
+  ls /proc/self/task | wc -l
+  echo
+  echo &quot;=== busiest threads ===&quot;
+  top -H -b -n1 2&gt;/dev/null | head -12
+} &gt; 01-threads.txt; cat 01-threads.txt
+
+# --- 2. A REAL DATA RACE, and how to catch it ---
+cat &gt; race.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+static int counter = 0;
+static void *worker(void *arg) {
+    for (int i = 0; i &lt; 100000; i++) counter++;   /* read-modify-write, not atomic */
+    return NULL;
+}
+int main(void) {
+    pthread_t t[4];
+    for (int i = 0; i &lt; 4; i++) pthread_create(&amp;t[i], NULL, worker, NULL);
+    for (int i = 0; i &lt; 4; i++) pthread_join(t[i], NULL);
+    printf(&quot;counter = %d (expected 400000)\n&quot;, counter);
+    return 0;
+}
+EOF
+gcc -O0 -g race.c -o race -lpthread
+echo &quot;=== normal build ===&quot;
+./race | tee 02-race.txt
+
+gcc -O0 -g -fsanitize=thread race.c -o race-tsan -lpthread
+echo &quot;=== ThreadSanitizer build (the correct answer) ===&quot;
+./race-tsan 2&gt;&amp;1 | grep -A4 &quot;WARNING: ThreadSanitizer&quot; | head -12 | tee -a 02-race.txt
+
+echo
+echo &quot;The race is real: counter &lt; 400000 means updates were lost.&quot;
+echo &quot;TSan names the exact source line. Always build with it during development.&quot;
+
+# --- 3. the fix ---
+cat &gt; safe.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdatomic.h&gt;
+static _Atomic int counter = 0;
+static void *worker(void *arg) {
+    for (int i = 0; i &lt; 100000; i++) atomic_fetch_add(&amp;counter, 1);
+    return NULL;
+}
+int main(void) {
+    pthread_t t[4];
+    for (int i = 0; i &lt; 4; i++) pthread_create(&amp;t[i], NULL, worker, NULL);
+    for (int i = 0; i &lt; 4; i++) pthread_join(t[i], NULL);
+    printf(&quot;counter = %d (always 400000)\n&quot;, counter);
+    return 0;
+}
+EOF
+gcc -O0 -g safe.c -o safe -lpthread &amp;&amp; ./safe | tee -a 02-race.txt
+
+# --- 4. shared memory has no ACL by default ---
+{
+  echo &quot;=== /dev/shm ===&quot;
+  ls -la /dev/shm/
+  df -h /dev/shm | tail -1
+  echo
+  echo &quot;=== SysV IPC on this box ===&quot;
+  ipcs -m 2&gt;/dev/null | head -5
+  ipcs -s 2&gt;/dev/null | head -5
+  echo
+  echo &quot;=== write something into shared memory and read it back ===&quot;
+  python3 - &lt;&lt;'PY'
+import mmap, os
+path = &quot;/dev/shm/aegis-demo&quot;
+fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+os.ftruncate(fd, 4096)
+m = mmap.mmap(fd, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+m[0:11] = b&quot;AEGIS-SHARED&quot;
+print(&quot;  written:&quot;, bytes(m[0:11]).decode())
+os.close(fd)
+PY
+ls -la /dev/shm/aegis-demo
+echo &quot;  ^ mode 666: any local user can read and write it. That is the risk.&quot;
+rm -f /dev/shm/aegis-demo
+} | tee 03-shmem.txt
+
+# --- 5. ptrace into a threaded process ---
+sleep 600 &amp; BGPID=$!
+echo &quot;thread count of $$ : $(ls /proc/$$/task | wc -l)&quot;
+echo &quot;thread count of PID : $(ls /proc/$BGPID/task 2&gt;/dev/null | wc -l)&quot;
+echo &quot;each thread has its OWN stack - which is why buffer overflows differ per-thread&quot;
+kill $BGPID 2&gt;/dev/null
+</code></pre>
+<p><strong>Step 2 is the exercise that changes how you write code.</strong> Run it, see <code>counter</code> come out under<br />
+400000, then read the ThreadSanitizer report naming the exact line. Every multithreaded daemon you<br />
+will audit in Tier 5 needs this check.</p>
+<p><strong>Record:</strong> <code>02-race.txt</code> — the TSan output. Compare its line number precision with a manual<br />
+review; you would probably never have found it by reading.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between a process and a thread with respect to memory?</li>
+<li>Why is unsynchronised <code>counter++</code> undefined behaviour rather than merely "buggy"?</li>
+<li>What is the price of fixing a race with a mutex, and what is the resulting failure mode?</li>
+<li>Why is shared memory a local privilege escalation risk on a multi-user machine?</li>
+<li>How does HTTP request smuggling relate to concurrency, conceptually?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Concurrency</strong> → <strong>Race Condition (TOCTOU)</strong> → <strong>Atomics</strong> → <strong>Request Smuggling</strong> →<br />
+<strong>Parser Differential</strong> → <strong>Side Channel</strong>.</p>

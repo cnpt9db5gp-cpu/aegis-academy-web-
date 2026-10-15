@@ -1,0 +1,209 @@
+<h1 id="reading-a-tools-documentation-like-an-operator">Reading a Tool's Documentation Like an Operator</h1>
+<h2 id="summary">Summary</h2>
+<p>A security tool you cannot configure is a blunt instrument. Kali ships thousands of tools, and<br />
+almost none of them can be learned from memory — they are learned from <code>--help</code>, man pages, and<br />
+one careful reading of what options actually do.</p>
+<p>This lecture teaches a repeatable method for extracting exactly what you need from documentation,<br />
+and how to combine that with offline databases (<code>searchsploit</code>, nmap NSE scripts) to make<br />
+decisions quickly.</p>
+<h2 id="the-documentation-hierarchy">The documentation hierarchy</h2>
+<pre><code>1. tool --help              fastest, usually complete enough
+2. man &lt;tool&gt;               the full manual, searchable
+3. &lt;tool&gt; --help | less      when the manual is enormous (nmap, msfconsole)
+4. the project's own docs    for anything unusual (CVE, blog post, man page of a man page)
+5. the source                for when the documentation is wrong, which happens
+</code></pre>
+<h2 id="a-repeatable-method-five-questions-every-tool">A repeatable method: five questions, every tool</h2>
+<pre><code class="language-bash"># 1. what does it actually do?
+nmap --help | head -20
+
+# 2. what are the scan types?
+nmap --help | grep -A2 'SCAN TYPES'
+
+# 3. what are the most important options?
+man nmap | col -b | grep -E '^\s+-(sS|sT|sV|sC|p|P)' | head
+
+# 4. what does the local database know?
+man nmap | grep -i nse
+ls /usr/share/nmap/scripts/ | wc -l
+
+# 5. what does it output, and in what format?
+man nmap | grep -A3 'OUTPUT'
+</code></pre>
+<h2 id="nmap-as-the-worked-example">nmap as the worked example</h2>
+<pre><code class="language-bash"># the scan types, straight from help
+nmap --help | sed -n '/SCAN TYPES/,/TIMING/p' | head -30
+
+# timing templates: -T0 paranoid .. -T5 insane
+nmap --help | sed -n '/TIMING TEMPLATES/,/^$/p'
+
+# the two flags you will use every single time
+#   -sV  version detection
+#   -sC  default NSE script set
+man nmap | col -b | grep -B1 -A3 '\-sV'
+
+# output formats
+nmap --help | grep -A6 'OUTPUT'
+
+# read an NSE script - it is readable Python
+head -40 /usr/share/nmap/scripts/vulners.nse
+grep -E 'portrule|ports|description' /usr/share/nmap/scripts/smb-vuln-ms17-010.nse
+</code></pre>
+<p><strong>Reading one NSE script teaches you more than reading the nmap manual</strong>, because it shows you<br />
+what the tool is actually doing — including its assumptions and blind spots.</p>
+<h2 id="searchsploit-as-a-research-tool-not-a-magic-box">searchsploit as a research tool, not a magic box</h2>
+<pre><code class="language-bash"># by product and version
+searchsploit &quot;openssh 9.2&quot;
+
+# by CVE
+searchsploit CVE-2021-44228
+
+# by technique - often the most useful mode
+searchsploit --keyword=kerberoast
+searchsploit --keyword=&quot;privilege escalation&quot;
+searchsploit --keyword=eternalblue
+
+# exclude noisy results
+searchsploit openssh -t linux-exploit
+
+# show the full path so you can read the source offline
+searchsploit -p 42366
+searchsploit --id=42366
+
+# all Exploit-DB entries with their paths
+ls /usr/share/exploitdb/files_exploits.csv 2&gt;/dev/null &amp;&amp; head -3 /usr/share/exploitdb/files_exploits.csv
+</code></pre>
+<p><strong><code>searchsploit --id=N</code> and then read the PoC source</strong> is the most under-used security habit.<br />
+Most exploits are 50 lines of Python, and reading 50 lines teaches you the vulnerability better<br />
+than any course.</p>
+<h2 id="metasploit-docs-inside-the-tool">metasploit: docs inside the tool</h2>
+<pre><code class="language-bash">msfconsole -q -x &quot;help; exit&quot;
+msfconsole -q -x &quot;search type:exploit name:smb; exit&quot;
+msfconsole -q -x &quot;use exploit/multi/handler; info; exit&quot;
+msfconsole -q -x &quot;use auxiliary/scanner/smb/smb_enum; options; exit&quot;
+
+# read the module's source - the real documentation
+sed -n '1,40p' /usr/share/metasploit-framework/modules/auxiliary/scanner/smb/smb_enum.rb
+
+# search by CVE
+msfconsole -q -x &quot;search cve:CVE-2017-0144; exit&quot;
+</code></pre>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- find the doc for anything, fast ---
+apropos nmap
+man -k &quot;packet capture&quot;
+whatis nmap
+man 5 nmap                 # section 5 = file formats
+
+# nmap has separate man sections worth knowing
+man nmap                   # main
+man nmap-services          # the port/service database
+man nmap-protocols
+
+# tool self-documentation
+nmap --help
+python3 -c &quot;import socket; help(socket.socket)&quot;
+gdb --help | head
+john --list=formats | head
+
+# read source when docs fail
+apt-get source nmap         # needs deb-src lines
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a personal cheatsheet for three core tools, entirely from their own<br />
+documentation.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/doc-04 &amp;&amp; cd ~/aegis/labs/doc-04
+
+# --- 1. nmap: extract the parts that matter ---
+{
+  echo &quot;=== NMAP CHEATSHEET ===&quot;
+  echo
+  echo &quot;--- scan types ---&quot;
+  nmap --help | sed -n '/SCAN TYPES/,/TIMING TEMPLATES/p' | grep -E '^\s+-s' | head -12
+  echo
+  echo &quot;--- timing templates ---&quot;
+  nmap --help | sed -n '/TIMING TEMPLATES/,/^$/p' | grep -E '^\s+-T' | head
+  echo
+  echo &quot;--- the four flags I use most ---&quot;
+  echo &quot;-sV version detection&quot;
+  echo &quot;-sC default scripts&quot;
+  echo &quot;-p- all ports&quot;
+  echo &quot;-oN/-oG save output&quot;
+  echo
+  echo &quot;--- how many NSE scripts exist? ---&quot;
+  ls /usr/share/nmap/scripts/*.nse | wc -l
+  echo
+  echo &quot;--- which ones are vulnerability scripts? ---&quot;
+  ls /usr/share/nmap/scripts/ | grep -c '^vuln'
+} | tee 01-nmap-cheatsheet.txt
+
+# --- 2. read a script's logic, not just its output ---
+echo &quot;=== smb-vuln-ms17-010.nse ===&quot;
+cat /usr/share/nmap/scripts/smb-vuln-ms17-010.nse
+echo
+echo &quot;=== how many vuln scripts, and what do they cover? ===&quot;
+ls /usr/share/nmap/scripts/vuln-*.nse | sed 's|.*/||' | head -25
+
+# --- 3. searchsploit, all five modes ---
+{
+  echo &quot;=== by product ===&quot;; searchsploit &quot;openssh 9.2p1&quot; | head -8
+  echo &quot;=== by CVE ===&quot;; searchsploit CVE-2017-0144 | head -8
+  echo &quot;=== by technique ===&quot;; searchsploit --keyword=kerberoast | head -8
+  echo &quot;=== by platform ===&quot;; searchsploit openssh -t linux-exploit | head -8
+  echo &quot;=== full paths, so you can read the PoC ===&quot;; searchsploit -p 42873 | head -4
+} | tee 02-searchsploit.txt
+
+# --- 4. READ an exploit's source - the best documentation there is ---
+FIRST=$(searchsploit -p 42873 --raw 2&gt;/dev/null | head -3)
+echo &quot;raw (truncated) preview:&quot;
+echo &quot;$FIRST&quot;
+echo
+echo &quot;Full source is on disk here:&quot;
+find /usr/share/exploitdb -name &quot;42873*&quot; -o -name &quot;*EternalBlue*&quot; 2&gt;/dev/null | head -3
+
+# --- 5. metasploit module documentation ---
+msfconsole -q -x &quot;search type:aux name:smb_enum; info; exit&quot; 2&gt;/dev/null \
+  | sed -n '1,40p' | tee 03-msf-info.txt
+
+# --- 6. the man page sections worth knowing ---
+{
+  echo &quot;=== man section 1 (commands) ===&quot;; apropos -s 1 capture | head -5
+  echo &quot;=== man section 5 (file formats) ===&quot;; apropos -s 5 passwd | head -5
+  echo &quot;=== man section 8 (system admin) ===&quot;; apropos -s 8 nmap | head -5
+} | tee 04-man-sections.txt
+
+# --- 7. write YOUR cheat sheet ---
+cat &gt; ~/aegis/NMAP-CHEATSHEET.md &lt;&lt;'EOF'
+# My nmap cheatsheet
+
+## Everyday
+- `nmap -sV -sC -p- TARGET -oN out.txt`      full scan, keep the output
+- `nmap -sT -T4 --top-ports 100 TARGET`     fast triage
+- `sudo nmap -sn 192.168.56.0/24`           host discovery
+
+## When quiet
+- `nmap -sS -T2 -p- TARGET`                half-open, slow
+- `nmap -sA`                               firewall bypass trick
+
+## Parsing
+- `grep open out.gnmap | awk '{print $2}'`
+- `nmap --script vuln --script-args safe TARGET`
+EOF
+cat ~/aegis/NMAP-CHEATSHEET.md
+</code></pre>
+<p><strong>Step 4 is the one that changes how you learn.</strong> Reading a 60-line proof-of-concept tells you<br />
+the exact mechanism of a vulnerability — often clearer than any lecture, because it is the<br />
+vulnerability and nothing else.</p>
+<p><strong>Record:</strong> keep <code>~/aegis/NMAP-CHEATSHEET.md</code> and add equivalents for <code>john</code>, <code>curl</code> and <code>grep</code><br />
+as you meet them.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the five documentation sources, in order of speed?</li>
+<li>Why is reading an NSE script more educational than running it?</li>
+<li><code>searchsploit --keyword=</code> is more useful than product search in what situation?</li>
+<li>What does <code>searchsploit -p &lt;id&gt;</code> give you that a web search does not?</li>
+<li>Why does <code>searchsploit -p &lt;id&gt; --raw</code> matter for learning rather than just copying?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>searchsploit / Exploit-DB</strong> → <strong>CVE</strong> → <strong>Vulnerability Scanning</strong> → <strong>Static Analysis</strong>.<br />
+Everything in this tier assumes you can find and read a proof of concept.</p>

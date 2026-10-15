@@ -1,0 +1,385 @@
+<h1 id="getting-started-accounts-triage-and-the-download-flow">Getting Started: Accounts, Triage and the Download Flow</h1>
+<h2 id="summary">Summary</h2>
+<p>CyberDefenders provides free blue-team CTF challenges built from <strong>real disk images, memory dumps<br />
+and network captures</strong> — actual incident data, anonymised, that you download once and analyse<br />
+offline. This note covers the mechanics: getting an account, what is in a challenge, and the<br />
+triage flow that turns a downloaded artefact into a working hypothesis.</p>
+<p>The framing: <strong>these are the labs with real answer keys.</strong> Everything<br />
+else in this tier teaches you the technique; these teach you the<br />
+<em>judgement</em>, because there is a specific right answer and it is not<br />
+the one you would have guessed.</p>
+<blockquote>
+<p>Companion to <code>for-01</code> through <code>for-07</code>. Those are the methodology;<br />
+this is where you practise it against ground truth.</p>
+</blockquote>
+<h2 id="accounts-and-the-download-flow">Accounts and the download flow</h2>
+<pre><code class="language-text">  THE FLOW, and the order matters:
+
+    1. CREATE AN ACCOUNT          cyberdefenders.com
+                                 Free tier: unlimited challenges,
+                                 the same images, and a score.
+
+    2. DOWNLOAD THE CHALLENGE    a .zip or .7z containing
+                                 - the artefact (disk image, memory
+                                   dump, or PCAP)
+                                 - a README with the scenario and
+                                   the questions
+                                 - sometimes a hash to verify
+
+    3. VERIFY THE HASH           the challenge usually provides one.
+                                 If it does not, hash it yourself the
+                                 moment you download it, and record
+                                 it. That hash is your evidence that
+                                 the file you analysed is the file
+                                 you downloaded.
+
+    4. WORK ON A COPY            same rule as every other forensic
+                                 exercise (for-01). The original
+                                 stays read-only.
+
+    5. HASH EVERY FILE YOU       the same rule again. Your carved
+       EXTRACT                   artefacts are evidence too.
+
+    6. KEEP NOTES AS YOU GO      the questions are graded. A wrong
+                                 answer with no method loses the
+                                 same points as a guess.
+
+    7. SUBMIT AND LEARN          the answer key explains the METHOD,
+                                 not just the answer. Read it either
+                                 way; a challenge you solved by
+                                 guessing teaches nothing.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cd-01 &amp;&amp; cd ~/aegis/labs/cd-01
+mkdir -p challenges/{originals,work,notes,output}
+
+cat &gt; 01-setup.md &lt;&lt;'EOF'
+# CyberDefenders setup, done properly
+
+```bash
+# 1. an account at cyberdefenders.com (free tier)
+# 2. pick a challenge. The disk ones are labelled &quot;Disk Forensics&quot;,
+#    the memory ones &quot;MemLabs&quot; or &quot;Blue Team&quot;, the network ones
+#    &quot;Network Forensics&quot;.
+# 3. download. It arrives as a zip; it contains the artefact and a
+#    README with the scenario and the questions.
+# 4. store the original, read-only, forever:
+      mkdir -p ~/aegis/labs/cd-01/challenges/originals
+      cp &lt;downloaded&gt; ~/aegis/labs/cd-01/challenges/originals/
+      sha256sum ~/aegis/labs/cd-01/challenges/originals/* \
+        | tee ~/aegis/labs/cd-01/notes/&lt;challenge&gt;-hash.txt
+      chmod 0444 ~/aegis/labs/cd-01/challenges/originals/*
+# 5. work on a copy:
+      cp ~/aegis/labs/cd-01/challenges/originals/&lt;file&gt; \
+         ~/aegis/labs/cd-01/challenges/work/
+# 6. keep notes as you go. The grader is checking method.
+```
+
+```text
+  THE THREE HABITS THESE LABS BUILD, and they transfer to a real
+  engagement more than any technique does:
+
+  1. START BROAD, NARROW FAST
+     Enumerate everything cheap, then pick the thread to pull.
+     The mistake is going deep on the first thing you find.
+
+  2. EVERY ANSWER NEEDS A METHOD
+     &quot;The malware was delivered as an attachment from
+      evil.sender@bad-domain.tld on 2026-06-11&quot; plus the evidence
+     for each of those three claims. The grader is looking for the
+     path, not the destination.
+
+  3. WHEN STUCK, CHANGE ARTIFACT CLASS
+     Disk is not answering -&gt; go to memory. Memory is not answering
+     -&gt; go to the registry. You cannot force an answer from the
+     wrong source; you have to move to the one that has it.
+```
+EOF
+cat 01-setup.md
+
+# --- 2. the triage flow, which is the note ---
+cat &gt; 02-triage.md &lt;&lt;'MD'
+# The triage flow, for a disk challenge
+
+```
+# --- the whole flow, in order, with the reasoning ---
+
+# 1. WHAT IS IT?
+file challenge.dd
+#    disk image / raw / EWF / PCAP / memory dump
+#    THIS DETERMINES EVERYTHING DOWNSTREAM.
+
+# 2. LAYOUT
+mmls challenge.dd
+#    partitions. Note the offsets. Note the SIZES: a 200 MB partition
+#    on a 500 GB disk means you have the wrong image or a sparse one.
+blkls -o &lt;offset&gt; challenge.dd &gt; part1.dd
+
+# 3. FILE SYSTEM
+fsstat part1.dd | head -30
+#    NTFS or FAT or ext4. Cluster size. Sector size.
+#    FAT has no $MFT, no ADS, no USN journal - your technique set is
+#    different and you should know that before you start.
+
+# 4. THE ROOTS
+fls -r -p part1.dd &gt; mft.txt
+#    every file, recursively, with the full path and the inode.
+#    READ THIS FILE. It is the map of everything. 5,000 lines of it,
+#    and the answer is usually visible in the paths alone:
+#      Users\Public\Desktop\readme.txt
+#      Users\victim\Downloads\invoice.pdf.exe
+#      Windows\Temp\svchost32.exe
+#      ProgramData\some-task\some-task.exe
+#    anything in Downloads, Temp, ProgramData, Public, or Startup
+#    is worth reading.
+
+# 5. THE QUESTIONS, IN THE ORDER THAT ANSWERS THEM
+grep -iE &quot;download|desktop|temp|programdata|startup|recycle&quot; mft.txt
+grep -iE &quot;\.exe|\.dll|\.bat|\.ps1|\.vbs|\.js|\.scr|\.pif|\.hta&quot; mft.txt
+grep -iE &quot;autorun|desktop\.ini|\.lnk&quot; mft.txt
+
+# 6. THE RECYCLE BIN (FAT32 and modern NTFS)
+#    \$I files are metadata: original path, size, deletion time
+#    \$R files are the content
+fls -r -p part1.dd | grep -i recycle
+
+# 7. PREFETCH (NTFS, Windows XP and later)
+#    PREFETCH\FOO.EXE-ABCDEF01.pdb
+#    ^ every executable that has ever run, with LastRunTime
+fls -r -p part1.dd | grep -i prefetch
+#    and extract them:
+icat part1.dd &lt;inode&gt; &gt; /tmp/pf/FOU.pdb
+
+# 8. THE EVENT LOGS
+fls -r -p part1.dd | grep -i &quot;winevt.*\.evtx&quot;
+
+# 9. BROWSER AND APPLICATION HISTORY
+fls -r -p part1.dd | grep -iE &quot;history|places\.sqlite|cookies\.sqlite|web data|log\.txt&quot;
+```
+
+```text
+  THE QUESTIONS YOU WILL BE ASKED, and the artefact that answers each:
+
+  &quot;What is the file hash of the malware?&quot;      -&gt; the carved file,
+                                                  then sha256sum
+  &quot;What is the file's creation time?&quot;           -&gt; mft, or the
+                                                  forensic timeline
+  &quot;How was it delivered?&quot;                      -&gt; browser history,
+                                                  Downloads mtime,
+                                                  email client DB
+  &quot;What is the malware's C2 domain?&quot;            -&gt; strings, or the
+                                                  config (cry-d4, for-05)
+  &quot;When was it first executed?&quot;                -&gt; prefetch LastRunTime
+  &quot;What did it persist as?&quot;                    -&gt; Run key, scheduled
+                                                  task, service, Startup
+  &quot;What did the user do after?&quot;                -&gt; UserAssist,
+                                                  RecentDocs (jump lists)
+  &quot;Was any data exfiltrated?&quot;                  -&gt; browser downloads,
+                                                  %APPDATA%, recycle
+                                                  bin contents
+  &quot;Are there other compromised hosts?&quot;         -&gt; the network or the
+                                                  event logs (4624)
+```
+MD
+cat 02-triage.md
+
+# --- 3. the working script ---
+cat &gt; 03-triage.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# First-pass triage of a disk challenge. Read-only.
+IMG=&quot;${1:?usage: ./03-triage.sh challenge.dd}&quot;
+[ -f &quot;$IMG&quot; ] || { echo &quot;no such file&quot;; exit 1; }
+W=&quot;work/$(basename &quot;$IMG&quot; .dd)&quot;
+mkdir -p &quot;$W&quot;
+
+echo &quot;==============================================================&quot;
+echo &quot; TRIAGE: $IMG&quot;
+echo &quot;==============================================================&quot;
+echo &quot;  sha256: $(sha256sum &quot;$IMG&quot; | awk '{print $1}')&quot;
+echo &quot;  size  : $(du -h &quot;$IMG&quot; | cut -f1)&quot;
+echo &quot;  type  : $(file -b &quot;$IMG&quot;)&quot;
+echo
+
+echo &quot;=== 1. PARTITIONS ===&quot;
+mmls &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+# pick the largest NTFS/exFAT partition automatically
+OFF=$(mmls &quot;$IMG&quot; 2&gt;/dev/null | awk '
+  $2 ~ /^(Linux|win|ntfs|exfat)/ &amp;&amp; $3 ~ /^[0-9]+$/ {
+    split($3,a,&quot;(&quot;); gsub(/[^0-9]/,&quot;&quot;,$3);
+    if ($3+0 &gt; best) { best=$3+0; off=$1 }
+  } END { print (off ? off : 0) }')
+echo &quot;  using offset: $OFF&quot;
+echo
+
+echo &quot;=== 2. FILE SYSTEM ===&quot;
+fsstat -o &quot;$OFF&quot; &quot;$IMG&quot; 2&gt;/dev/null | head -25 | sed 's/^/  /'
+echo
+
+echo &quot;=== 3. THE FILE MAP (this is the answer, usually) ===&quot;
+fls -o &quot;$OFF&quot; -r -p &quot;$IMG&quot; &gt; &quot;$W/mft.txt&quot; 2&gt;/dev/null
+echo &quot;  $(wc -l &lt; &quot;$W/mft.txt&quot;) entries -&gt; $W/mft.txt&quot;
+echo
+echo &quot;  --- directories, so you know the layout ---&quot;
+grep -E &quot;d/d&quot; &quot;$W/mft.txt&quot; | head -25 | sed 's/^/    /'
+echo
+echo &quot;  --- executables and scripts, by extension ---&quot;
+grep -iE '\.(exe|dll|bat|ps1|vbs|js|scr|pif|hta|cmd|jar|vbe)$' &quot;$W/mft.txt&quot; \
+  | sed 's/^/    /' | head -40
+echo
+echo &quot;  --- the paths that matter (READ THESE) ---&quot;
+grep -iE &quot;\\\\(Downloads|Desktop|Temp|AppData|Startup|ProgramData|Recycle\.Bin)\\\\&quot; \
+  &quot;$W/mft.txt&quot; | sed 's/^/    /' | head -40
+echo
+
+echo &quot;=== 4. THE PREFETCH (what actually RAN) ===&quot;
+grep -i &quot;prefetch&quot; &quot;$W/mft.txt&quot; | grep -iE '\.(exe|com|bat|ps1)' | sed 's/^/  /' | head -40
+echo &quot;  ^ filenames are truncated to 8.3. That is normal.&quot;
+echo &quot;    Compare against the executables above: something in the list&quot;
+echo &quot;    with NO prefetch entry never ran.&quot;
+echo
+
+echo &quot;=== 5. THE EVENT LOGS ===&quot;
+grep -iE &quot;\.evtx|\.evt&quot; &quot;$W/mft.txt&quot; | sed 's/^/  /'
+echo
+
+echo &quot;=== 6. DELETED ENTRIES (a '*' means deleted) ===&quot;
+grep -c '\*' &quot;$W/mft.txt&quot; | xargs echo &quot;  deleted entries:&quot;
+grep '\*' &quot;$W/mft.txt&quot; | head -15 | sed 's/^/    /'
+echo &quot;  ^ a deleted executable with a prefetch entry ran BEFORE it&quot;
+echo &quot;    was deleted. That pair is a strong finding.&quot;
+echo
+
+echo &quot;=== 7. ALTERNATE DATA STREAMS ===&quot;
+fls -o &quot;$OFF&quot; -r -p -l &quot;$IMG&quot; 2&gt;/dev/null | grep -E '\*:' | sed 's/^/  /' | head -20
+echo &quot;  (empty is normal on a challenge; the Zone.Identifier ones&quot;
+echo &quot;   are the ones that matter)&quot;
+EOF
+chmod +x 03-triage.sh
+
+# --- 4. the offline concept: the three-source join ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-join.txt
+print(&quot;  === why real challenges have ground truth ===\n&quot;)
+print(&quot;  A synthetic lab has a designed answer. A real challenge has an&quot;)
+print(&quot;  INCIDENT that actually happened, and the questions were written&quot;)
+print(&quot;  from the incident timeline.\n&quot;)
+print(&quot;  WHICH MEANS: the answer is always a JOIN of two or more sources.\n&quot;)
+print(&quot;  THE CLASSIC THREES:&quot;)
+print()
+print(&quot;    FILE            +  PREFETCH        -&gt; 'it ran at 14:32'&quot;
+print(&quot;    FILE            +  EVENT LOG       -&gt; 'the parent process'&quot;
+print(&quot;    FILE            +  MFT TIMES       -&gt; 'created before the&quot;
+print(&quot;                                         log entry that mentions&quot;
+print(&quot;                                         it, which is impossible'&quot;
+print(&quot;    BROWSER HISTORY +  FILE            -&gt; 'downloaded from X&quot;
+print(&quot;                                         at T, the file is on&quot;
+print(&quot;                                         disk, its hash is H'&quot;
+print()
+print(&quot;  EXAMPLE, THE JOIN:&quot;)
+print()
+print(&quot;    Q: 'What is the SHA-256 of the malicious file?'&quot;)
+print()
+print(&quot;    fls shows:  /Users/victim/Downloads/invoice.pdf (inode 4821)&quot;)
+print(&quot;    but the    the file was DELETED from Downloads&quot;)
+print(&quot;    $Recycle   and is in \\$Recycle.Bin\\S-1-5-21-...\\$R0000123.TXT&quot;)
+print(&quot;    fls shows:  \\$I0000123.TXT   (the metadata: original path,&quot;)
+print(&quot;               size, deletion time, in BINARY)&quot;)
+print()
+print(&quot;    SO: you read the $I metadata to get the original path and the&quot;)
+print(&quot;    deletion time, then extract the $R content, then hash it.&quot;)
+print()
+print(&quot;    A challenge will ask you for the deletion time as a SEPARATE&quot;)
+print(&quot;    question, because that is a different artefact and a different&quot;)
+print(&quot;    skill. The $I file is a small binary struct:&quot;)
+print()
+print(&quot;      offset 0   8 bytes  version (1 or 2)&quot;)
+print(&quot;      offset 8   8 bytes  file size&quot;)
+print(&quot;      offset 16  8 bytes  deletion time (FILETIME)&quot;)
+print(&quot;      offset 24  520      original path, UTF-16LE&quot;)
+print()
+print(&quot;    THAT STRUCTURE IS THE WHOLE POINT of the question. Reading a&quot;)
+print(&quot;    little-endian FILETIME out of a binary blob is a skill, and&quot;)
+print(&quot;    it is worth practising on three challenges.&quot;)
+print()
+print(&quot;  THE OTHER JOIN, AND IT IS THE ONE THAT EARNS THE MOST POINTS:&quot;)
+print()
+print(&quot;    Q: 'How did the malware get onto the machine?'&quot;)
+print()
+print(&quot;    You need ALL of:&quot;)
+print(&quot;      - browser history: the URL, and the time&quot;)
+print(&quot;      - Downloads: the file, and its hash&quot;)
+print(&quot;      - prefetch: that it ran, and when&quot;)
+print(&quot;      - MFT: its creation time (which predates the run)&quot;)
+print(&quot;      - and usually: the email client's DB, if it came by email&quot;)
+print()
+print(&quot;    Each of those is a separate question in most challenges.&quot;)
+print(&quot;    The full narrative is what a report needs, and it is what&quot;)
+print(&quot;    an engagement deliverable actually is.&quot;)
+PY
+cat 04-join.txt
+
+# --- 5. the method-not-answer habit ---
+cat &gt; 05-method.md &lt;&lt;'EOF'
+# Answering with a method, not a value
+
+```text
+  THE GRADER WANTS THE PATH. Write it.
+
+  BAD   Answer: a3f5...9c21
+        (correct value, no evidence, no points for method)
+
+  GOOD  Answer: a3f5...9c21
+        Source: \\Users\\victim\\Downloads\\invoice.pdf (inode 4821),
+                carved from unallocated space, 284,672 bytes
+        Chain: Chrome history shows a download from
+               http://cdn.legit-cdn.tld/update/x64/invoice.pdf at
+               2026-06-11 14:29:03; the file's MFT created time is
+               14:29:05; PREFETCH\\INVOICE.EXE-1F2A3B4C.pdb shows
+               last run 14:32:41; the file was deleted at 15:04:12
+               per \\$I0000123.TXT.
+        Method: download -&gt; execution -&gt; deletion.
+
+  The chain is the answer. Each link is a separate claim you can be
+  wrong about independently, and that is exactly why it is worth
+  points.
+</code></pre>
+<pre><code class="language-bash"># a small helper for recording answers with their evidence
+cat &gt; answers.md &lt;&lt;'MD'
+| # | question | answer | source artefact | method |
+|---|----------|--------|-----------------|--------|
+| 1 | | | | |
+| 2 | | | | |
+| 3 | | | | |
+
+RULES:
+- &quot;source artefact&quot; is the file or inode the answer came from
+- &quot;method&quot; is the tool and the reasoning, in one line
+- if you guessed, write &quot;GUESSED&quot; in the method column and come back
+  to it after reading the key
+MD
+cat answers.md
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>03-triage.sh</code>, a first-pass disk triage that automatically picks<br />
+the largest Windows partition, then dumps the file map and greps for the paths that matter —<br />
+<code>\Downloads\</code>, <code>\Temp\</code>, <code>\ProgramData\</code>, <code>\Startup\</code>, <code>\Recycle.Bin\</code> — plus the <strong>deleted-entry<br />
+count</strong>, because a deleted executable that still has a prefetch entry is a strong finding.</p>
+<p><strong>Step 4</strong> is the conceptual centre: real challenges are built from real incidents, so the answer<br />
+is always a <strong>join of two or more sources</strong>. It works through the <code>$Recycle.Bin</code> <code>$I</code> file<br />
+structure byte by byte — version, size, deletion FILETIME at offset 16, original path at offset<br />
+24 — and explains why reading a little-endian FILETIME out of a binary blob is a skill worth<br />
+practising on three challenges.</p>
+<p><strong><code>05-method.md</code></strong> is the grading habit: the grader wants the <em>chain</em>, not the value.</p>
+<p><strong>Record:</strong> <code>04-join.txt</code> and <code>05-method.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the seven steps of the CyberDefenders download flow, and why does the order matter?</li>
+<li>What does <code>mmls</code> give you and why do you need it before <code>fls</code>?</li>
+<li>What does a <code>*</code> next to an entry in <code>fls</code> output mean, and why is it significant with prefetch?</li>
+<li>Name six paths that are worth reading in every disk challenge.</li>
+<li>What is a prefetch entry, and what does its absence tell you?</li>
+<li>Give the byte layout of the <code>$Recycle.Bin</code> <code>$I</code> file.</li>
+<li>What makes an answer worth points beyond being correct?</li>
+<li>When you are stuck on a challenge, what should you change first?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Forensics</strong> → <strong>Timeline Analysis</strong> → <strong>File Forensics</strong> → <strong>Incident Response</strong> →<br />
+<strong>Evidence Handling</strong>.<br />
+<code>cd-02</code>, <code>cd-03</code> and <code>cd-04</code> are the three artefact classes.</p>

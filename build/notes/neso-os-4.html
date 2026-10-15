@@ -1,0 +1,226 @@
+<h1 id="scheduling-and-synchronisation">Scheduling and Synchronisation</h1>
+<h2 id="summary">Summary</h2>
+<p>Scheduling decides who runs next. Synchronisation decides how concurrent entities cooperate<br />
+without corrupting each other's data. Both are security-relevant: a bad scheduler is a<br />
+denial-of-service vector, and bad synchronisation is a data race.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Scheduling criteria</strong>: turnaround, throughput, fairness, response time, priority.</li>
+<li><strong>Preemptive vs non-preemptive</strong>: can the OS interrupt a running process?</li>
+<li><strong>FCFS</strong> — simple, unfair (convoy effect). <strong>SJF</strong> — optimal average, starves long jobs.<br />
+<strong>Round robin</strong> — a time slice each. <strong>Priority</strong> — nice, but needs ageing to avoid starvation.</li>
+<li><strong>Multilevel feedback queues</strong>: approximate SJF adaptively without knowing burst times.</li>
+<li><strong>Synchronisation</strong>: mutexes, semaphores, monitors, condition variables.</li>
+<li><strong>Producer/consumer</strong> — the canonical shared-buffer problem.</li>
+<li><strong>Deadlock</strong>: hold-and-wait, mutual exclusion, no preemption, circular wait.</li>
+</ul>
+<p>Security connection: starvation and unfair scheduling are DoS; races are exploitable races.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Preemption</strong></td>
+<td>OS forcibly interrupting a running process</td>
+</tr>
+<tr>
+<td><strong>Time slice / quantum</strong></td>
+<td>How long a process runs before switching</td>
+</tr>
+<tr>
+<td><strong>FCFS</strong></td>
+<td>First come, first served</td>
+</tr>
+<tr>
+<td><strong>SJF</strong></td>
+<td>Shortest job first</td>
+</tr>
+<tr>
+<td><strong>Convoy effect</strong></td>
+<td>Long job blocks everyone behind it</td>
+</tr>
+<tr>
+<td><strong>Starvation</strong></td>
+<td>A process never gets scheduled</td>
+</tr>
+<tr>
+<td><strong>Ageing</strong></td>
+<td>Boosting priority of waiting processes</td>
+</tr>
+<tr>
+<td><strong>Mutex</strong></td>
+<td>One-at-a-time lock</td>
+</tr>
+<tr>
+<td><strong>Semaphore</strong></td>
+<td>Counting permit</td>
+</tr>
+<tr>
+<td><strong>Condition variable</strong></td>
+<td>Wait for a state change</td>
+</tr>
+<tr>
+<td><strong>Deadlock</strong></td>
+<td>Mutual permanent blocking</td>
+</tr>
+<tr>
+<td><strong>Producer/consumer</strong></td>
+<td>Canonical bounded-buffer problem</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- observe the scheduler live ---
+top -b -n1 | head -12
+ps -eo pid,ni,pri,stat,pcpu,comm --sort=-pcpu | head -12
+chrt -p $$            # your scheduling policy and priority
+nice -n 19 true; nice -n -5 true 2&gt;&amp;1 | head -1
+
+# load average explains itself: 1/5/15 minute averages of runnable+uninterruptible
+uptime
+cat /proc/loadavg
+
+# --- synchronisation primitives on this box ---
+ls -la /dev/shm/
+ipcs -s | head
+ipcs -m | head
+
+# --- fairness under load ---
+yes &gt; /dev/null &amp; BUSY=$!
+sleep 3
+nice -n 19 bash -c 'for i in $(seq 1 200000); do :; done; echo low-priority finished'
+kill $BUSY 2&gt;/dev/null; jobs
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> measure scheduling fairness, then reproduce a real deadlock.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-os-4 &amp;&amp; cd ~/aegis/labs/neso-os-4
+
+# --- 1. how loaded is this machine, and who is using it? ---
+{
+  echo &quot;=== load average (1, 5, 15 min) ===&quot;
+  cat /proc/loadavg
+  echo
+  echo &quot;=== CPU consumers ===&quot;
+  ps -eo pid,ni,pri,stat,pcpu,pmem,comm --sort=-pcpu | head -12
+  echo
+  echo &quot;=== runnable vs uninterruptible ===&quot;
+  ps -eo stat --no-headers | cut -c1 | sort | uniq -c | sort -rn
+  echo &quot;  R = runnable, S = sleeping, D = uninterruptible (usually I/O wait)&quot;
+} &gt; 01-scheduler.txt; cat 01-scheduler.txt
+
+# --- 2. priority and the limits ---
+{
+  echo &quot;my policy and priority:&quot;; chrt -p $$ 2&gt;/dev/null
+  echo
+  echo &quot;raising priority unprivileged:&quot;
+  nice -n -5 echo &quot;allowed&quot; 2&gt;&amp;1 | head -1
+  echo &quot;lowering priority (always allowed):&quot;
+  nice -n 19 echo &quot;  nice -19 set&quot;
+  echo
+  echo &quot;=== niceness values in use on this box ===&quot;
+  ps -eo ni --no-headers | sort -n | uniq -c | tail -5
+} 2&gt;&amp;1 | tee 02-priority.txt
+
+# --- 3. FAIRNESS UNDER LOAD: does a nice +19 process still finish? ---
+( yes &gt; /dev/null ) &amp; BUSY1=$!
+( yes &gt; /dev/null ) &amp; BUSY2=$!
+sleep 2
+START=$(date +%s%N)
+# A task that never yields, to load the box. $! is its PID - capture it, or
+# there is no way to stop it later.
+nice -n 19 bash -c 'while :; do :; done' &amp;
+BUSY1=$!
+nice -n 19 bash -c 'while :; do :; done' &amp;
+BUSY2=$!
+sleep 2
+kill &quot;$BUSY1&quot; &quot;$BUSY2&quot; 2&gt;/dev/null
+wait &quot;$BUSY1&quot; &quot;$BUSY2&quot; 2&gt;/dev/null     # wait for THOSE, not for everything
+nice -n 19 bash -c 'for i in $(seq 1 500000); do :; done; echo &quot;  low-priority task DID finish&quot;'
+echo &quot;  wall time: $(( ($(date +%s%N) - START) / 1000000 )) ms&quot;
+echo
+echo &quot;On a loaded box the niced task still completes. Starvation is prevented by design;&quot;
+echo &quot;but it takes longer. That gap is what a resource-exhaustion DoS exploits.&quot;
+# No bare `wait` here: it waits for EVERY background job, so one job that
+# outlives its usefulness hangs the terminal with no way back but ^C.
+
+# --- 4. THE PRODUCER/CONSUMER PROBLEM, WITH AND WITHOUT A MUTEX ---
+cat &gt; producer.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#define N 100000
+static int buffer[N];
+static int head = 0, tail = 0;
+static int produced = 0, consumed = 0;   /* shared, unsynchronised on purpose */
+
+static void *producer(void *_) {
+    for (int i = 0; i &lt; N; i++) { buffer[tail] = i; tail = (tail+1) % N; produced++; }
+    return 0;
+}
+static void *consumer(void *_) {
+    for (int i = 0; i &lt; N; i++) { int v = buffer[head]; head = (head+1) % N; consumed += v; }
+    return 0;
+}
+int main(void) {
+    pthread_t p, c;
+    pthread_create(&amp;p, NULL, producer, NULL);
+    pthread_create(&amp;c, NULL, consumer, NULL);
+    pthread_join(p, NULL); pthread_join(c, NULL);
+    printf(&quot;expected sum=%d  got sum=%d  %s\n&quot;,
+           N*(N-1)/2, consumed, consumed == N*(N-1)/2 ? &quot;OK&quot; : &quot;CORRUPTED BY THE RACE&quot;);
+    return 0;
+}
+EOF
+gcc -O0 -o producer producer.c -lpthread
+./producer | tee 03-producer.txt
+
+gcc -O0 -fsanitize=thread -o producer-tsan producer.c -lpthread
+./producer-tsan 2&gt;&amp;1 | grep -m1 -A3 &quot;WARNING: ThreadSanitizer&quot; | head -6 | tee -a 03-producer.txt
+echo
+echo &quot;TSan names the exact conflicting lines. Always use it when writing concurrent code.&quot;
+
+# --- 5. DEADLOCK, reliably ---
+cat &gt; deadlock.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+static pthread_mutex_t a = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t b = PTHREAD_MUTEX_INITIALIZER;
+static void *t1(void *_) { pthread_mutex_lock(&amp;a); usleep(100000);
+                           pthread_mutex_lock(&amp;b); printf(&quot;t1 got both\n&quot;); return 0; }
+static void *t2(void *_) { pthread_mutex_lock(&amp;b); usleep(100000);
+                           pthread_mutex_lock(&amp;a); printf(&quot;t2 got both\n&quot;); return 0; }
+int main(void) {
+    pthread_t x, y;
+    pthread_create(&amp;x, NULL, t1, NULL);
+    pthread_create(&amp;y, NULL, t2, NULL);
+    pthread_join(x, NULL); pthread_join(y, NULL);
+    return 0;
+}
+EOF
+gcc -o deadlock deadlock.c -lpthread
+echo &quot;=== the hang IS the deadlock (10s timeout) ===&quot;
+timeout 10 ./deadlock; rc=$?
+[ $rc -eq 124 ] &amp;&amp; echo &quot;  timed out = deadlocked, exactly as designed&quot;
+echo
+echo &quot;Fix: always acquire locks in the same global order. Here t1 takes a-&gt;b, so t2 must too.&quot;
+</code></pre>
+<p><strong>Step 5 is worth experiencing once.</strong> A program that hangs forever with no error message is the<br />
+least dramatic and most common failure in concurrent systems — and the same class of bug produces<br />
+real service outages.</p>
+<p><strong>Record:</strong> <code>03-producer.txt</code> (the corrupted sum) and the TSan report beside it.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does FCFS produce the convoy effect?</li>
+<li>What problem does multilevel feedback scheduling solve?</li>
+<li>Name the four Coffman conditions for deadlock.</li>
+<li>What is the standard fix for a deadlock caused by inconsistent lock ordering?</li>
+<li>Why is starvation a denial-of-service vector rather than just "slow"?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Concurrency</strong> → <strong>Race Condition (TOCTOU)</strong> → <strong>Atomics</strong> → <strong>Dining Philosophers</strong> →<br />
+<strong>Process vs Thread</strong>.</p>

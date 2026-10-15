@@ -1,0 +1,155 @@
+<h1 id="python-basics-and-flow-control">Python Basics and Flow Control</h1>
+<h2 id="summary">Summary</h2>
+<p>The Python you need for security scripting: variables, types, control flow, functions, and the<br />
+collections you will use constantly. Deliberately narrow — no metaclasses, no decorators beyond<br />
+recognition. Everything here appears in the labs in <code>py-*</code> and in tools like <code>impacket</code>.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Dynamic typing</strong> — no declaration, but types still govern what is legal</li>
+<li><strong>Indentation is syntax</strong> — blocks are defined by whitespace, 4 spaces</li>
+<li><strong><code>if / elif / else</code></strong>, truthiness rules, the <code>"0"</code> trap</li>
+<li><strong><code>for</code> / <code>while</code></strong>, <code>range</code> stop-exclusive, <code>enumerate</code>, <code>zip</code></li>
+<li><strong>Functions</strong>: parameters, defaults, <code>*args</code>, <code>**kwargs</code>, return values</li>
+<li><strong>The collections that matter</strong>: list, dict, tuple, set, and <code>collections.Counter</code></li>
+<li><strong>Exceptions</strong>: <code>try/except/else/finally</code>, never a bare <code>except:</code></li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Dynamic typing</strong></td>
+<td>Type attached to the value, not the name</td>
+</tr>
+<tr>
+<td><strong>Truthiness</strong></td>
+<td>What a value coerces to in a boolean context</td>
+</tr>
+<tr>
+<td><strong>Mutable</strong></td>
+<td>Can be changed in place (list, dict, set)</td>
+</tr>
+<tr>
+<td><strong>Hashable</strong></td>
+<td>Usable as a dict key (str, int, tuple)</td>
+</tr>
+<tr>
+<td><strong><code>*args</code> / <code>**kwargs</code></strong></td>
+<td>Variadic positional / keyword arguments</td>
+</tr>
+<tr>
+<td><strong>Comprehension</strong></td>
+<td>Inline construction of a collection</td>
+</tr>
+<tr>
+<td><strong>F-string</strong></td>
+<td><code>f"{x}"</code> formatting</td>
+</tr>
+<tr>
+<td><strong>Docstring</strong></td>
+<td>The string under a <code>def</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 --version
+python3 -c 'import sys; print(sys.version, sys.executable)'
+
+# REPL as a scratchpad
+python3
+# &gt;&gt;&gt; type(&quot;5&quot;), type(5), bool(&quot;0&quot;), bool(&quot;&quot;), list(range(5))
+# &gt;&gt;&gt; {k: v for k, v in zip(&quot;abc&quot;, [1,2,3])}
+
+# blocks are indentation - a real error worth reading
+python3 - &lt;&lt;'PY'
+try:
+    if True:
+    print(&quot;this is an IndentationError&quot;)
+except SyntaxError as e:
+    print(&quot;SyntaxError:&quot;, e.msg, &quot;line&quot;, e.lineno)
+PY
+
+# everything in one REPL run
+python3 - &lt;&lt;'PY'
+from collections import Counter
+import re, collections
+c = Counter()
+for line in open(&quot;/etc/passwd&quot;, errors=&quot;replace&quot;):
+    if m := re.search(r&quot;:(\d+):&quot;, line): c[m.group(1)] += 1
+print(&quot;uid histogram:&quot;, dict(c))
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a flow-control exercise that parses <code>/etc/passwd</code> and reports on it.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/atb-01 &amp;&amp; cd ~/aegis/labs/atb-01
+
+cat &gt; users.py &lt;&lt;'PY'
+from collections import Counter
+
+SHELLS = (&quot;/bin/false&quot;, &quot;/usr/sbin/nologin&quot;, &quot;/bin/sync&quot;, &quot;/sbin/shutdown&quot;,
+          &quot;/usr/bin/nologin&quot;, &quot;/dev/null&quot;)
+
+def parse(path=&quot;/etc/passwd&quot;):
+    users = []
+    with open(path, errors=&quot;replace&quot;) as f:
+        for line in f:
+            if line.startswith(&quot;#&quot;):
+                continue
+            p = line.strip().split(&quot;:&quot;)
+            if len(p) &lt; 7:
+                continue
+            users.append({&quot;name&quot;: p[0], &quot;uid&quot;: int(p[2]), &quot;gid&quot;: int(p[3]),
+                          &quot;home&quot;: p[5], &quot;shell&quot;: p[6]})
+    return users
+
+def login_capable(u):
+    return u[&quot;shell&quot;] not in SHELLS
+
+def report(users):
+    capable = [u for u in users if login_capable(u)]
+    by_uid  = Counter(u[&quot;uid&quot;] for u in users)
+    homes   = Counter(u[&quot;home&quot;] for u in capable)
+    print(f&quot;  total accounts      : {len(users)}&quot;)
+    print(f&quot;  possible login      : {len(capable)}&quot;)
+    print(f&quot;  UID 0 accounts      : {[u['name'] for u in users if u['uid'] == 0]}&quot;)
+    print(f&quot;  duplicate UIDs      : {[u for u, n in by_uid.items() if n &gt; 1]}&quot;)
+    print(f&quot;  top home directories : {homes.most_common(3)}&quot;)
+    return capable
+
+if __name__ == &quot;__main__&quot;:
+    users = parse()
+    capable = report(users)
+    with open(&quot;login-capable.txt&quot;, &quot;w&quot;) as f:
+        for u in capable:
+            f.write(f&quot;{u['name']}\n&quot;)
+PY
+
+python3 users.py | tee 01-report.txt
+echo
+echo &quot;=== same output, produced with shell tools ===&quot;
+grep -v '^#' /etc/passwd | awk -F: '$(NF) !~ /(nologin|false|sync|shutdown)/ {print $1}' | wc -l
+echo
+echo &quot;=== validate against the shell version ===&quot;
+diff &lt;(python3 -c &quot;
+import users
+print('\n'.join(u['name'] for u in users.parse() if users.login_capable(u)))&quot;) \
+     &lt;(grep -v '^#' /etc/passwd | awk -F: '$(NF) !~ /(nologin|false)/ {print $1}' | sort) \
+  &amp;&amp; echo &quot;identical - your Python matches the awk pipeline&quot;
+</code></pre>
+<p><strong>Note the structure</strong>: <code>parse</code> → <code>report</code> → <code>__main__</code>. Each function one job, importable for<br />
+reuse. That is the shape of every tool in this course.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is indentation syntax in Python rather than cosmetic?</li>
+<li>What is the <code>"0"</code> truthiness trap?</li>
+<li>Why is a bare <code>except:</code> dangerous?</li>
+<li>When would you choose a set over a list?</li>
+<li>What does <code>if __name__ == "__main__":</code> make possible?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Python Fundamentals</strong> → <strong>Text Processing Tools</strong> → <strong>Automation</strong> → <strong>Sockets</strong>.</p>

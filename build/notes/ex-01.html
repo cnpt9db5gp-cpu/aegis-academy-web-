@@ -1,0 +1,285 @@
+<h1 id="compiling-a-vulnerable-target-and-auditing-its-protections">Compiling a Vulnerable Target and Auditing Its Protections</h1>
+<h2 id="summary">Summary</h2>
+<p>Before you exploit anything you must know what is protecting it. <code>checksec</code> reads a binary and<br />
+tells you which mitigations are compiled in. That report dictates your technique — there is no<br />
+point writing shellcode for a binary with NX enabled.</p>
+<p>Every exploit starts with this file.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>NX</strong>: the stack and heap are not executable. Shellcode must be <code>read()</code> in, or you must ROP</li>
+<li><strong>PIE</strong>: the binary loads at a random base. You need an address leak</li>
+<li><strong>Stack canary</strong>: a random value between locals and the return address. Corrupt it and the<br />
+  program aborts <em>before</em> returning</li>
+<li><strong>RELRO</strong>: makes the GOT read-only after relocation. Full RELRO closes the GOT-overwrite route</li>
+<li><strong>ASLR</strong> is not a binary flag — it is a system-wide runtime setting</li>
+<li>Compile flags let you turn each mitigation off, which is exactly what exploit courses do</li>
+</ul>
+<h2 id="the-mitigation-matrix">The mitigation matrix</h2>
+<table>
+<thead>
+<tr>
+<th>Mitigation</th>
+<th>Flag to disable</th>
+<th>Check with</th>
+<th>Symptom when present</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stack canary</td>
+<td><code>-fno-stack-protector</code></td>
+<td><code>checksec</code> → "Stack canary: found"</td>
+<td><code>*** stack smashing detected ***</code> and SIGABRT</td>
+</tr>
+<tr>
+<td>NX</td>
+<td><code>-z execstack</code></td>
+<td><code>GNU_STACK</code> RWX</td>
+<td><code>cannot jump to address on stack</code> from your shellcode</td>
+</tr>
+<tr>
+<td>PIE</td>
+<td><code>-no-pie</code></td>
+<td><code>ELF Type: DYN</code> vs <code>EXEC</code></td>
+<td>Hardcoded addresses do not work</td>
+</tr>
+<tr>
+<td>RELRO</td>
+<td><code>-Wl,-z,norelro</code></td>
+<td>"Full RELRO" / "No RELRO"</td>
+<td>GOT is read-only; overwriting fails</td>
+</tr>
+<tr>
+<td>Safe stack</td>
+<td><code>-fno-stack-safe-stack</code></td>
+<td>rarely</td>
+<td>Canary never appears</td>
+</tr>
+</tbody>
+</table>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>NX / DEP</strong></td>
+<td>Non-executable stack/heap</td>
+</tr>
+<tr>
+<td><strong>PIE</strong></td>
+<td>Position-independent executable; randomised base</td>
+</tr>
+<tr>
+<td><strong>ASLR</strong></td>
+<td>System-wide address randomisation</td>
+</tr>
+<tr>
+<td><strong>Stack canary</strong></td>
+<td>Random guard value before the return address</td>
+</tr>
+<tr>
+<td><strong>RELRO</strong></td>
+<td>RELocations read-only after startup</td>
+</tr>
+<tr>
+<td><strong>GOT / PLT</strong></td>
+<td>Dynamic symbol resolution structures</td>
+</tr>
+<tr>
+<td><strong>Lazy binding</strong></td>
+<td>Resolving a symbol on first call</td>
+</tr>
+<tr>
+<td><strong>Stripped</strong></td>
+<td>Symbol table removed</td>
+</tr>
+<tr>
+<td><strong>Static vs dynamic</strong></td>
+<td>Library code copied in vs resolved at runtime</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">command -v checksec gcc gdb patchelf
+
+# --- the compiler flags that matter, on one line ---
+gcc -g -O0 -fno-stack-protector -no-pie -z execstack vuln.c -o vuln
+
+# --- read the protections ---
+checksec --file=./vuln
+readelf -h ./vuln | grep Type                    # EXEC = no PIE, DYN = PIE
+readelf -lW ./vuln | grep GNU_STACK              # &quot;RWE&quot; = executable stack
+readelf -d ./vuln | grep -E &quot;BIND_NOW|FLAGS&quot;     # RELRO
+readelf -s ./vuln | grep __stack_chk_fail         # canary support linked in
+file ./vuln                                      # stripped or not
+
+# --- is ASLR on for this system? ---
+cat /proc/sys/kernel/randomize_va_space          # 0 off, 1 partial, 2 full
+sudo sysctl kernel.randomize_va_space=0           # the exploit-lab setting
+
+# --- section layout, which matters for ret2libc ---
+readelf -S ./vuln | head -20
+objdump -d ./vuln | grep -A3 &quot;&lt;plt&gt;:&quot; | head -20
+
+# --- strip it, to practise static analysis ---
+cp ./vuln ./vuln-stripped &amp;&amp; strip ./vuln-stripped
+file ./vuln ./vuln-stripped
+nm ./vuln | wc -l; nm ./vuln-stripped 2&gt;&amp;1 | head -2
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> compile the same program four ways and produce a definitive comparison of what<br />
+each flag changes. This is the reference table you will consult for the rest of Tier 3.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ex-01 &amp;&amp; cd ~/aegis/labs/ex-01
+
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+void win(void) { puts(&quot;you win&quot;); }        /* the goal */
+
+void vuln(const char *input) {
+    char buf[64];
+    strcpy(buf, input);                   /* the bug */
+    printf(&quot;got: %s\n&quot;, buf);
+}
+
+int main(int argc, char **argv) {
+    if (argc &lt; 2) { fprintf(stderr, &quot;usage: %s &lt;string&gt; [win]\n&quot;, argv[0]); return 1; }
+    vuln(argv[1]);
+    if (argc &gt; 2 &amp;&amp; strcmp(argv[2], &quot;win&quot;) == 0) win();
+    return 0;
+}
+EOF
+
+# --- the four builds ---
+gcc -Wall -g -O0 -fno-stack-protector -no-pie -z execstack  target.c -o target-weak
+gcc -Wall -g -O0 -fno-stack-protector -pie -fPIE -fstack-protector-strong target.c -o target-hardened
+gcc -Wall -g -O0 -fstack-protector-strong -pie -fPIE -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now target.c -o target-full
+gcc -Wall -g -O0 -fno-stack-protector -no-pie -z execstack -static target.c -o target-static 2&gt;/dev/null || \
+  echo &quot;(static build unavailable)&quot;
+
+# --- the audit ---
+{
+  for b in target-weak target-hardened target-full target-static; do
+    [ -f &quot;./$b&quot; ] || continue
+    echo &quot;==============================================&quot;
+    echo &quot;  $b&quot;
+    echo &quot;==============================================&quot;
+    file ./$b
+    echo &quot;--- checksec ---&quot;
+    checksec --file=./$b 2&gt;/dev/null || readelf -lW ./$b | grep -E &quot;GNU_STACK|GNU_RELRO&quot;
+    echo
+  done
+} 2&gt;&amp;1 | tee 01-audit.txt
+
+cat 01-audit.txt
+
+# --- the observable consequences ---
+echo
+echo &quot;=== consequence 1: canary aborts the program ===&quot;
+LONG=$(python3 -c 'print(&quot;A&quot;*200)')
+for b in target-weak target-hardened target-full; do
+  out=$(./$b &quot;$LONG&quot; 2&gt;&amp;1); rc=$?
+  printf &quot;  %-16s rc=%-3s %s\n&quot; &quot;$b&quot; &quot;$rc&quot; &quot;$(echo &quot;$out&quot; | head -1 | cut -c1-50)&quot;
+done
+echo
+echo &quot;  '*** stack smashing detected ***' means the canary did its job.&quot;
+
+# --- consequence 2: PIE changes where the code lives ---
+echo
+echo &quot;=== consequence 2: PIE moves the binary between runs ===&quot;
+for b in target-weak target-hardened; do
+  a=$(objdump -d ./$b 2&gt;/dev/null | grep &quot;&lt;main&gt;:&quot; | head -1 | awk '{print $1}')
+  b2=$(objdump -d ./$b 2&gt;/dev/null | grep &quot;&lt;main&gt;:&quot; | head -1 | awk '{print $1}')
+  printf &quot;  %-16s main at %s\n&quot; &quot;$b&quot; &quot;$a&quot;
+done
+echo &quot;  target-weak (no PIE) is always at a fixed address.&quot;
+echo &quot;  target-hardened (PIE) moves with ASLR on each exec of the *process*.&quot;
+
+# --- consequence 3: RELRO and the GOT ---
+echo
+echo &quot;=== consequence 3: is the GOT writable? ===&quot;
+for b in target-weak target-full; do
+  echo &quot;  --- $b ---&quot;
+  readelf -lW ./$b | grep GNU_RELRO
+  readelf -d ./$b | grep -E &quot;BIND_NOW|FLAGS&quot; | head -2
+done
+echo
+echo &quot;  Full RELRO + BIND_NOW = the GOT is mapped read-only after startup.&quot;
+echo &quot;  Partial RELRO          = the GOT stays writable until the first call resolves.&quot;
+
+# --- consequence 4: symbols present or stripped ---
+echo
+echo &quot;=== consequence 4: does it have symbols? ===&quot;
+cp target-weak target-stripped &amp;&amp; strip target-stripped
+echo &quot;  symbols in target-weak    : $(nm target-weak 2&gt;/dev/null | grep -c ' T ')&quot;
+echo &quot;  symbols in target-stripped: $(nm target-stripped 2&gt;/dev/null | grep -c ' T ')&quot;
+file target-stripped | sed 's/^/  /'
+
+# --- the build script, because you will rebuild constantly ---
+cat &gt; Makefile &lt;&lt;'MAKE'
+CC      := gcc
+WARN    := -Wall -Wextra
+DEBUG   := -g -O0
+WEAK    := -fno-stack-protector -no-pie -z execstack
+HARD    := -fstack-protector-strong -pie -fPIE
+FULL    := $(HARD) -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now
+
+all: target-weak target-hardened target-full
+
+target-weak: target.c
+    $(CC) $(WARN) $(DEBUG) $(WEAK) -o $@ $&lt;
+
+target-hardened: target.c
+    $(CC) $(WARN) $(DEBUG) $(HARD) -o $@ $&lt;
+
+target-full: target.c
+    $(CC) $(WARN) $(DEBUG) $(FULL) -o $@ $&lt;
+
+clean:
+    rm -f target-weak target-hardened target-full target-stripped
+
+.PHONY: all clean
+MAKE
+make clean &gt;/dev/null &amp;&amp; make 2&gt;&amp;1 | tail -4
+ls -la target-weak target-hardened target-full
+
+# --- the decision table you will actually use ---
+cat &gt; 02-decision.md &lt;&lt;'EOF'
+# Choosing a technique from a checksec report
+
+| Report | You must |
+|---|---|
+| No canary, NX off, no PIE | stack shellcode directly |
+| No canary, NX **on** | ret2libc or ROP |
+| Canary present | first leak the canary (format string or over-read), then exploit |
+| PIE | leak a code or libc address first |
+| Full RELRO | GOT is read-only; you must target something else (hooks, atexit, vtable...) |
+| Partial RELRO | GOT overwrite via ret2libc is available |
+| Stripped | you must reverse engineer names yourself (strings + signatures) |
+
+Practical rule: CS:IP Lecture 4 builds the same target and walks you up this
+ladder one mitigation at a time. Do it in that order and each step is obvious.
+EOF
+cat 02-decision.md
+</code></pre>
+<p><strong>Step 1's table is the artefact.</strong> <code>01-audit.txt</code> is your reference for choosing a technique,<br />
+and <code>02-decision.md</code> is the rule set. You will consult both for every exploit you write.</p>
+<p><strong>Record:</strong> <code>01-audit.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Which compiler flag disables the stack canary, and which disables NX?</li>
+<li>What does Full RELRO protect, and what technique does it close off?</li>
+<li>Why does PIE force an information leak before exploitation?</li>
+<li>What is the difference between RELRO and BIND_NOW in <code>readelf -d</code> output?</li>
+<li>How do you tell a stripped binary from an unstripped one?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>ELF &amp; PE Formats</strong> → <strong>checksec</strong> → <strong>Exploit Mitigation Audit</strong> → <strong>Stack Canary</strong> →<br />
+<strong>NX / DEP</strong> → <strong>PIE</strong> → <strong>RELRO</strong>.<br />
+This is the setup for <code>ex-02</code> through <code>ex-06</code>, and for MIT 6.858's lab 1.</p>

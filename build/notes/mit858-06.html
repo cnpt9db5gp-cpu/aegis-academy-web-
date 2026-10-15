@@ -1,0 +1,357 @@
+<h1 id="software-fault-isolation">Software Fault Isolation</h1>
+<h2 id="summary">Summary</h2>
+<p>If a bug in one component must not compromise the whole system, isolate the component. This<br />
+lecture covers the range from language-level sandboxing to hypervisors and back down to<br />
+language-managed runtimes.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Isolation vs sandboxing</strong>: isolation is the mechanism; sandboxing is a policy applied with it</li>
+<li><strong>Language-level sandboxing</strong>: the runtime enforces memory safety, so a bug stays in-process<br />
+  (Java, .NET, Python's refcounting, Rust's ownership)</li>
+<li><strong>Native Client (NaCl/Sandboxing API)</strong>: a restricted instruction subset with validation</li>
+<li><strong>Hypervisors</strong>: Type 1 (bare metal, e.g. Xen) and Type 2 (hosted, e.g. VirtualBox/KVM)</li>
+<li><strong>Static binary verification</strong>: measure the code at load time and refuse to run if changed</li>
+<li><strong>The trade</strong>: isolation costs performance and memory, and every new interface is new code</li>
+</ul>
+<h2 id="the-layers-again">The layers again</h2>
+<table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>What it trusts</th>
+<th>Isolation level</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bounds metadata</td>
+<td>hardware</td>
+<td>within a process</td>
+</tr>
+<tr>
+<td>Safe language</td>
+<td>the runtime</td>
+<td>within a process</td>
+</tr>
+<tr>
+<td>seccomp</td>
+<td>the kernel</td>
+<td>syscall restriction</td>
+</tr>
+<tr>
+<td>Container</td>
+<td>the kernel</td>
+<td>namespace isolation</td>
+</tr>
+<tr>
+<td>VM</td>
+<td>the hypervisor</td>
+<td>full kernel</td>
+</tr>
+<tr>
+<td>Enclave</td>
+<td>the CPU</td>
+<td>hardware memory isolation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="native-client-the-lectures-reading">Native Client, the lecture's reading</h2>
+<p>NaCl restricts the instruction set to what it can validate statically:</p>
+<ul>
+<li>no direct memory access; only via validated jump tables</li>
+<li>a validator proves the code and its data are consistent before execution</li>
+<li>the sandbox relies on the <em>validator</em>, so validator bugs are critical</li>
+<li>shipped in Chrome as "Native Client" (now retired) and PNaCl for Firefox</li>
+</ul>
+<p><strong>The general lesson:</strong> a restricted instruction subset is verifiable, and a verifiable subset<br />
+can be made safe against whole classes of memory-corruption bugs.</p>
+<h2 id="hypervisors">Hypervisors</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Runs on</th>
+<th>Examples</th>
+<th>Trust</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Type 1 (bare metal)</td>
+<td>hardware directly</td>
+<td>Xen, ESXi, Hyper-V</td>
+<td>no host OS</td>
+</tr>
+<tr>
+<td>Type 2 (hosted)</td>
+<td>an OS</td>
+<td>VirtualBox, VMware Workstation</td>
+<td>the host OS</td>
+</tr>
+</tbody>
+</table>
+<p>Both are "trusted": the hypervisor controls all guest memory. A hypervisor bug is an escape.<br />
+<strong>Exposed hypervisor interfaces</strong> (management APIs, device emulation) are high-value targets.</p>
+<h2 id="static-binary-verification">Static binary verification</h2>
+<p>Before running an untrusted binary, hash every page and compare against a signed manifest.</p>
+<ul>
+<li>If it matches, run it</li>
+<li>If it does not, refuse</li>
+</ul>
+<p>This is IMA/EVM in Linux and code signing on Windows. It closes the<br />
+"inject a page after the check" window, though it does not close in-kernel<br />
+rootkits.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Isolation</strong></td>
+<td>The mechanism preventing one thing from affecting another</td>
+</tr>
+<tr>
+<td><strong>Sandboxing</strong></td>
+<td>A policy enforced using an isolation mechanism</td>
+</tr>
+<tr>
+<td><strong>SFI</strong></td>
+<td>Software fault isolation; restricted instruction sets</td>
+</tr>
+<tr>
+<td><strong>NaCl / PNaCl</strong></td>
+<td>Google's restricted-instruction sandbox</td>
+</tr>
+<tr>
+<td><strong>Validator</strong></td>
+<td>The component that proves code is safe to execute</td>
+</tr>
+<tr>
+<td><strong>Hypervisor</strong></td>
+<td>The trusted layer beneath or around VMs</td>
+</tr>
+<tr>
+<td><strong>Type 1 / Type 2</strong></td>
+<td>Bare-metal vs hosted hypervisor</td>
+</tr>
+<tr>
+<td><strong>Code signing</strong></td>
+<td>Verify a binary against a signed hash before running</td>
+</tr>
+<tr>
+<td><strong>IMA / EVM</strong></td>
+<td>Linux integrity mechanisms</td>
+</tr>
+<tr>
+<td><strong>Escape</strong></td>
+<td>Breaking out of a VM or sandbox</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- which isolation is available on this kernel ---
+{
+  echo &quot;=== kernel isolation features ===&quot;
+  for f in /proc/sys/kernel/unprivileged_userns_clone \
+           /proc/sys/kernel/kptr_restrict \
+           /proc/sys/kernel/dmesg_restrict \
+           /proc/sys/kernel/perf_event_paranoid \
+           /proc/sys/kernel/unprivileged_bpf_disabled; do
+    [ -r &quot;$f&quot; ] &amp;&amp; printf &quot;  %-46s %s\n&quot; &quot;$f&quot; &quot;$(cat $f)&quot;
+  done
+  echo
+  echo &quot;=== loaded isolation-relevant modules ===&quot;
+  lsmod | grep -E &quot;overlay|seccomp|nf_tables|devpts|kvm|vbox&quot; | head -8
+} 2&gt;&amp;1 | tee 01-kernel-isolation.txt
+
+# --- which hypervisor are we inside? ---
+systemd-detect-virt
+dmidecode -s system-manufacturer 2&gt;/dev/null
+grep -oE &quot;vmx|svm|hypervisor&quot; /proc/cpuinfo | sort -u | head -3
+
+# --- code signing state, for comparison ---
+command -v sbverify sbsign 2&gt;/dev/null || echo &quot;  (sbverify not installed)&quot;
+mokutil --sb-state 2&gt;/dev/null || echo &quot;  (mokutil not installed)&quot;
+
+# --- seccomp: what is this shell restricted to? ---
+grep Seccomp /proc/self/status
+# 0 = disabled, 1 = strict, 2 = filter mode
+
+# --- run something under a seccomp filter ---
+# tools like bwrap, firejail, systemd-nspawn do this
+command -v bwrap firejail systemd-nspawn 2&gt;/dev/null
+bwrap --dev-bind / / --unshare-net --unshare-pid sh -c 'echo &quot;  inside bwrap; network ns:&quot;; ls /sys/class/net' 2&gt;/dev/null \
+  || echo &quot;  (bwrap not installed; bubblewrap is the simplest SFI/namespace sandbox)&quot;
+
+# --- a language-managed runtime is an isolation layer you already have ---
+python3 -c &quot;
+import sys, resource
+print('  python max address space:', resource.getrlimit(resource.RLIMIT_AS))
+print('  this is enforced by the OS, independent of python')&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> run three different isolation mechanisms and measure what each one restricts.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-06 &amp;&amp; cd ~/aegis/labs/mit858-06
+
+# --- 1. inventory what this system already isolates with ---
+{
+  echo &quot;=== ISOLATION INVENTORY ===&quot;
+  echo
+  echo &quot;-- namespaces per process --&quot;
+  ls -l /proc/self/ns/
+  echo
+  echo &quot;-- seccomp mode of this shell --&quot;
+  grep Seccomp /proc/self/status
+  echo
+  echo &quot;-- capabilities --&quot;
+  grep -E &quot;^Cap(Inh|Prm|Eff|Bnd)&quot; /proc/self/status
+  echo
+  echo &quot;-- kernel isolation sysctls --&quot;
+  for s in unprivileged_userns_clone kptr_restrict dmesg_restrict perf_event_paranoid; do
+    v=$(cat /proc/sys/kernel/$s 2&gt;/dev/null || echo n/a)
+    printf &quot;  %-30s %s\n&quot; &quot;$s&quot; &quot;$v&quot;
+  done
+  echo
+  echo &quot;-- virtualisation --&quot;
+  echo &quot;  detected: $(systemd-detect-virt 2&gt;/dev/null || echo none)&quot;
+  echo &quot;  vmx/svm : $(grep -cE 'vmx|svm' /proc/cpuinfo) core(s) report virtualisation support&quot;
+} 2&gt;&amp;1 | tee 01-inventory.txt
+
+# --- 2. namespace isolation, live ---
+echo
+echo &quot;=== 2. unshare: isolation you can demonstrate in one line ===&quot;
+unshare --user --map-root-user --net --pid --fork --mount-proc sh -c '
+  echo &quot;  INSIDE:&quot;
+  echo &quot;    uid        : $(id -u)  (namespaced)&quot;
+  echo &quot;    pid        : $$  (PID 1 in this namespace)&quot;
+  echo &quot;    interfaces : $(ls /sys/class/net 2&gt;/dev/null | tr &quot;\n&quot; &quot; &quot;)&quot;
+  echo &quot;    hostname   : $(hostname 2&gt;/dev/null)&quot;
+  echo
+  echo &quot;  reaching the network:&quot;
+  timeout 2 getent hosts deb.debian.org &gt;/dev/null 2&gt;&amp;1 \
+    &amp;&amp; echo &quot;    DNS resolved (network NOT isolated)&quot; \
+    || echo &quot;    DNS failed - network namespace held&quot;
+  echo
+  echo &quot;  the host filesystem:&quot;
+  ls /root /home 2&gt;/dev/null | head -3 || echo &quot;    host paths not visible&quot;
+' 2&gt;&amp;1 | tee 02-unshare.txt
+cat 02-unshare.txt
+
+echo &quot;  Compare with the same commands outside the namespace:&quot;
+echo &quot;    uid        : $(id -u)&quot;
+echo &quot;    interfaces : $(ls /sys/class/net 2&gt;/dev/null | tr '\n' ' ')&quot;
+echo &quot;    hostname   : $(hostname)&quot;
+
+# --- 3. a language-level boundary, which you already have ---
+echo
+echo &quot;=== 3. what the runtime already prevents ===&quot;
+python3 - &lt;&lt;'PY' | tee 03-language.txt
+# Python's memory safety is not free: it comes from a reference-counting
+# runtime. Demonstrate what that stops and what it does not.
+print(&quot;  -- a use-after-free that C allows, caught by Python's refcounting --&quot;)
+buf = bytearray(b&quot;ORIGINAL&quot;)
+view = memoryview(buf)
+del buf
+try:
+    print(&quot;   &quot;, bytes(view))
+except Exception as e:
+    print(f&quot;    {type(e).__name__}: {e}  &lt;- freed memory is not silently reused&quot;)
+print()
+print(&quot;  -- what Python does NOT stop --&quot;)
+try:
+    eval(&quot;1/0&quot;)
+except ZeroDivisionError as e:
+    print(f&quot;    arithmetic errors still happen: {e}&quot;)
+print(&quot;    an out-of-memory condition is still a real failure&quot;)
+import resource
+print(&quot;    address space limit:&quot;, resource.getrlimit(resource.RLIMIT_AS))
+PY
+cat 03-language.txt
+
+# --- 4. the SFI idea, illustrated ---
+echo
+echo &quot;=== 4. restricted instruction sets: the NaCl idea ===&quot;
+cat &gt; 04-nacl-idea.md &lt;&lt;'EOF'
+# What a restricted instruction set buys you
+
+A general-purpose ISA lets a program do anything with any memory. A
+sandboxed ISA narrows that:
+
+| Capability | General ISA | Sandboxed ISA |
+|---|---|---|
+| arbitrary memory read | yes | no - only validated regions |
+| arbitrary memory write | yes | no |
+| indirect jumps | anywhere | only validated targets |
+| syscall | any | an explicit allowlist |
+| self-modifying code | yes | no |
+
+Because every instruction is checkable, a validator can prove properties that
+are otherwise unprovable. That is why NaCl, wasm, and Java bytecode all take
+this shape: move the trust from &quot;the program is correct&quot; to &quot;the validator and
+the runtime are correct&quot;.
+
+**The cost:** the instruction set is smaller, so some code cannot be compiled
+to it, and there is a performance penalty for indirect-call dispatch.
+
+**Where you meet it today:** WebAssembly (the validator + JIT is a TCB that
+browsers take seriously), JavaScript engines, and every managed runtime.
+EOF
+cat 04-nacl-idea.md
+
+# --- 5. measure the cost ---
+echo
+echo &quot;=== 5. what isolation costs ===&quot;
+python3 - &lt;&lt;'PY'
+import time, subprocess
+def bench(cmd, n=20):
+    t = time.perf_counter()
+    for _ in range(n): subprocess.run(cmd, capture_output=True)
+    return (time.perf_counter() - t) / n * 1000
+base = bench([&quot;/bin/true&quot;])
+userns = bench([&quot;unshare&quot;,&quot;-Ur&quot;,&quot;--&quot;,&quot;/bin/true&quot;])
+print(f&quot;  /bin/true direct          : {base:.2f} ms&quot;)
+print(f&quot;  /bin/true under unshare -Ur: {userns:.2f} ms  (+{userns-base:.2f} ms for isolation)&quot;)
+print()
+print(&quot;  Process/namespace isolation is cheap. VM isolation is not:&quot;)
+print(&quot;  it costs hundreds of MB of RAM and tens of seconds of boot time.&quot;)
+print(&quot;  Choose the weakest isolation that still contains your threat.&quot;)
+PY
+free -h | head -2
+
+# --- 6. the decision, written out ---
+cat &gt; 05-choosing.md &lt;&lt;'EOF'
+# Choosing an isolation mechanism
+
+| Your threat | Use | Why |
+|---|---|---|
+| a bug in my own plugin | language bounds / sanitizers | it is the same process; cheap |
+| a hostile library in my process | seccomp + namespace | syscall restriction |
+| a hostile user on a shared host | container, or per-user namespace | kernel shared, risk accepted |
+| a hostile tenant | VM | separate kernel |
+| a hostile kernel | enclave | hardware boundary |
+| a hostile hypervisor | you are already at the bottom | nothing left; use encryption instead |
+
+**The rule:** use the weakest isolation that still contains the adversary you
+actually have. Every layer up costs memory, latency and operational
+complexity, and adds a new interface to get wrong.
+EOF
+cat 05-choosing.md
+</code></pre>
+<p><strong>Step 2 is the live demonstration</strong> — DNS fails, PID 1 is your own shell, and the host's<br />
+interfaces are gone. That is isolation, measured.</p>
+<p><strong>Record:</strong> <code>01-inventory.txt</code> and <code>05-choosing.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between isolation and sandboxing?</li>
+<li>What does NaCl restrict, and what does the validator prove?</li>
+<li>What is the difference between a Type 1 and Type 2 hypervisor?</li>
+<li>Why is static binary verification a separate defence from NX?</li>
+<li>Name the isolation mechanism for a hostile kernel.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Sandbox</strong> → <strong>Namespace Container</strong> → <strong>Seccomp</strong> → <strong>Privilege Separation</strong> →<br />
+<strong>Hypervisor / Enclave</strong> → <strong>Container Escape</strong>.</p>

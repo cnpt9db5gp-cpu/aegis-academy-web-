@@ -1,0 +1,238 @@
+<h1 id="debugging-and-profiling">Debugging and Profiling</h1>
+<h2 id="summary">Summary</h2>
+<p>Debugging is the skill that separates people who run tools from people who understand systems.<br />
+In security it is non-negotiable: exploiting a buffer overflow <em>is</em> debugging, malware analysis<br />
+<em>is</em> debugging, and explaining why a payload crashed <em>is</em> debugging.</p>
+<p>The tooling on Linux is excellent and mostly free. This lecture covers the four you need first:<br />
+<code>gdb</code>, <code>strace</code>, <code>ltrace</code>, and the profiler family.</p>
+<h2 id="gdb-the-tool-that-matters-most">gdb: the tool that matters most</h2>
+<pre><code class="language-bash">gdb ./program                 # run a local binary
+gdb -p 1234                   # attach to a running process (ptrace)
+gdb --args ./prog arg1 arg2   # pass arguments
+
+# the core loop
+(gdb) break main
+(gdb) run
+(gdb) next / n                # step over / step into
+(gdb) step / s                # step into
+(gdb) print x                 # inspect variable
+(gdb) print/x $rsp            # hex
+(gdb) info registers
+(gdb) x/32xb $rsp             # 32 bytes at the stack pointer, hex
+(gdb) x/s $rdi                # read a string from an address
+(gdb) disassemble main
+(gdb) backtrace / bt          # how did I get here
+(gdb) finish                  # run to end of current function
+</code></pre>
+<p><strong>A debugging session you will actually have</strong> (buffer overflow, the canonical one):</p>
+<pre><code class="language-bash">gdb --args ./vuln
+(gdb) break *main
+(gdb) run
+(gdb) disassemble main
+(gdb) break *0x4011a6          # the call instruction
+(gdb) continue
+(gdb) info registers rsp rbp
+(gdb) x/16gx $rsp
+(gdb) print $rip
+(gdb) x/i $rip                # disassemble at the current instruction
+(gdb) bt
+(gdb) quit
+</code></pre>
+<h2 id="strace-what-does-this-program-actually-ask-the-kernel-for">strace: what does this program actually ask the kernel for?</h2>
+<pre><code class="language-bash">strace ./program                       # trace everything
+strace -f ./program                    # follow forks
+strace -p 1234                         # attach to a process
+strace -e trace=network ./prog         # only syscalls touching the network
+strace -e trace=openat ./prog          # only file opens
+strace -o trace.txt ./prog             # write to file
+
+# the two best strace uses in security:
+strace -f -e trace=network curl https://example.com    # see every DNS + TLS handshake
+strace -e trace=execve -f ./suspicious-binary          # see what a binary executes
+</code></pre>
+<p><code>strace</code> on an untrusted binary is one of the cheapest, safest dynamic analyses available: the<br />
+program's own logic cannot hide a syscall from it (though anti-debugging tricks can blind parts<br />
+of it).</p>
+<h2 id="ltrace-library-calls">ltrace: library calls</h2>
+<pre><code class="language-bash">ltrace ./prog
+ltrace -e 'malloc+free+strcpy' ./prog     # only these
+</code></pre>
+<p>Where <code>strace</code> shows <code>write(1, ...)</code> (a syscall), <code>ltrace</code> shows <code>printf("...")</code> (the library<br />
+function that caused it). Combined, they answer "what did this program really do".</p>
+<h2 id="profiling-performance-and-occasionally-behaviour">Profiling: performance, and occasionally behaviour</h2>
+<pre><code class="language-bash">time ./prog
+/usr/bin/time -v ./prog                  # memory, page faults, context switches
+
+perf record -g ./prog &amp;&amp; perf report      # sampling profiler
+valgrind --leak-check=full ./prog        # memory errors (slow but precise)
+</code></pre>
+<p><code>valgrind</code> is a Tier 3 tool: it will tell you exactly which line of a program performs an invalid<br />
+memory access, which is often faster than reasoning about a crash by hand.</p>
+<h2 id="debugging-a-process-you-do-not-own">Debugging a process you do not own</h2>
+<pre><code class="language-bash"># attach (Linux allows this if same uid, or CAP_SYS_PTRACE)
+sudo gdb -p $(pgrep -f vulnerable) 
+
+# core dumps
+ulimit -c unlimited
+cat /proc/sys/kernel/core_pattern
+gdb ./prog /var/lib/systemd/coredump/...
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Debugger</strong></td>
+<td>Attaches to a program and lets you inspect its state</td>
+</tr>
+<tr>
+<td><strong>Breakpoint</strong></td>
+<td>Pause execution at an instruction or function</td>
+</tr>
+<tr>
+<td><strong>Watchpoint</strong></td>
+<td>Pause when a memory address or register changes</td>
+</tr>
+<tr>
+<td><strong>Register</strong></td>
+<td>CPU storage: <code>rip</code>, <code>rsp</code>, <code>rbp</code>, <code>rax</code>…</td>
+</tr>
+<tr>
+<td><strong>Single-step</strong></td>
+<td>Execute one instruction, then stop</td>
+</tr>
+<tr>
+<td><strong>Backtrace / <code>bt</code></strong></td>
+<td>The call stack at the current point</td>
+</tr>
+<tr>
+<td><strong>System call</strong></td>
+<td>The kernel entry: what <code>strace</code> records</td>
+</tr>
+<tr>
+<td><strong>Core dump</strong></td>
+<td>A snapshot of a crashed process's memory</td>
+</tr>
+<tr>
+<td><strong>ptrace</strong></td>
+<td>The syscall that lets one process control another</td>
+</tr>
+<tr>
+<td><strong><code>ASLR</code></strong></td>
+<td>Randomising load addresses, so addresses differ per run</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- is the toolchain there? ---
+command -v gdb gdb-multiarch strace ltrace valgrind objdump readelf nm
+gdb --version | head -1
+
+# --- gdb batch mode (scriptable, no TTY needed) ---
+gdb -q --batch \
+    -ex 'break main' -ex 'run' -ex 'info registers rip rsp' \
+    -ex 'disassemble main' -ex 'bt' \
+    ./myprogram
+
+# --- symbols: is the binary debuggable? ---
+file ./myprogram
+readelf -h ./myprogram | head -20
+readelf -s ./myprogram | grep -i main
+nm -C ./myprogram | grep -i main
+objdump -d -M intel ./myprogram | head -40
+
+# --- hardening check (essential before any exploitation) ---
+checksec --file=./myprogram 2&gt;/dev/null || \
+  readelf -l ./myprogram | grep -E 'GNU_STACK|GNU_RELRO'
+readelf -d ./myprogram | grep -E 'BIND_NOW|FLAGS'
+
+# --- strace the tools you already use ---
+strace -e trace=network -f nmap -sn 127.0.0.1 2&gt;&amp;1 | tail -20
+strace -e trace=openat curl -s https://example.com 2&gt;&amp;1 | grep -E 'resolv|connect' | head
+</code></pre>
+<p><strong>That last command is the moment it clicks</strong> — you can see <code>curl</code> resolving DNS and connecting,<br />
+syscall by syscall. This is how you will explain "how does a reverse shell work" with authority.</p>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> debug a crash, trace a network operation, and audit your toolchain's hardening.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ms-05 &amp;&amp; cd ~/aegis/labs/ms-05
+
+# --- 1. is your debugging toolchain installed? ---
+{
+  for t in gdb gdb-multiarch strace ltrace valgrind objdump readelf nm checksec; do
+    printf &quot;%-16s %s\n&quot; &quot;$t&quot; &quot;$(command -v $t || echo 'MISSING -&gt; sudo apt install $t')&quot;
+  done
+} | tee 01-toolchain.txt
+
+# --- 2. write a program that will crash, and debug it ---
+cat &gt; crashy.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+int main(int argc, char **argv) {
+    char buf[16];
+    printf(&quot;give me input: &quot;);
+    fflush(stdout);
+    strcpy(buf, argv[1]);        // no bounds check - the vulnerability
+    printf(&quot;you said: %s\n&quot;, buf);
+    return 0;
+}
+EOF
+gcc -g -O0 -fno-stack-protector -no-pie crashy.c -o crashy
+file crashy
+checksec --file=./crashy
+
+# --- 3. crash it, then look at it ---
+./crashy AAAAAAAAAAAAAAAA ; echo &quot;exit: $?&quot;
+dmesg 2&gt;/dev/null | tail -3
+
+gdb -q --batch \
+    -ex 'break main' -ex 'run AAAA' \
+    -ex 'info registers rip rsp rbp' \
+    -ex 'disassemble main' \
+    -ex 'print $rsp' \
+    -ex 'x/16xb $rbp-16' \
+    -ex 'bt' \
+    -ex 'continue' \
+    ./crashy 2&gt;&amp;1 | tee 02-gdb-trace.txt
+
+# --- 4. what syscalls does a tool make? ---
+strace -e trace=network -f nmap -sn 127.0.0.1 2&gt;&amp;1 | tail -25 | tee 03-strace-nmap.txt
+strace -e trace=network curl -s https://example.com 2&gt;&amp;1 | grep -E 'socket|connect|sendto' | head -15 \
+  &gt;&gt; 03-strace-nmap.txt
+
+# --- 5. what files does a tool read? ---
+strace -e trace=openat nmap --version 2&gt;&amp;1 | grep -oE '&quot;[^&quot;]+&quot;' | sort -u | head -30 \
+  &gt; 04-strace-files.txt
+head -20 04-strace-files.txt
+
+# --- 6. hardening audit of a real target binary ---
+sudo apt install -y checksec &gt;/dev/null 2&gt;&amp;1
+cp /usr/bin/nmap /tmp/nmap-copy 2&gt;/dev/null
+checksec --file=/tmp/nmap-copy 2&gt;&amp;1 | head -20 | tee 05-hardening.txt
+rm -f /tmp/nmap-copy
+
+# --- 7. core dump behaviour on your own machine ---
+ulimit -c
+echo &quot;core limit above (0 = disabled by default on most distros)&quot;
+</code></pre>
+<p><strong>Step 3 is the Tier 3 skill in miniature.</strong> <code>rbp-16</code> is where your buffer lives; the bytes past<br />
+it are the saved frame pointer and return address. Everything in <code>ex-03</code> and <code>ex-04</code> builds on<br />
+exactly this picture.</p>
+<p><strong>Record:</strong> in your scratchpad, write down what <code>checksec</code> says about <code>crashy</code> versus about<br />
+<code>/usr/bin/nmap</code>. The difference is why one crashes and the other does not.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li><code>gdb</code>, <code>strace</code>, <code>ltrace</code> — what does each one show you that the others cannot?</li>
+<li>What does <code>x/16xb $rsp</code> print, and what is <code>x</code>/<code>i</code>/<code>s</code> short for?</li>
+<li>Why is <code>ulimit -c unlimited</code> needed before a core dump can be written?</li>
+<li>Your program crashes at address <code>0x7fffffffe000</code>. How do you tell whether that is a<br />
+   stack address or a code address, and why does it matter?</li>
+<li>Why is <code>strace</code> considered a relatively safe way to analyse an unknown binary?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>gdb</strong> → <strong>Stack Frame</strong> → <strong>RBP / RSP</strong> → <strong>Buffer Overflow</strong> → <strong>Stack Canary</strong>.<br />
+This lecture is the setup for <code>ex-01</code> through <code>ex-06</code> in Tier 3.</p>

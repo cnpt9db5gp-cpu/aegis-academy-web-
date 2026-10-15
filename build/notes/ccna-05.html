@@ -1,0 +1,187 @@
+<h1 id="vlans-trunking-and-inter-vlan-routing">VLANs, Trunking and Inter-VLAN Routing</h1>
+<h2 id="summary">Summary</h2>
+<p>VLANs split one physical switch into multiple logical Layer 2 broadcast domains. They are the<br />
+control that makes segmentation real — and VLAN hopping is the attack that shows what it is worth.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>A VLAN is a Layer 2 broadcast domain; the tag lives in an 802.1Q frame header</li>
+<li>Ports are <strong>access</strong> (untagged, one VLAN) or <strong>trunk</strong> (tagged, multiple VLANs)</li>
+<li>Inter-VLAN traffic requires a router or Layer 3 switch — this is enforced, not convention</li>
+<li><strong>Native VLAN</strong> carries untagged traffic on a trunk; a mismatch is a real misconfiguration</li>
+<li><strong>Double tagging</strong> abuses how a switch handles a frame tagged with the native VLAN</li>
+<li>Management access (<code>ssh</code>, <code>telnet</code>) to a switch is itself the crown jewel</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>VLAN</strong></td>
+<td>Virtual LAN; a Layer 2 broadcast domain</td>
+</tr>
+<tr>
+<td><strong>Access port</strong></td>
+<td>One untagged VLAN for an endpoint</td>
+</tr>
+<tr>
+<td><strong>Trunk port</strong></td>
+<td>Carries several VLANs, 802.1Q tagged</td>
+</tr>
+<tr>
+<td><strong>802.1Q tag</strong></td>
+<td>4-byte VLAN header: PCP, DEI, VID</td>
+</tr>
+<tr>
+<td><strong>Native VLAN</strong></td>
+<td>VLAN for untagged frames on a trunk</td>
+</tr>
+<tr>
+<td><strong>VLAN hopping</strong></td>
+<td>Reaching another VLAN without routing</td>
+</tr>
+<tr>
+<td><strong>Double tagging</strong></td>
+<td>VLAN hopping using nested tags</td>
+</tr>
+<tr>
+<td><strong>Inter-VLAN routing</strong></td>
+<td>Layer 3 forwarding between VLANs</td>
+</tr>
+<tr>
+<td><strong>Management VLAN</strong></td>
+<td>The network your switch admin interface lives on</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- is this host in a VLAN? ---
+ip -d link show | grep -B1 -A1 vlan
+cat /proc/net/vlan/config 2&gt;/dev/null
+ls /sys/class/net/*/bridge/ 2&gt;/dev/null | head
+
+# --- create a VLAN interface on Linux (root) ---
+ip link add link eth0 name eth0.42 type vlan id 42
+ip addr add 192.168.42.5/24 dev eth0.42
+ip link set eth0.42 up
+ip -d link show eth0.42
+ip link del eth0.42          # clean up
+
+# --- 802.1Q module ---
+lsmod | grep 8021q
+modinfo 8021q 2&gt;/dev/null | head -3
+
+# --- bridging ---
+ip link add name br0 type bridge 2&gt;/dev/null &amp;&amp; ip link del br0
+bridge link show 2&gt;/dev/null
+ip -d link show type bridge
+
+# --- see tags on the wire ---
+sudo tcpdump -i any -n -e &quot;vlan&quot; 2&gt;/dev/null | head -10
+sudo tcpdump -i any -n -e -XX 2&gt;/dev/null | grep -i &quot;vlan&quot; | head -5
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> create a VLAN, prove the tag exists on the wire, and understand double tagging.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccna-05 &amp;&amp; cd ~/aegis/labs/ccna-05
+
+# --- 1. if this host has a second interface, build a real VLAN ---
+# Use vboxnet0 if the lab is up; otherwise this section is informational.
+if ip -br addr show vboxnet0 &gt;/dev/null 2&gt;&amp;1; then
+  sudo ip link add link vboxnet0 name vboxnet0.42 type vlan id 42
+  sudo ip addr add 192.168.42.5/24 dev vboxnet0.42
+  sudo ip link set vboxnet0.42 up
+  {
+    echo &quot;=== VLAN interface created ===&quot;
+    ip -d link show vboxnet0.42
+    echo
+    echo &quot;=== its address ===&quot;
+    ip -br addr show vboxnet0.42
+    echo
+    echo &quot;=== routing consequences ===&quot;
+    ip route get 192.168.42.1
+  } 2&gt;&amp;1 | tee 01-vlan.txt
+  sudo ip link del vboxnet0.42
+  echo &quot;cleaned up&quot;
+else
+  echo &quot;No vboxnet0. Build the lab first (docs/LAB-SETUP.md) to create real VLANs.&quot; | tee 01-vlan.txt
+fi
+
+# --- 2. watch the 802.1Q tag on the wire ---
+echo
+echo &quot;=== in two terminals, with a VLAN interface up ===&quot;
+echo &quot;  T1: sudo tcpdump -i vboxnet0 -n -e vlan&quot;
+echo &quot;  T2: ping 192.168.42.1&quot;
+echo
+echo &quot;You will see the VLAN tag in the Ethernet header. 4 bytes, PCP in the top 3 bits.&quot;
+echo &quot;The frame looks like: [dst 6][src 6][0x8100][pcp/dei/vid 2][real type 2][payload]&quot;
+
+# --- 3. what a VLAN id actually is ---
+python3 - &lt;&lt;'PY' | tee 02-tag.txt
+import struct
+# build an 802.1Q tag by hand: 0x8100 TCI
+for vid in [1, 10, 42, 100, 4094]:
+    tci = vid &amp; 0x0FFF                       # VLAN id in the low 12 bits
+    frame = b&quot;\xff\xff\xff\xff\xff\xff&quot; + b&quot;\x00\x11\x22\x33\x44\x55&quot; \
+            + b&quot;\x81\x00&quot; + struct.pack(&quot;&gt;H&quot;, tci) + b&quot;\x08\x00&quot; + b&quot;payload&quot;
+    print(f&quot;  vid={vid:&lt;6} tag bytes = {frame[12:16].hex()}  full frame = {frame.hex()}&quot;)
+print()
+print(&quot;  Only 12 bits of VLAN id exist (1-4094). PCP takes 3 bits, DEI 1 bit.&quot;)
+PY
+
+# --- 4. THE ATTACK, explained (do not run this against anything but your own lab) ---
+cat &gt; 03-double-tagging.md &lt;&lt;'EOF'
+# Double tagging, in full
+
+## Setup
+- VLAN 10 = native VLAN on the trunk, untagged
+- VLAN 20 = the target segment
+- You are on VLAN 10 (the native VLAN)
+
+## Why it works
+1. You send a frame tagged VLAN **20**, containing a frame tagged VLAN **10**.
+2. The first switch sees the outer tag (20), strips it, and forwards on VLAN 20...
+3. ...but the native-VLAN logic means it processes the *inner* frame first.
+4. The second switch strips the remaining tag (10), leaving a normal untagged frame
+5. The frame lands on VLAN 20. You have routed yourself there with no router involved.
+
+## Why the fix is not &quot;use passwords&quot;
+- Patch the switch firmware / use mitigation: change the native VLAN away from the one you
+  occupy, or disable native VLAN tagging entirely.
+
+## Why this still matters
+- VLANs are an administrative control, not a security boundary you can rely on alone.
+- The lesson generalises: a control that depends on correct configuration everywhere is not
+  a control.
+EOF
+cat 03-double-tagging.md
+
+# --- 5. the security lesson, written out ---
+cat &gt; 04-lessons.md &lt;&lt;'EOF'
+# VLAN security lessons
+
+- Inter-VLAN routing is the real control. VLANs alone are convenience.
+- The native VLAN is the dangerous one: it is implicitly trusted on every trunk.
+- Any frame that crosses a trunk must be treated as attacker-controlled.
+- A switch's own management interface is the highest-value target in the room.
+- Segmentation that depends on configuration is only as strong as the configuration.
+EOF
+cat 04-lessons.md
+</code></pre>
+<p><strong>Step 3 makes the tag concrete.</strong> <code>0x8100</code> followed by two bytes where the low 12 bits are the<br />
+VLAN id. You can decode any captured frame by hand now.</p>
+<p><strong>Record:</strong> <code>03-double-tagging.md</code> and <code>04-lessons.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between an access port and a trunk port?</li>
+<li>What does the native VLAN do, and why is it the riskiest?</li>
+<li>Why does inter-VLAN traffic require a router?</li>
+<li>Explain double tagging in four sentences.</li>
+<li>Why is a switch's management interface a priority target?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>VLANs &amp; Trunking</strong> → <strong>Double Tagging</strong> → <strong>Broadcast Domain</strong> → <strong>Subnetting</strong> →<br />
+<strong>Segmentation</strong> → <strong>Switching</strong>.</p>

@@ -1,0 +1,281 @@
+<h1 id="security-principles-and-threat-modeling">Security Principles and Threat Modeling</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161 opens by insisting on a precise definition of security, because "secure" without a definition<br />
+is not a property you can reason about. The lecture's structure — principles, then crypto, then<br />
+memory safety, then exploitation, then OS, network, web, DoS — is itself the argument that most<br />
+vulnerabilities come from a small number of recurring mistakes.</p>
+<blockquote>
+<p>Companion to <code>mit858-01</code>, which covers the same ground from the architecture side.<br />
+This note is the formal framing; that one is the systems framing.</p>
+</blockquote>
+<h2 id="the-definition-problem">The definition problem</h2>
+<p>"Secure" is not a binary property of a system. It is a <strong>relationship</strong> between three things:</p>
+<pre><code class="language-text">SECURITY = ( system, adversary, goal )
+
+secure(S, A, G)  :=  for every adversary A, S achieves goal G against A
+</code></pre>
+<p>Change any one of the three and the answer changes. The same binary is secure<br />
+against a random passerby and insecure against a root attacker. This is why<br />
+"is it secure?" is not answerable, and why every serious claim needs all<br />
+three terms.</p>
+<h2 id="the-principles">The principles</h2>
+<h3 id="1-reachability-determines-exploitability">1. Reachability determines exploitability</h3>
+<pre><code class="language-text">ATTACKER-CONTROLLED DATA -&gt; PRIVILEGED OPERATION
+         (input)                    (effect)
+</code></pre>
+<p>Almost every bug is some path that lets untrusted data influence a privileged<br />
+computation. Find the path, and you have found the bug class — regardless of<br />
+whether it is a buffer overflow, a SQL query, or a browser's parser.</p>
+<h3 id="2-no-privilege-without-a-validated-boundary">2. No privilege without a validated boundary</h3>
+<p>If A can influence B's computation, that influence must be <strong>validated</strong> at<br />
+the boundary. Validation must be complete: a check that covers most cases is<br />
+a check that will be bypassed.</p>
+<h3 id="3-minimize-privilege">3. Minimize privilege</h3>
+<p>Every component should hold the least authority it needs. A parser with no<br />
+privilege cannot be used to gain privilege. This is the whole argument for<br />
+privilege separation.</p>
+<h3 id="4-check-assumptions-at-trust-boundaries">4. Check assumptions at trust boundaries</h3>
+<p>Identities, authority, provenance and integrity all decay as they cross a<br />
+boundary. Verify them, do not infer them.</p>
+<h3 id="5-fail-closed">5. Fail closed</h3>
+<p>On error, deny. An open-by-default check is a vulnerability waiting for an<br />
+edge case.</p>
+<h3 id="6-defence-in-depth">6. Defence in depth</h3>
+<p>Assume any one control will fail. Two independent controls means one bug<br />
+does not yield a compromise.</p>
+<h2 id="a-threat-model-you-can-actually-write">A threat model you can actually write</h2>
+<pre><code class="language-text">1. What is the system? (components, entry points, data flows)
+2. Who are the adversaries? (capability, reachability, motivation)
+3. What are the assets? (what hurts if taken or corrupted)
+4. What are the goals? (confidentiality / integrity / availability, per asset)
+5. What are the assumptions? (and what breaks if each is false)
+6. What is NOT in scope? (explicit, because the omission is the risk)
+</code></pre>
+<p>CS161's emphasis is step 6. Writing what you are <em>not</em> protecting is what<br />
+converts a vague worry into an actionable statement.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Security definition</strong></td>
+<td>A precise statement relating system, adversary, goal</td>
+</tr>
+<tr>
+<td><strong>Adversary</strong></td>
+<td>A party with a capability and a motive against you</td>
+</tr>
+<tr>
+<td><strong>Capability</strong></td>
+<td>What the adversary can read, write, execute, observe</td>
+</tr>
+<tr>
+<td><strong>Reachability</strong></td>
+<td>Whether the adversary can supply input at all</td>
+</tr>
+<tr>
+<td><strong>Trust boundary</strong></td>
+<td>Where assumptions stop holding</td>
+</tr>
+<tr>
+<td><strong>Validation</strong></td>
+<td>Complete checking at a boundary</td>
+</tr>
+<tr>
+<td><strong>Least privilege</strong></td>
+<td>Minimum authority sufficient</td>
+</tr>
+<tr>
+<td><strong>Fail closed</strong></td>
+<td>Deny on error</td>
+</tr>
+<tr>
+<td><strong>Defence in depth</strong></td>
+<td>Independent controls, so one failure is not fatal</td>
+</tr>
+<tr>
+<td><strong>Asset</strong></td>
+<td>Something whose loss causes harm</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- turn a paper model into observations ---
+# capability of this account right now
+id
+groups
+sudo -n -l 2&gt;/dev/null || sudo -l
+grep -E &quot;^Cap(Eff|Bnd)&quot; /proc/self/status
+
+# reachability: what can a local user reach?
+ss -tulpn | awk 'NR==1 || $5 ~ /0\.0\.0\.0|\*/'
+echo &quot;  ^ anything on 0.0.0.0 is reachable by any host on the network&quot;
+
+# assets: what would hurt if taken?
+ls -la ~/.ssh/ ~/Projects/ 2&gt;/dev/null | head
+
+# entry points: what parses untrusted input?
+ss -tulpn | awk 'NR&gt;1{print &quot;  &quot;, $1, $5, $7}'
+
+# fail-open or fail-closed? test a few of your own error paths
+curl -s -o /dev/null -w &quot;  nonexistent path: HTTP %{http_code}\n&quot; http://127.0.0.1:8080/nope
+curl -s -o /dev/null -w &quot;  malformed host : HTTP %{http_code}\n&quot; &quot;http://[::1]:1/&quot;
+python3 -c &quot;
+import urllib.request, urllib.error
+for u in ['http://127.0.0.1:1/', 'http://nonexistent.invalid/']:
+    try:
+        urllib.request.urlopen(u, timeout=2); print('  unexpected success', u)
+    except Exception as e:
+        print(f'  {u:&lt;30} {type(e).__name__} (does not leak internals)')&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a complete threat model with an explicit out-of-scope section, and verify<br />
+each assumption against the running system.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cs161-01 &amp;&amp; cd ~/aegis/labs/cs161-01
+
+cat &gt; model.md &lt;&lt;'EOF'
+# Security definition
+
+secure(S, A, G) — state it precisely:
+
+  System    : &lt;one sentence&gt;
+  Adversary : &lt;capability, reachability, motivation&gt;
+  Goal      : &lt;confidentiality / integrity / availability, per asset&gt;
+
+Restated: &quot;Given &lt;A&gt;, &lt;S&gt; provides &lt;G&gt;.&quot;
+
+## Assets
+| Asset | Property | Value if lost | Location |
+|---|---|---|---|
+| SSH private key | C | critical | ~/.ssh/id_ed25519 |
+| AEGIS notes + progress | I | high | ~/Projects/aegis-academy |
+| git remote credentials | C,I | high | ~/.ssh (registered on GitHub) |
+| machine availability | A | medium | this host |
+
+## Adversaries
+| Who | Capability | Reachable? | Wants |
+|---|---|---|---|
+| other host on my LAN | send TCP to my 0.0.0.0 listeners | yes if any exist | access |
+| a web page I open | JS fetching my loopback services | yes, partially blocked | my dev services |
+| a malicious package | arbitrary code as me | yes if I install it | everything I can read |
+| someone with physical access | full | no (assumed) | disk |
+
+## Goals
+- C: private key never leaves the machine unencrypted to a network peer
+- I: progress file cannot be altered without detection (git history)
+- A: no service I depend on is taken down by a third party
+
+## Assumptions I am relying on
+- [ ] A1 no listener is bound to a non-loopback address
+- [ ] A2 the SSH key has no passphrase, so physical access = full access
+- [ ] A3 the git remote is private and this key is the only one registered
+- [ ] A4 every package I install comes from the configured repos
+- [ ] A5 my wireless is WPA2/WPA3 and the password is not on a sticky note
+
+## Explicitly OUT of scope
+- physical access to the machine (A2 accepted as a limitation, not solved)
+- malicious firmware or a compromised kernel
+- attacks requiring me to deliberately run hostile code
+- the public Wi-Fi operator (I accept their traffic can be observed)
+
+The out-of-scope list is the deliverable. Anything NOT listed here is a
+finding I owe myself a defence for.
+EOF
+
+{
+  echo &quot;=== VERIFYING EACH ASSUMPTION ===&quot;
+  echo
+  echo &quot;--- A1: no listener on a non-loopback address ---&quot;
+  n=$(ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/' | wc -l)
+  ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/ {print &quot;    VIOLATION: &quot; $1, $5, $7}'
+  echo &quot;    violations: $n   $([ &quot;$n&quot; -eq 0 ] &amp;&amp; echo '(assumption holds)' || echo '(ASSUMPTION FAILS)')&quot;
+  echo
+  echo &quot;--- A2: SSH key protection ---&quot;
+  ls -l ~/.ssh/id_ed25519 2&gt;/dev/null | sed 's/^/    /'
+  echo &quot;    unencrypted at rest (no passphrase) - documented as accepted risk&quot;
+  echo
+  echo &quot;--- A3: what is registered on my GitHub account ---&quot;
+  eval &quot;$(ssh-agent -s)&quot; &gt;/dev/null 2&gt;&amp;1
+  ssh -T git@github.com 2&gt;&amp;1 | head -1 | sed 's/^/    /'
+  echo &quot;    (key works; check github.com/settings/keys for anything unrecognised)&quot;
+  echo
+  echo &quot;--- A4: where do packages come from ---&quot;
+  grep -rhvE '^\s*(#|$)' /etc/apt/sources.list /etc/apt/sources.list.d/ 2&gt;/dev/null | sed 's/^/    /'
+  echo
+  echo &quot;--- A5: nothing listening that a page could reach ---&quot;
+  ss -tuln state listening | tail -n +2 | awk '{print &quot;    &quot;, $4}' | head -6
+} 2&gt;&amp;1 | tee 01-assumptions.txt
+
+# --- 6. reachability, demonstrated ---
+cat &gt; 02-reachability.md &lt;&lt;'EOF'
+# Reachability, demonstrated
+
+Three questions, in order:
+
+1. **Can they send input at all?** (network reachability, file format, argument)
+2. **Does it reach a parser?** (is there untrusted-data handling in the path)
+3. **Does the parser influence a privileged operation?** (is that output used)
+
+Most &quot;vulnerability reports&quot; fail at step 1. Most real exploits are found by
+answering all three in order.
+
+## The consequence for testing
+- If step 1 fails, stop. No amount of step-3 creativity helps.
+- If step 1 succeeds and step 2 fails, you found a dead input path — still a
+  finding (the parser may be added later).
+- Steps 2 and 3 together are the actual attack.
+
+## The consequence for architecture
+Every control should be placed at the cheapest reachable point. Validating at
+the boundary is cheaper than detecting downstream, and cheaper than relying on
+the parser being correct.
+EOF
+cat 02-reachability.md
+
+# --- 7. the principles, applied to your own machine ---
+cat &gt; 03-principles.md &lt;&lt;'EOF'
+# The principles, applied to this host
+
+| Principle | On this host |
+|---|---|
+| No privilege without a validated boundary | sudo rules are the boundary; `sudo -n -l` shows them |
+| Minimize privilege | my daily account is non-root with sudo; nothing runs as root that need not |
+| Check assumptions at trust boundaries | the scope guard in every AEGIS script is a validated boundary |
+| Fail closed | aegis scripts exit 3 and refuse on an out-of-scope target |
+| Defence in depth | loopback binding + scope guard + ROE document |
+| Reachability determines exploitability | `ss -tulpn` decides what is even worth reviewing |
+
+## Where this machine fails its own principles
+- Nothing enforces the scope guard: a script that omits it will scan whatever
+  it is given. The guard is convention, not a control.
+- The SSH key is unencrypted at rest, so A2 is a real gap rather than a
+  documented risk.
+- There is no integrity checking, so a compromised package is undetectable
+  after the fact (this is Tier 6's detection-engineering problem).
+
+An honest threat model names its own failures. This one has three.
+EOF
+cat 03-principles.md
+echo
+echo &quot;Fill in model.md, then record your three failures in 03-principles.md.&quot;
+</code></pre>
+<p><strong>Step 3 is the honest part</strong>: writing down the three ways this machine fails its own threat<br />
+model. A threat model that identifies no weaknesses is a document, not an analysis.</p>
+<p><strong>Record:</strong> <code>model.md</code> and <code>03-principles.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Write <code>secure(S, A, G)</code> and explain why all three terms are necessary.</li>
+<li>State the reachability principle in one sentence.</li>
+<li>Why is an unquoted variable expansion a security issue, not just a style one?</li>
+<li>What does "fail closed" mean, and what is the opposite bug?</li>
+<li>Why is the out-of-scope section the most important part of a threat model?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Threat Model</strong> → <strong>Attack Surface</strong> → <strong>Least Privilege</strong> → <strong>Defence in Depth</strong> →<br />
+<strong>CIA Triad</strong>.<br />
+Start here, then <code>mit858-01</code> for the architecture view.</p>

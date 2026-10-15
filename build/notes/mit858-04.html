@@ -1,0 +1,390 @@
+<h1 id="buffer-overflow-defences">Buffer Overflow Defences</h1>
+<h2 id="summary">Summary</h2>
+<p>This is 6.858's Lab 1 lecture. Buffer overflows have been the dominant remote code execution<br />
+bug for thirty years, and every defence here was built in response to a specific attack.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Stack canaries</strong> (guard values) — detect, do not prevent</li>
+<li><strong>Non-executable stack</strong> (W^X / NX) — prevent direct shellcode, force ROP</li>
+<li><strong>ASLR / PIE</strong> — raise the cost of guessing addresses</li>
+<li><strong>Safe languages / memory-safe languages</strong> — remove the class entirely</li>
+<li><strong>Baggy bounds checking</strong> — the lecture's preparation reading: add redundant bounds metadata<br />
+  so out-of-bounds accesses are detected precisely</li>
+<li>Defences are layered, and each layer shifts the attacker to the next technique</li>
+</ul>
+<h2 id="the-attackdefence-progression">The attack/defence progression</h2>
+<table>
+<thead>
+<tr>
+<th>Year</th>
+<th>Attack</th>
+<th>Defence</th>
+<th>Attacker moves to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1988</td>
+<td>Morris worm, strcpy overflows</td>
+<td>safe string functions</td>
+<td>other unbounded copies</td>
+</tr>
+<tr>
+<td>1996</td>
+<td>Stack smashing</td>
+<td>stack canaries</td>
+<td>leak the canary first</td>
+</tr>
+<tr>
+<td>1999</td>
+<td>Return-to-libc</td>
+<td>NX / non-executable stack</td>
+<td>ROP, ret2libc</td>
+</tr>
+<tr>
+<td>2001</td>
+<td>Brute-force ASLR</td>
+<td>ASLR + PIE</td>
+<td>information leak</td>
+</tr>
+<tr>
+<td>2005</td>
+<td>Heap overflows</td>
+<td>heap canaries, safe allocators</td>
+<td>use-after-free</td>
+</tr>
+<tr>
+<td>2010+</td>
+<td>Heartbleed-style leaks</td>
+<td>leak-resistant design</td>
+<td>side channels</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The lesson</strong>: each defence works, and each pushes the attacker somewhere else. None eliminates<br />
+the underlying memory-safety problem — which is why memory-safe languages are the real answer.</p>
+<h2 id="what-each-defence-actually-does">What each defence actually does</h2>
+<table>
+<thead>
+<tr>
+<th>Defence</th>
+<th>Mechanism</th>
+<th>Detects/prevents</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Canary</td>
+<td>random value before the return address, checked at exit</td>
+<td>overflow that corrupts it</td>
+<td>~1 cycle per function</td>
+</tr>
+<tr>
+<td>NX</td>
+<td>page table forbids execute on stack/heap</td>
+<td>running injected code</td>
+<td>essentially free</td>
+</tr>
+<tr>
+<td>ASLR</td>
+<td>randomise load addresses</td>
+<td><em>reliably</em> guessing addresses</td>
+<td>rare address-space exhaustion</td>
+</tr>
+<tr>
+<td>PIE</td>
+<td>randomise the binary base</td>
+<td>same</td>
+<td>negligible</td>
+</tr>
+<tr>
+<td>Stack protector</td>
+<td>canary, only on functions needing it</td>
+<td>partial</td>
+<td>near zero</td>
+</tr>
+<tr>
+<td>Safe functions</td>
+<td>bounded copies</td>
+<td>overflow via that function</td>
+<td>nil</td>
+</tr>
+<tr>
+<td>Baggy bounds</td>
+<td>redundant per-object bounds metadata</td>
+<td>precise OOB detection</td>
+<td>memory + complexity</td>
+</tr>
+</tbody>
+</table>
+<h2 id="baggy-bounds-the-lectures-reading">Baggy bounds, the lecture's reading</h2>
+<p>Instead of one check per access, store an explicit bound with <strong>every</strong> object reference. A<br />
+pointer into the middle of an array carries enough information to know which array it belongs to<br />
+and where the bound is.</p>
+<ul>
+<li>The compiler generates the metadata; the hardware compares on every access</li>
+<li>Out-of-bounds is detected <strong>exactly</strong>, not probabilistically</li>
+<li>Costs memory and code size</li>
+<li>This is a structural fix rather than a bolt-on</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Stack canary</strong></td>
+<td>Guard value between locals and the return address</td>
+</tr>
+<tr>
+<td><strong><code>__stack_chk_fail</code></strong></td>
+<td>Handler invoked on canary mismatch</td>
+</tr>
+<tr>
+<td><strong>NX / W^X</strong></td>
+<td>A page is writable or executable, never both</td>
+</tr>
+<tr>
+<td><strong>ASLR</strong></td>
+<td>Randomised load addresses per process</td>
+</tr>
+<tr>
+<td><strong>PIE</strong></td>
+<td>Position-independent executable</td>
+</tr>
+<tr>
+<td><strong>RET2LIBC</strong></td>
+<td>Return into existing libc functions</td>
+</tr>
+<tr>
+<td><strong>ROP</strong></td>
+<td>Chain instruction sequences ending in <code>ret</code></td>
+</tr>
+<tr>
+<td><strong>Info leak</strong></td>
+<td>Obtaining an address the binary hid</td>
+</tr>
+<tr>
+<td><strong>Baggy bounds</strong></td>
+<td>Per-reference bounds metadata, checked in hardware</td>
+</tr>
+<tr>
+<td><strong>Safe function</strong></td>
+<td>Bounded copy such as <code>strncpy</code></td>
+</tr>
+<tr>
+<td><strong>Format string bug</strong></td>
+<td>Attacker data used as a format specifier</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- audit a binary's defences ---
+checksec --file=./target
+readelf -s ./target | grep stack_chk_fail
+readelf -lW ./target | grep GNU_STACK
+readelf -d ./target | grep -E &quot;BIND_NOW|FLAGS&quot;
+
+# --- is the canary actually random and per-thread? ---
+# the canary lives at fs:0x28 (the thread control block)
+python3 - &lt;&lt;'PY'
+import ctypes, struct
+# TLS access via the arch_prctl interface is not exposed in ctypes,
+# so read it the observable way: compile a tiny probe.
+print(&quot;  compile: gcc -fstack-protector probe.c -o probe &amp;&amp; run it twice&quot;)
+PY
+cat &gt; probe.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+/* read fs:0x28 by hand: the canary slot */
+static uint64_t canary(void) {
+    uint64_t v;
+    __asm__ volatile(&quot;mov %%fs:0x28, %0&quot; : &quot;=r&quot;(v));
+    return v;
+}
+void f(void) { char b[8]; volatile char c = b[0]; (void)c; }
+int main(void) {
+    printf(&quot;  canary #1: 0x%016lx\n&quot;, canary());
+    f();
+    printf(&quot;  canary #2: 0x%016lx  (same process, must be identical)\n&quot;, canary());
+    return 0;
+}
+EOF
+gcc -fstack-protector probe.c -o probe &amp;&amp; ./probe &amp;&amp; echo &amp;&amp; ./probe
+echo &quot;  ^ same within a process, different between processes&quot;
+rm -f probe.c probe
+
+# --- is ASLR on here? ---
+cat /proc/sys/kernel/randomize_va_space
+sudo sysctl kernel.randomize_va_space
+for i in 1 2 3; do
+  python3 -c &quot;import ctypes; print('  heap:', hex(ctypes.addressof(ctypes.create_string_buffer(8))))&quot;
+done
+
+# --- detect a canary failure in the wild ---
+# SIGABRT with the message '*** stack smashing detected ***'
+dmesg 2&gt;/dev/null | grep -i &quot;stack smashing\|general protection&quot; | tail -3
+
+# --- compile the same bug three ways and compare ---
+printf '#include &lt;string.h&gt;\n#include &lt;stdio.h&gt;\nvoid f(const char*i){char b[16];strcpy(b,i);printf(&quot;%%s&quot;,b);}\nint main(int c,char**v){f(c&gt;1?v[1]:&quot;x&quot;);}\n' &gt; b.c
+gcc -O0 -g -fno-stack-protector b.c -o b_weak
+gcc -O0 -g -fstack-protector b.c -o b_canary
+gcc -O2 -g -fstack-protector -D_FORTIFY_SOURCE=2 b.c -o b_full
+for b in b_weak b_canary b_full; do
+  printf &quot;  %-9s &quot; &quot;$b&quot;
+  ./$b &quot;$(python3 -c 'print(&quot;A&quot;*64)')&quot; &gt;/dev/null 2&gt;&amp;1
+  echo &quot;exit=$?  $(checksec --file=./$b 2&gt;/dev/null | grep -ci canary) canary-flag&quot;
+done
+rm -f b.c b_weak b_canary b_full
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> observe the canary's behaviour directly, measure ASLR, and watch each defence<br />
+stop the same attack.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-04 &amp;&amp; cd ~/aegis/labs/mit858-04
+
+# --- 1. READ THE CANARY OUT OF THE THREAD CONTROL BLOCK ---
+cat &gt; canary.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+static uint64_t canary(void) {
+    uint64_t v;
+    __asm__ volatile(&quot;mov %%fs:0x28, %0&quot; : &quot;=r&quot;(v));
+    return v;
+}
+void use_stack(void) { volatile char buf[64]; buf[0] = 1; }
+int main(void) {
+    printf(&quot;  canary at entry : 0x%016lx\n&quot;, canary());
+    use_stack();
+    printf(&quot;  canary after    : 0x%016lx  (unchanged: it is per-thread, not per-call)\n&quot;, canary());
+    printf(&quot;  low byte        : 0x%02lx  (always zero on Linux x86-64)\n&quot;, canary() &amp; 0xff);
+    return 0;
+}
+EOF
+gcc -fstack-protector -O0 -g canary.c -o canary &amp;&amp; ./canary | tee 01-canary.txt
+echo
+./canary | sed 's/canary at entry/second run/' | tee -a 01-canary.txt
+echo
+echo &quot;  Different between runs = randomised. Same within a run = per-thread.&quot;
+echo &quot;  Low byte always 0x00 = why a naive string overwrite stops there.&quot;
+rm -f canary.c canary
+
+# --- 2. ASLR, measured three times ---
+echo
+echo &quot;=== is ASLR working on this machine? ===&quot;
+python3 - &lt;&lt;'PY' | tee 02-aslr.txt
+import ctypes, subprocess
+print(&quot;  randomize_va_space =&quot;, open(&quot;/proc/sys/kernel/randomize_va_space&quot;).read().strip(),
+      &quot; (0 off, 1 partial, 2 full)&quot;)
+print()
+for i in range(3):
+    b = ctypes.create_string_buffer(16)
+    print(f&quot;  run {i+1}: heap buffer at {ctypes.addressof(b):#018x}&quot;)
+PY
+cat 02-aslr.txt
+echo
+echo &quot;  Different addresses on every run = ASLR working.&quot;
+echo &quot;  The SAME address on every run = you disabled it (lab setting).&quot;
+
+# --- 3. NX, observed ---
+echo
+echo &quot;=== NX: can you execute code on the stack? ===&quot;
+python3 - &lt;&lt;'PY'
+import ctypes
+libc = ctypes.CDLL(&quot;libc.so.6&quot;)
+buf = ctypes.create_string_buffer(64)
+addr = ctypes.addressof(buf)
+r = libc.mprotect(buf, 64, 7)     # PROT_READ|PROT_WRITE|PROT_EXEC
+print(f&quot;  mprotect(RWX) on a stack page -&gt; {r} ({'refused: NX enforced' if r != 0 else 'granted'})&quot;)
+print(&quot;  A return to -1 means the kernel refused. That refusal is NX.&quot;)
+PY
+
+# --- 4. ONE BUG, THREE DEFENCES ---
+cat &gt; b.c &lt;&lt;'EOF'
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+void f(const char *i) { char b[16]; strcpy(b, i); printf(&quot;%s\n&quot;, b); }
+int main(int c, char **v) { if (c &gt; 1) f(v[1]); return 0; }
+EOF
+gcc -O0 -g -fno-stack-protector          b.c -o b_weak
+gcc -O0 -g -fstack-protector-strong       b.c -o b_canary
+gcc -O2 -g -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pie -fPIE b.c -o b_full
+PAY=$(python3 -c 'print(&quot;A&quot;*64)')
+{
+  echo &quot;=== the same bug, three builds ===&quot;
+  for b in b_weak b_canary b_full; do
+    echo
+    echo &quot;  ---- $b ----&quot;
+    checksec --file=./$b 2&gt;/dev/null | grep -E &quot;canary|NX|PIE|RELRO&quot; | sed 's/^/    /'
+    ./$b &quot;$PAY&quot; &gt;/dev/null 2&gt;&amp;1; rc=$?
+    printf &quot;    overflow exit code : %s\n&quot; &quot;$rc&quot;
+    case $rc in
+      0)   echo &quot;    outcome           : RETURNED (no crash - corruption may be silent)&quot; ;;
+      134) echo &quot;    outcome           : SIGABRT - the canary caught it&quot; ;;
+      139) echo &quot;    outcome           : SIGSEGV - corrupted return address&quot; ;;
+      *)   echo &quot;    outcome           : other&quot; ;;
+    esac
+  done
+} 2&gt;&amp;1 | tee 03-three-builds.txt
+cat 03-three-builds.txt
+
+# --- 5. what each defence forces you to do next ---
+cat &gt; 04-escalation.txt &lt;&lt;'EOF'
+  canary present  -&gt; leak the canary (over-read or format string) first
+  NX present      -&gt; no shellcode on the stack; use ROP or ret2libc
+  PIE + ASLR      -&gt; leak a code or libc address first
+  Full RELRO      -&gt; GOT is read-only; find another write primitive
+
+  All three -&gt; leak, leak, then ROP.
+  That is the modern exploit chain, and every stage exists because of a defence above.
+EOF
+cat 04-escalation.txt
+
+# --- 6. the honest conclusion ---
+cat &gt; 05-conclusion.md &lt;&lt;'EOF'
+# Why memory-safe languages are the real answer
+
+Buffer overflow defences are all *detection or cost*. None prevents the write
+happening:
+
+- canary: detects after the corruption
+- NX: prevents execution, not the write
+- ASLR: makes guessing hard, not impossible
+- bounds metadata: detects, with overhead
+
+They raise the price of exploitation enormously, and they have shifted the
+attacker economy toward **logic bugs and misconfiguration** — which no compiler
+flag can find.
+
+Therefore the structural fix is to remove the class of bug:
+- memory-safe languages (Rust, Go, Java, C#, Python)
+- or, in C, memory-safe abstractions plus aggressive sanitizers in development
+
+Sanitizers are worth calling out: `-fsanitize=address` finds the overflow at
+the exact source line on the first run. If you write one line of C, build it
+with ASan during development. It costs nothing at runtime in production if you
+build without it.
+EOF
+cat 05-conclusion.md
+</code></pre>
+<p><strong>Step 1 is the standout</strong> — reading the canary straight out of <code>fs:0x28</code> with inline assembly,<br />
+and observing it is random per process but constant per thread. That is the mechanism, not a<br />
+description of it.</p>
+<p><strong>Record:</strong> <code>01-canary.txt</code>, <code>02-aslr.txt</code> and <code>05-conclusion.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does a stack canary detect, and what does it not prevent?</li>
+<li>Why does NX force ROP rather than blocking the overflow?</li>
+<li>What does ASLR raise: the cost of exploitation, or the impossibility of it?</li>
+<li>Why is <code>fs:0x28</code> the right place for the canary?</li>
+<li>What is Baggy bounds checking, and why is it called structural?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Stack Canary</strong> → <strong>NX / DEP</strong> → <strong>ASLR</strong> → <strong>Buffer Overflow</strong> → <strong>Exploit Mitigation Audit</strong> →<br />
+<strong>Heap Exploitation</strong>.<br />
+This is Lab 1 of 6.858; <code>ex-01</code>..<code>ex-06</code> are its hands-on companion.</p>

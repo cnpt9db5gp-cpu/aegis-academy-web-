@@ -1,0 +1,326 @@
+<h1 id="memory-forensics-with-volatility-3">Memory Forensics with Volatility 3</h1>
+<h2 id="summary">Summary</h2>
+<p>Memory is where the running state lives: injected code, network connections, credentials in the<br />
+LSASS, and processes that never touched disk. It is also the most perishable evidence there is.</p>
+<p>The framing: <strong>Volatility answers questions about a running system that<br />
+you cannot answer from disk.</strong> The technique is not "run Volatility" —<br />
+it is knowing which question each plugin answers and running them in<br />
+order.</p>
+<blockquote>
+<p>Volatility 3 is not installed on this machine. Every command below<br />
+carries an install check, and the analytical content works regardless.</p>
+</blockquote>
+<h2 id="install">Install</h2>
+<pre><code class="language-bash"># --- 1. install, with the version that matters ---
+{
+  echo &quot;=== current state ===&quot;
+  command -v vol.py &gt;/dev/null 2&gt;&amp;1 &amp;&amp; vol.py --version 2&gt;/dev/null | sed 's/^/  /' \
+    || echo &quot;  vol.py not installed&quot;
+  python3 -c &quot;import volatility3; print('  module:', volatility3.__file__)&quot; 2&gt;/dev/null \
+    || echo &quot;  volatility3 module not present&quot;
+  echo
+  echo &quot;=== install (isolated, so it cannot break Kali's python) ===&quot;
+  echo &quot;  pipx install volatility3&quot;
+  echo &quot;  # then: ~/.local/bin/vol.py --version&quot;
+  echo
+  echo &quot;=== or a venv, if you prefer ===&quot;
+  echo &quot;  python3 -m venv ~/.venvs/vol3&quot;
+  echo &quot;  source ~/.venvs/vol3/bin/activate&quot;
+  echo &quot;  pip install volatility3&quot;
+  echo
+  echo &quot;=== SYMBOL TABLE NOTE (this is the part that confuses people) ===&quot;
+  echo &quot;  Volatility 3 builds a PDB GUID -&gt; symbol map from public symbol&quot;
+  echo &quot;  servers. If it is empty, every plugin fails with an error about&quot;
+  echo &quot;  symbols. That means: no network, or the wrong base URL, or a&quot;
+  echo &quot;  very new kernel with no published symbols.&quot;
+  echo &quot;  Check:  vol.py -vv | head -20&quot;
+  echo &quot;  Force:  vol.py --symbols https://download.msiwindowsserver.com/...&quot;
+  echo
+  echo &quot;=== offline symbol table, for when there is no network ===&quot;
+  echo &quot;  vol.py --cache-path ~/.cache/volatility3/ symbols&quot;
+  echo &quot;  (run once on a networked machine, copy the cache, reuse it)&quot;
+} 2&gt;&amp;1 | tee 01-install.txt
+</code></pre>
+<h2 id="the-plugins-grouped-by-the-question-they-answer">The plugins, grouped by the question they answer</h2>
+<pre><code class="language-text">  WHAT IS RUNNING?
+    windows.pslist         processes: pid, ppid, threads, start time
+    windows.pstree         the parent/child tree (what launched what)
+    windows.cmdline        the command line of every process
+    windows.handles        open file and registry handles per process
+    windows.dlllist        loaded modules per process
+    windows.malfind        private RWX regions: INJECTION
+
+  WHAT IS IT CONNECTED TO?
+    windows.netscan        TCP connections, owning pid, remote address
+    windows.netstat        listening and established sockets
+    windows.getsids        pid -&gt; session mapping (who is at the keyboard)
+
+  WHAT CREDENTIALS EXIST?
+    windows.credential_dump   lsadump + mimikatz + SAM + DPAPI
+    windows.hashdump          the NT hashes of every account
+    windows.lsadump           the LSASS secrets
+
+  WHAT IS THE MACHINE?
+    windows.info         OS, build, system time, processor count
+    windows.pstree       the boot parent (smss -&gt; wininit)
+    windows.cmdline      the boot command line
+    windows.verinfo      the OS version
+    windows.envars       environment variables of each process
+    windows.getsids      sessions
+
+  WHAT CHANGED?
+    windows.registry.printkey    a specific key
+    windows.registry.hivelist    which hives are loaded
+    windows.registry.hivelist    WHICH USER was logged on
+    windows.registry.userassist  what the USER typed into Explorer
+    windows.registry.runkeys     persistence
+    windows.shimcachemem     what executables have ever run
+    windows.shimcachemem-timeline  the same, with timestamps
+    windows.mftscan       files in memory
+    windows.dumpfiles     carve a file out of memory
+
+  LINUX HOSTS
+    linux.pslist, linux.pstree, linux.bash (history from memory),
+    linux.proc.Maps, linux.lsof
+</code></pre>
+<h2 id="the-order-to-run-them">The order to run them</h2>
+<pre><code class="language-bash"># --- 2. the sequence, with the reasoning ---
+cat &gt; 02-workflow.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Volatility 3 against a memory image from YOUR OWN system.
+# Volatility is not installed here; these are the commands and the
+# order. The ORDER is the content; the binary path is incidental.
+#
+# vol.py [PLUGIN] -f &lt;image&gt; [--pid X] [--name Y]
+set -uo pipefail
+VOL=&quot;${VOL:-vol.py}&quot;
+IMG=&quot;${1:?usage: ./02-workflow.sh &lt;memory.image&gt; [pid]}&quot;
+PID=&quot;${2:-}&quot;
+[ -f &quot;$IMG&quot; ] || { echo &quot;no image at $IMG&quot;; exit 1; }
+if ! command -v &quot;$VOL&quot; &gt;/dev/null 2&gt;&amp;1; then
+  echo &quot;vol.py not installed. pipx install volatility3&quot;
+  echo &quot;The commands below are correct; they will work once it is.&quot;
+  echo
+fi
+
+echo &quot;=== 1. WHAT IS THIS? (always first) ===&quot;
+# windows.info gives you the OS build and the system time.
+# The SYSTEM TIME IS YOUR CLOCK REFERENCE. Record it.
+echo &quot;  $VOL windows.info -f '$IMG'&quot;
+
+echo
+echo &quot;=== 2. WHAT IS RUNNING? ===&quot;
+echo &quot;  $VOL windows.pstree -f '$IMG'&quot;
+echo &quot;    ^ the tree tells you what launched what. An explorer.exe&quot;
+echo &quot;      with a child that is not explorer, or a svchost.exe&quot;
+echo &quot;      running cmd.exe, is the shape of an intrusion.&quot;
+echo &quot;  $VOL windows.pslist -f '$IMG'&quot;
+
+echo
+echo &quot;=== 3. WHAT WAS EXECUTED? ===&quot;
+echo &quot;  $VOL windows.cmdline -f '$IMG'&quot;
+echo &quot;    ^ every command line, with the full path. Compare against&quot;
+echo &quot;      where Windows binaries actually live.&quot;
+echo &quot;  $VOL windows.shimcachemem-timeline -f '$IMG'&quot;
+echo &quot;    ^ what ran, oldest first, with the path it ran from.&quot;
+
+echo
+echo &quot;=== 4. WHAT IS INJECTED? ===&quot;
+echo &quot;  $VOL windows.malfind -f '$IMG'&quot;
+echo &quot;    ^ private read-write-execute memory with no file behind it.&quot;
+echo &quot;      This is the single highest-signal plugin in the toolkit:&quot;
+echo &quot;      it finds shellcode that never touched disk.&quot;
+if [ -n &quot;$PID&quot; ]; then
+  echo &quot;  $VOL windows.malfind -f '$IMG' --pid $PID&quot;
+  echo &quot;  $VOL windows.dlllist -f '$IMG' --pid $PID&quot;
+  echo &quot;  $VOL windows.malfind.Dump --pid $PID -f '$IMG' --dump-dir ./dumps&quot;
+fi
+
+echo
+echo &quot;=== 5. WHO IS ON THE KEYBOARD? ===&quot;
+echo &quot;  $VOL windows.getsids -f '$IMG'&quot;
+echo &quot;  $VOL windows.sessions -f '$IMG'&quot;
+echo &quot;    ^ a headless server with one interactive session is unusual.&quot;
+echo &quot;      This is how you notice someone is RDP'd into a box that&quot;
+echo &quot;      nobody uses interactively.&quot;
+
+echo
+echo &quot;=== 6. WHAT IS IT TALKING TO? ===&quot;
+echo &quot;  $VOL windows.netscan -f '$IMG'&quot;
+echo &quot;  $VOL windows.netstat -f '$IMG'&quot;
+echo &quot;    ^ the pid that owns an outbound connection is the process.&quot;
+echo &quot;      Map it back to pslist. An outbound connection from a&quot;
+echo &quot;      signed Microsoft binary, to a new address, at 03:00, is&quot;
+echo &quot;      the finding.&quot;
+
+echo
+echo &quot;=== 7. WHAT CREDENTIALS EXIST? ===&quot;
+echo &quot;  $VOL windows.credential_dump -f '$IMG' &gt; creds.txt&quot;
+echo &quot;  $VOL windows.hashdump -f '$IMG' &gt; hashes.txt&quot;
+echo &quot;  $VOL windows.lsadump -f '$IMG' &gt; lsadump.txt&quot;
+echo &quot;    ^ WAIT FOR AUTHORISATION. These print every credential on&quot;
+echo &quot;      the host, including the logged-on user's. Handle the&quot;
+echo &quot;      output as evidence, not as a convenience.&quot;
+
+echo
+echo &quot;=== 8. WHAT DID THE USER DO? ===&quot;
+echo &quot;  $VOL windows.registry.userassist -f '$IMG'&quot;
+echo &quot;    ^ UserAssist records what was launched from EXPLORER, with&quot;
+echo &quot;      timestamps. It is the best 'what did this person do'&quot;
+echo &quot;      source in a memory image.&quot;
+
+echo
+echo &quot;=== THE SEQUENCE, IN ONE LINE ===&quot;
+echo &quot;  info -&gt; pstree/cmdline -&gt; malfind -&gt; netscan -&gt; sessions -&gt; creds&quot;
+echo &quot;  (establish what, then what is wrong with it, then who, then&quot;
+echo &quot;   what it reached, then what it stole)&quot;
+EOF
+chmod +x 02-workflow.sh
+./02-workflow.sh ~/aegis/labs/for-03/nonexistent.raw 2&gt;&amp;1 | head -30 | tee 03-workflow.txt
+
+# --- 3. offline: the malfind shape, which is the concept ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-malfind.txt
+print(&quot;  === what windows.malfind actually finds ===\n&quot;)
+print(&quot;  A PROCESS is a set of virtual memory regions. Legitimate ones:&quot;)
+print()
+print(&quot;    IMAGE   MAPPED   the .text section of a DLL  - not private&quot;)
+print(&quot;    IMAGE   MAPPED   the .data section            - not private&quot;)
+print(&quot;    MAPPED  PRIVATE  the heap, the stack          - RW, no exec&quot;)
+print()
+print(&quot;  MALLOC  PRIVATE  RWX  &lt;- THIS. There is no reason for a&quot;)
+print(&quot;                           process to have memory that is&quot;)
+print(&quot;                           simultaneously writable AND&quot;)
+print(&quot;                           executable AND private (no file&quot;)
+print(&quot;                           behind it).&quot;)
+print()
+print(&quot;  WHAT THE FOUR CAVEATS ARE, and why they matter:&quot;)
+print()
+print(&quot;    1. JIT. Java, .NET, WPF, Chrome, Firefox, and any runtime&quot;)
+print(&quot;       JIT-compiles code into RWX pages. A JIT process will&quot;)
+print(&quot;       produce findings. Correlate before you report.&quot;)
+print(&quot;    2. UNLINKED PEB. An unlinked PEB means the process removed&quot;)
+print(&quot;       itself from the process list while running. There is&quot;)
+print(&quot;       NO benign reason for this.&quot;)
+print(&quot;    3. .NET. CLR processes have RWX regions with MZ/PE headers&quot;)
+print(&quot;       or with a 'This program cannot be run in DOS mode'&quot;)
+print(&quot;       string that is NOT MZ at offset 0 - the classic&quot;)
+print(&quot;       'not really a PE' shellcode signature.&quot;)
+print(&quot;    4. HOOKED. A VMT-removed process, or a hooked ntdll, means&quot;)
+print(&quot;       something is intercepting the API calls that a userland&quot;)
+print(&quot;       tool relies on to see the process list.&quot;)
+print()
+print(&quot;  THE RANKING OF FINDINGS:&quot;)
+print(&quot;    RWX + unlinked PEB           -&gt; almost certainly malicious&quot;)
+print(&quot;    RWX + a MZ/PE at a non-zero offset -&gt; almost certainly malicious&quot;)
+print(&quot;    RWX + a .NET/Chrome/JVM PID  -&gt; probably JIT, verify elsewhere&quot;)
+print()
+print(&quot;  THE DUMP: windows.malfind.Dump writes the region out so you can&quot;)
+print(&quot;  do static analysis on it (for-05). That is the handoff:&quot;)
+print(&quot;      memory forensics finds the code, static analysis explains it.&quot;)
+PY
+cat 04-malfind.txt
+
+# --- 5. acquisition, which is where memory is actually won ---
+cat &gt; 05-acquire.md &lt;&lt;'MD'
+# Acquiring memory
+
+```text
+  ON WINDOWS (WinPmem, or Magnet RAM Capture):
+    load the driver, read physical memory to a file
+    it suspends threads briefly - the system is briefly unresponsive
+    this is a LIVE acquisition and is subject to everything for-01
+    says about live acquisition
+
+  ON LINUX (LiME):
+    ./lime lime.ko &quot;path=out.lime format=lime compress=0&quot;
+    the output is a LiME-formatted image, which Volatility reads
+    (format=lime means Volatility detects it)
+
+  FROM A DUMP FILE:
+    Windows crash dumps, hibernation files, pagefile.sys
+    a hibernation file is MEMORY, and Volatility reads it
+    a pagefile is partial and unreliable but occasionally enough
+
+  THE PRACTICAL PROBLEM: memory is 8-128 GB. You need:
+    - storage for it (you have 400 GB free)
+    - the time to transfer it
+    - RAM to analyse it: Volatility loads a large index into memory.
+      Analysing a 64 GB image wants 64 GB+ of RAM.
+```
+
+```bash
+# --- sizing, on this machine ---
+{
+  echo &quot;=== can this host capture and analyse memory? ===&quot;
+  free -h | head -2 | sed 's/^/  /'
+  echo
+  echo &quot;  capture:  needs storage equal to the RAM size. / has $(df -h / | awk 'NR==2{print $4}') free.&quot;
+  echo &quot;  analysis: Volatility indexes the image. Analysing a 32 GB&quot;
+  echo &quot;            image wants ~40+ GB of RAM to be comfortable.&quot;
+  echo &quot;            This machine has 30 GiB total, so full-RAM images&quot;
+  echo &quot;            from this host are at the edge of practical.&quot;
+  echo
+  echo &quot;  The practical answer for a laptop with 30 GiB: capture from&quot;
+  echo &quot;  a target, and do first-pass triage on a machine with more&quot;
+  echo &quot;  RAM, or analyse the most selective plugins only.&quot;
+} 2&gt;&amp;1 | tee 06-sizing.txt
+```
+
+## The authority limit
+
+```text
+  WHAT YOU CAN PROVE FROM MEMORY, AND WHAT YOU CANNOT:
+
+  PROVABLE
+    a process existed, with these threads, at this time
+    this process had these modules loaded
+    this process had these open handles
+    these sockets were open, owned by these pids
+    these credentials were in the LSASS at acquisition time
+    this user was logged on, in this session
+    this memory region was RWX and private
+
+  NOT PROVABLE FROM MEMORY ALONE
+    that the executable on disk is the one that was running
+      (the on-disk file may have been replaced since)
+    who created the process
+      (parentage is a strong hint, not proof - PEB unlinking breaks it)
+    what happened before the image was taken
+      (memory is a snapshot, not a recording)
+    the content of an encrypted volume
+      (unless the keys were resident - which is why BitLocker keys
+       in memory are worth a finding on their own)
+
+  THE RULE: corroborate with disk and with logs. A memory finding
+  alone is a hypothesis; a memory finding plus an event log entry
+  plus a file on disk is a conclusion.
+```
+MD
+cat 05-acquire.md
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: <code>04-malfind.txt</code> explains why an RWX private region is the<br />
+highest-signal artefact in memory, and then gives you the four caveats that stop you reporting a<br />
+JVM as malware. <strong>RWX + unlinked PEB</strong> is almost certainly malicious; <strong>RWX + Chrome</strong> is<br />
+probably JIT.</p>
+<p><strong><code>02-workflow.sh</code></strong> is the order — info → pstree/cmdline → malfind → netscan → sessions →<br />
+creds — with the reasoning next to each plugin, and it stops before <code>credential_dump</code> to note that<br />
+those plugins print every credential on the host and must be handled as evidence.</p>
+<p><strong><code>05-acquire.md</code></strong> sizes it against this machine: 30 GiB of RAM means a full-RAM image from a<br />
+large target is at the edge of practical, which is a real constraint worth knowing before you plan.</p>
+<p><strong>Record:</strong> <code>04-malfind.txt</code> and <code>05-acquire.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is memory the most perishable evidence, and what does booting destroy?</li>
+<li>What is the Volatility 3 symbol table, and what happens without it?</li>
+<li>Name the four plugin groups and what question each answers.</li>
+<li>Why is <code>windows.pstree</code> often the second plugin you run?</li>
+<li>What is <code>windows.malfind</code> finding, and what does an unlinked PEB mean?</li>
+<li>Give the four benign reasons for an RWX private region.</li>
+<li>Why is <code>windows.registry.userassist</code> the best "what did this person do" source?</li>
+<li>Give two things you can prove from memory and two you cannot.</li>
+<li>Why is memory analysis RAM-hungry, and what does that imply for planning?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Memory Forensics</strong> → <strong>Volatility 3</strong> → <strong>Malware Triage</strong> → <strong>Windows Artifacts</strong> →<br />
+<strong>Credential Dumping</strong>.<br />
+<code>for-05</code> is the static analysis of what <code>malfind</code> dumps.</p>

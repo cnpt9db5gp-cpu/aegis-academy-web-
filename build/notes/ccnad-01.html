@@ -1,0 +1,191 @@
+<h1 id="osi-tcpip-and-encapsulation-in-depth">OSI, TCP/IP and Encapsulation in Depth</h1>
+<h2 id="summary">Summary</h2>
+<p>The two reference models, and what encapsulation actually does to your data on the way out and<br />
+back in. Depth matters here because it is the shared vocabulary for every protocol conversation<br />
+you will ever have about a network problem or an attack.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>OSI</strong>: 7 layers — Physical, Data Link, Network, Transport, Session, Presentation, Application</li>
+<li><strong>TCP/IP</strong>: 4 layers — Link, Internet, Transport, Application</li>
+<li><strong>Encapsulation</strong>: each layer prepends its header; the receiver strips in reverse</li>
+<li><strong>PDU names</strong>: bits, frames, packets, segments/datagrams, data</li>
+<li>Session/Presentation have no separate existence in TCP/IP — the transport and app layers<br />
+  absorbed them (TLS lives roughly where Presentation would; TLS session tickets cover Session)</li>
+<li>MTU and fragmentation happen at Layer 3; fragmentation is expensive and often avoided</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Encapsulation</strong></td>
+<td>Wrapping data with layer headers</td>
+</tr>
+<tr>
+<td><strong>Decapsulation</strong></td>
+<td>Stripping headers on receipt</td>
+</tr>
+<tr>
+<td><strong>PDU</strong></td>
+<td>Protocol Data Unit; the unit at each layer</td>
+</tr>
+<tr>
+<td><strong>MTU</strong></td>
+<td>Maximum Transmission Unit per link</td>
+</tr>
+<tr>
+<td><strong>Fragmentation</strong></td>
+<td>Splitting a packet larger than the path MTU</td>
+</tr>
+<tr>
+<td><strong>Header</strong></td>
+<td>Layer metadata prepended to the payload</td>
+</tr>
+<tr>
+<td><strong>Ports</strong></td>
+<td>Transport-layer endpoint identifier</td>
+</tr>
+<tr>
+<td><strong>Sockets</strong></td>
+<td>The kernel object combining all of the above</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- headers on real traffic, layer by layer ---
+sudo tcpdump -i lo -n -vvv -X &quot;icmp and host 127.0.0.1&quot; 2&gt;/dev/null | head -30
+
+# --- Ethernet frame decoded ---
+sudo tcpdump -i lo -n -e &quot;icmp&quot; 2&gt;&amp;1 | head -5
+
+# --- IPv4 header fields ---
+ping -c1 -W1 127.0.0.1 &gt;/dev/null 2&gt;&amp;1 &amp;
+sudo timeout 5 tcpdump -i lo -n -vv &quot;icmp&quot; 2&gt;/dev/null | head -8
+wait
+
+# --- MTU and fragmentation ---
+cat /sys/class/net/*/mtu
+ip link show | head -4
+ping -c1 -W1 -M do -s 1472 8.8.8.8 2&gt;&amp;1 | tail -2
+ping -c1 -W1 -M do -s 1473 8.8.8.8 2&gt;&amp;1 | tail -2
+echo &quot;  1472 works and 1473 fails: that is exactly the 1500 MTU minus 20 IP minus 8 ICMP header&quot;
+
+# --- build an Ethernet frame by hand and read it back ---
+python3 - &lt;&lt;'PY'
+import struct
+def ether(dst, src, ethertype, payload):
+    return (bytes.fromhex(dst.replace(':','')) + bytes.fromhex(src.replace(':',''))
+            + struct.pack(&quot;&gt;H&quot;, ethertype) + payload)
+def ipv4(src, dst, proto, payload):
+    total = 20 + len(payload)
+    hdr = struct.pack(&quot;!BBHHHBBH4s4s&quot;, 0x45, 0, total, 0x1234, 0, 64, proto, 0,
+                      bytes(map(int, src.split('.'))), bytes(map(int, dst.split('.'))))
+    return hdr + payload
+frame = ether(&quot;ff:ff:ff:ff:ff:ff&quot;, &quot;00:11:22:33:44:55&quot;, 0x0800,
+              ipv4(&quot;192.168.1.10&quot;, &quot;192.168.1.1&quot;, 1, b&quot;ping-payload&quot;))
+print(f&quot;  frame length   : {len(frame)} bytes&quot;)
+print(f&quot;  dst MAC        : {frame[0:6].hex(':')}&quot;)
+print(f&quot;  src MAC        : {frame[6:12].hex(':')}&quot;)
+print(f&quot;  ethertype      : 0x{frame[12:14].hex()} (0x0800 = IPv4)&quot;)
+print(f&quot;  IP version/ihl : {frame[14] &gt;&gt; 4} / {frame[14] &amp; 0xF}&quot;)
+print(f&quot;  total length   : {struct.unpack('!H', frame[16:18])[0]}&quot;)
+print(f&quot;  TTL            : {frame[22]}&quot;)
+print(f&quot;  protocol       : {frame[23]} (1 = ICMP)&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> decode a real packet by hand, layer by layer, and confirm each field with a tool.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccnad-01 &amp;&amp; cd ~/aegis/labs/ccnad-01
+
+# --- 1. capture one packet ---
+sudo timeout 10 tcpdump -i lo -n -c 3 -X &quot;icmp&quot; 2&gt;/dev/null | tee 01-xxd.txt
+echo
+echo &quot;Each line shows 16 bytes: offset, hex, then ASCII.&quot;
+echo &quot;Walk it: 6 bytes dst MAC | 6 src | 2 type | 20 IP header | ... payload&quot;
+
+# --- 2. the same packet, annotated by tshark ---
+command -v tshark
+if command -v tshark &gt;/dev/null; then
+  sudo timeout 12 tshark -i lo -c 4 -V &quot;icmp&quot; 2&gt;/dev/null | head -40 | tee 02-tshark.txt
+  echo &quot;tshark -V prints every layer separately. Compare with 01-xxd.txt.&quot;
+fi
+
+# --- 3. MTU and fragmentation, proven ---
+{
+  echo &quot;=== interface MTUs ===&quot;
+  for i in /sys/class/net/*/mtu; do echo &quot;  $(basename $(dirname $i)): $(cat $i)&quot;; done
+  echo
+  echo &quot;=== payload size that still fits with DF set ===&quot;
+  for sz in 1472 1473 1474; do
+    r=$(ping -c1 -W1 -M do -s $sz 8.8.8.8 2&gt;&amp;1 | grep -c &quot;frag needed\|error&quot;)
+    echo &quot;  -s $sz : $([ &quot;$r&quot; -gt 0 ] &amp;&amp; echo TOO BIG || echo ok)&quot;
+  done
+  echo
+  echo &quot;1500 MTU - 20 (IP) - 8 (ICMP) = 1472. That arithmetic is the whole test.&quot;
+} 2&gt;&amp;1 | tee 03-mtu.txt
+
+# --- 4. encapsulation, seen as bytes ---
+python3 - &lt;&lt;'PY' | tee 04-encap.txt
+import struct, binascii
+payload = b&quot;GET / HTTP/1.1\r\nHost: x\r\n\r\n&quot;
+tcp = struct.pack(&quot;!HHIIBBHHH&quot;, 1234, 80, 1, 0, (5 &lt;&lt; 4), 0x18, 8192, 0, 0) + payload
+ip  = struct.pack(&quot;!BBHHHBBH4s4s&quot;, 0x45, 0, 20+len(tcp), 0x1, 0, 64, 6, 0,
+                  bytes([192,168,1,10]), bytes([192,168,1,1]))
+eth = bytes.fromhex(&quot;aabbccddeeff&quot;) + bytes.fromhex(&quot;112233445566&quot;) + struct.pack(&quot;&gt;H&quot;, 0x0800) + ip
+tcp_full = eth + tcp
+print(f&quot;  application payload : {len(payload)} bytes&quot;)
+print(f&quot;  + TCP header        : {len(tcp)} bytes (20 header + {len(payload)} payload)&quot;)
+print(f&quot;  + IP header         : {len(ip)} bytes&quot;)
+print(f&quot;  + Ethernet header   : {len(eth)} bytes (14 header + {len(ip)} IP)&quot;)
+print(f&quot;  on the wire         : {len(tcp_full)} bytes&quot;)
+print()
+print(&quot;  first 42 bytes as sent:&quot;)
+print(&quot;   &quot;, tcp_full[:42].hex(&quot; &quot;))
+print(&quot;  layer boundaries:&quot;)
+print(&quot;   &quot;, eth[:14].hex(&quot; &quot;), &quot; &lt;- Ethernet&quot;)
+print(&quot;   &quot;, eth[14:34].hex(&quot; &quot;), &quot; &lt;- IP&quot;)
+print(&quot;   &quot;, eth[34:54].hex(&quot; &quot;), &quot; &lt;- TCP&quot;)
+print(&quot;   &quot;, eth[54:].hex(&quot; &quot;) or &quot;(payload starts here)&quot;)
+PY
+
+# --- 5. the model, written out ---
+cat &gt; 05-models.md &lt;&lt;'EOF'
+# OSI vs TCP/IP
+
+| # | OSI | TCP/IP | PDU | Devices | Example protocol |
+|---|---|---|---|---|---|
+| 7 | Application | Application | Data | hosts | HTTP, DNS, SSH |
+| 6 | Presentation | (in app) | Data | - | TLS, JPEG |
+| 5 | Session | (in app) | Data | - | TLS sessions |
+| 4 | Transport | Transport | Segment/Datagram | - | TCP, UDP |
+| 3 | Network | Internet | Packet | routers | IP, ICMP, OSPF |
+| 2 | Data Link | Link | Frame | switches | Ethernet, ARP |
+| 1 | Physical | Link | Bits | hubs, cables | 1000BASE-T |
+
+Security roles:
+- L2: ARP spoofing, MAC flooding, evil twin
+- L3: spoofing, routing attacks, IP fragmentation attacks
+- L4: SYN flood, session hijacking, sequence prediction
+- L7: everything in Tier 4
+EOF
+cat 05-models.md
+</code></pre>
+<p><strong>Step 4 is the lecture.</strong> Build a packet, see where each layer's header begins and ends, and the<br />
+model stops being a diagram.</p>
+<p><strong>Record:</strong> <code>04-encap.txt</code> and <code>05-models.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the seven OSI layers and the four TCP/IP layers.</li>
+<li>What is the PDU name at layers 2, 3 and 4?</li>
+<li>Why does fragmentation usually produce "frag needed and DF set" rather than working?</li>
+<li>Where does TLS sit in this model?</li>
+<li>Give one attack at Layer 2 and one at Layer 4.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OSI Model</strong> → <strong>TCP/IP Model</strong> → <strong>Encapsulation</strong> → <strong>Protocol Analysis</strong> → <strong>Page Fault</strong> →<br />
+<strong>Ethernet Frame</strong>.</p>

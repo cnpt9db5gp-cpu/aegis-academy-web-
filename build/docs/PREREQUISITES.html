@@ -1,0 +1,123 @@
+<h1 id="prerequisites">Prerequisites</h1>
+<p>AEGIS assumes you are on Kali Linux. It does <strong>not</strong> assume you have<br />
+installed anything beyond that.</p>
+<p><code>docs/LAB-SETUP.md</code> covers the VM range. This file covers the <em>host</em><br />
+tools — the things that make individual labs work. Without them a lab<br />
+does not fail gracefully; it stops halfway with <code>command not found</code>, and<br />
+for a first-timer that reads as "the material is wrong" rather than "I<br />
+missed an install step".</p>
+<p>Check what you are missing at any time:</p>
+<pre><code>python3 tools/check_prereqs.py
+</code></pre>
+<p>That list is <strong>derived from the notes</strong>, not maintained by hand — every<br />
+command the labs invoke is extracted and resolved against <code>$PATH</code>. So it<br />
+cannot drift out of date the way a hand-written list would.</p>
+<hr />
+<h2 id="install-the-four-that-block-labs">Install the four that block labs</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Labs affected</th>
+<th>Install</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gdb</code></td>
+<td>os-02, os-04, ex-02, lo-05, ms-05</td>
+<td><code>sudo apt install gdb</code></td>
+</tr>
+<tr>
+<td><code>strace</code></td>
+<td>os-01, os-03, ms-05</td>
+<td><code>sudo apt install strace</code></td>
+</tr>
+<tr>
+<td><code>jq</code></td>
+<td>pkt-05</td>
+<td><code>sudo apt install jq</code></td>
+</tr>
+<tr>
+<td><code>yara</code></td>
+<td>for-06</td>
+<td><code>sudo apt install yara</code></td>
+</tr>
+</tbody>
+</table>
+<p>Kali carries all four in its standard repos. <code>gdb</code> is the one that will<br />
+bother you most: five labs across the OS, exploit and reverse-engineering<br />
+tracks assume it, and it is also how you read disassembly in <code>os-04</code>.</p>
+<h2 id="volatility-3-the-whole-memory-forensics-tier">Volatility 3 (the whole memory-forensics tier)</h2>
+<p>Volatility is <strong>not</strong> in Kali's repos in a usable form. Install it<br />
+isolated with <code>pipx</code>, which keeps it out of the system Python:</p>
+<pre><code>pipx install volatility3
+</code></pre>
+<p>Then check it:</p>
+<pre><code>vol.py --help
+</code></pre>
+<p>If <code>vol.py</code> is not on your <code>PATH</code> after that:</p>
+<pre><code>~/.local/bin/vol.py --help          # or add ~/.local/bin to PATH
+</code></pre>
+<p>Tier 6 (tier index 6 in the app: <code>vol-01</code> … <code>vol-04</code>) depends on this.<br />
+It is the single largest optional dependency in AEGIS — 4 notes plus<br />
+<code>cd-03</code>, which uses it for triage. Everything else in that tier<br />
+(<code>for-01</code> … <code>for-07</code>) works with the sleuthkit tools Kali already ships.</p>
+<hr />
+<h2 id="already-on-a-stock-kali-box">Already on a stock Kali box</h2>
+<p>Verified present on this machine, and used by the labs:</p>
+<pre><code>nmap tshark tcpdump nc wireshark openssl xxd
+fls mmls icat blkls            # sleuthkit
+binwalk exiftool bulk_extractor scalpel
+sqlite3 php hydra sqlmap nikto
+msfconsole msfvenom              # metasploit-framework
+</code></pre>
+<p>If you are unsure whether the forensic tools are really there:</p>
+<pre><code>for t in fls mmls icat blkls exiftool binwalk scalpel; do
+  printf '%-16s %s\n' &quot;$t&quot; &quot;$(command -v $t || echo MISSING)&quot;
+done
+</code></pre>
+<hr />
+<h2 id="the-vm-range-optional-but-most-of-tier-5-needs-it">The VM range (optional, but most of Tier 5+ needs it)</h2>
+<p>Several labs target hosts that do not exist on a bare machine:<br />
+Metasploitable 2/3, a Windows domain controller, Juice Shop. Those labs<br />
+are written against <code>192.168.56.0/24</code> and <code>10.10.10.0/24</code> on a<br />
+VirtualBox host-only network.</p>
+<p><strong>Nothing in AEGIS will touch those ranges until you build them.</strong> The<br />
+labs that need them are listed in <code>docs/LAB-SETUP.md</code>, and every script<br />
+that touches the network calls <code>~/aegis/bin/scope-guard.sh</code>, which<br />
+refuses anything outside RFC1918 and exits 3.</p>
+<p>This box has no VirtualBox, QEMU or Docker, so those labs were not run<br />
+during verification. They are checked statically only.</p>
+<hr />
+<h2 id="what-verified-means-here-honestly">What "verified" means here, honestly</h2>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Coverage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>check_shell_blocks.py</code></td>
+<td><strong>all 467</strong> shell blocks — do they parse, is any heredoc left open</td>
+</tr>
+<tr>
+<td><code>run_labs.py</code></td>
+<td>the runnable subset, executed in a sandboxed <code>HOME</code></td>
+</tr>
+<tr>
+<td><code>check_prereqs.py</code></td>
+<td>every command the labs invoke, resolved against <code>$PATH</code></td>
+</tr>
+</tbody>
+</table>
+<p>Static checks cover everything. Execution covers only what runs without<br />
+VMs. A lab that needs Metasploitable has never been run — treat Tier 5<br />
+and 6 labs as unproven until you have the range up, and expect to fix<br />
+small things when you do.</p>
+<p>That asymmetry is deliberate and worth keeping in mind: the notes are<br />
+written to be true, but "written to be true" and "exercised end to end"<br />
+are different claims, and only the first one currently holds for the VM<br />
+labs.</p>

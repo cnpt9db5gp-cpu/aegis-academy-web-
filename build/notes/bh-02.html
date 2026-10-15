@@ -1,0 +1,556 @@
+<h1 id="reading-the-graph-sessions-groups-and-acls">Reading the Graph: Sessions, Groups and ACLs</h1>
+<h2 id="summary">Summary</h2>
+<p>A graph is only useful if you can ask it questions. This note is the query set: what each edge<br />
+type means, what it enables, and which queries answer "where is the weak point".</p>
+<p>The framing: <strong>most graphs are read by scrolling a list of paths, and<br />
+that is the wrong way round.</strong> Find the paths you can take, then check<br />
+what is behind each edge.</p>
+<h2 id="the-edge-types-and-what-each-one-actually-gives-you">The edge types, and what each one actually gives you</h2>
+<pre><code class="language-text">  MEMBERSHIP (edge_group)
+    USER@DOMAIN  -&gt;  GROUP@DOMAIN
+    Direct authority. If you are the user, you are the group's rights.
+
+  MEMBER OF (transitive)
+    The graph materialises the closure. A path
+      user -&gt; &quot;IT Staff&quot; -&gt; &quot;Domain Admins&quot;
+    means the user is a Domain Admin, two hops from a group you may
+    never have heard of.
+
+  HAS SESSION (SessionLoop)
+    USER -&gt; COMPUTER, with a TIMESTAMP.
+    THE MOST IMMEDIATELY EXPLOITABLE EDGE.
+    If alice is authenticated to WEB01 and you can relay that
+    authentication, you are alice on WEB01 without any credential.
+    It is also the edge that turns into pass-the-hash trivially: read
+    the hash out of that session on that host.
+
+  ADMIN TO (LocalAdmin)
+    PRINCIPAL -&gt; COMPUTER, local administrators.
+    If you are the principal, you are SYSTEM on that host.
+
+  GENERICALL / GENERICWRITE / WRITEDACL / WRITEOWNER
+    PRINCIPAL -&gt; OBJECT
+    GenericAll       - full control of the object
+    GenericWrite     - can write most attributes, INCLUDING the
+                       script path on a computer, and the SPN on a
+                       user (so: roast it)
+    WriteDACL        - can rewrite the ACL. Equivalent to GenericAll,
+                       because you can just grant yourself GenericAll
+    WriteOwner       - take ownership, then the above
+    ValidatedWrite   - conditional write; famous for
+                       UserIsMemberOfState (ad-07)
+
+  WRITESPN
+    PRINCIPAL -&gt; USER
+    can add an SPN to that account -&gt; make it roastable -&gt; if you have
+    a low-privilege session somewhere, this is a lateral move that
+    needs no credential.
+
+  READGMSAPASSWORD
+    PRINCIPAL -&gt; GROUP
+    read the gMSA's managed password. gMSA passwords are 120 chars of
+    random, so reading one is a total compromise of that service
+    account's rights - and gMSAs are usually NOT in Domain Admin.
+
+  DCSYNC
+    PRINCIPAL -&gt; DOMAIN
+    can replicate the directory. NOT the same as Domain Admin
+    membership, and usually the more surprising finding.
+
+  ALLOWEDTODELEGATE
+    PRINCIPAL -&gt; SPN
+    can get a service ticket for that SPN as any user.
+    Together with unconstrained delegation (edge to the domain), this
+    is a path to any user's ticket.
+
+  GENERICALL on a GROUP
+    principal -&gt; group. Can add themselves, or change the group's
+    membership, or delete it.
+
+  DCSync on a COMPUTER
+    computer -&gt; domain. A machine account that can replicate the
+    directory. This is the shortcut that hand audits miss, because
+    nobody reads computer objects.
+
+  SQLADMIN / ADCSESCAPE / DCO
+    database-specific privileges in the BloodHound SQL/ADCS plugins.
+
+  DCSync via GPO
+    principal -&gt; GPO, and the GPO's scope contains a DC.
+    Write on a GPO is domain compromise (ad-07).
+</code></pre>
+<h2 id="the-queries">The queries</h2>
+<pre><code class="language-sql">-- 0. a helper, and a caveat about labels
+-- Labels are 'TYPE@DOMAIN' in UPPERCASE. 'Domain Admins@LAB.INTERNAL'.
+-- Getting the case wrong returns zero rows and reads as &quot;no path&quot;.
+
+-- 1. shortest path from alice to Domain Admins
+WITH RECURSIVE p(from, to, depth) AS (
+  SELECT 'ALICE@LAB.INTERNAL', 'DOMAIN ADMINS@LAB.INTERNAL', 0
+  UNION ALL
+  SELECT e.source, p.to, p.depth+1
+  FROM edge_acl e JOIN p ON e.target = p.from
+  WHERE p.depth &lt; 8
+)
+SELECT * FROM p WHERE from = 'ALICE@LAB.INTERNAL' AND depth &gt; 0;
+
+-- 2. every principal that can DCSync (NOT the same as Domain Admin)
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'DCSync';
+
+-- 3. every principal with delegation, and to what
+SELECT DISTINCT source, target FROM edge_acl
+WHERE type IN ('AllowedToDelegate','AllowedToDelegateTo');
+
+-- 4. principals with an SPN (the roast list)
+SELECT name FROM users WHERE serviceprincipalname IS NOT NULL;
+SELECT name FROM computers WHERE serviceprincipalname IS NOT NULL;
+
+-- 5. SPNs you can WRITE to a user (lateral roasting, no credential)
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'WriteSPN';
+
+-- 6. readGMSAPassword (a 120-char password you can read)
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'ReadGMSAPassword';
+
+-- 7. the sessions (SessionLoop), with timestamps
+SELECT source, target, time FROM sessions ORDER BY time DESC;
+
+-- 8. who is local admin where
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'AdminTo';
+
+-- 9. every path to a SPECIFIC high-value target, not Domain Admin
+--    (a SQL admin, an Exchange admin, a backup admin)
+WITH RECURSIVE p(from, to, depth) AS (
+  SELECT 'ALICE@LAB.INTERNAL', 'DOMAIN ADMINS@LAB.INTERNAL', 0
+  UNION ALL
+  SELECT e.source, p.to, p.depth+1
+  FROM edge_acl e JOIN p ON e.target = p.from
+  WHERE p.depth &lt; 8
+)
+SELECT * FROM p WHERE from='ALICE@LAB.INTERNAL' AND depth &gt; 0;
+</code></pre>
+<h2 id="reading-a-path-not-just-seeing-one">Reading a path, not just seeing one</h2>
+<pre><code class="language-text">  The path is the finding. But the REPORT is the analysis of the path:
+
+  Path:
+    alice@lab -&gt; MEMBER OF -&gt; &quot;Helpdesk&quot;@lab
+               -&gt; GENERICALL -&gt; &quot;IT Support&quot;@lab
+               -&gt; GENERICWRITE -&gt; svc-deploy@lab
+               -&gt; MEMBER OF -&gt; &quot;Domain Admins&quot;@lab
+
+  What each edge means, in the context of the attack:
+    MEMBER OF Helpdesk          - the starting point. alice is a helpdesk
+                                   user: a normal account, no admin.
+    GENERICALL on &quot;IT Support&quot;  - alice can rewrite the IT Support group.
+                                   She can add HERSELF to it.
+    GENERICWRITE on svc-deploy  - whoever is in IT Support can set any
+                                   attribute on the deploy service
+                                   account, including an SPN. That makes
+                                   it roastable. Then, with a wordlist,
+                                   the password. (ad-04)
+    MEMBER OF Domain Admins     - the account the path reaches is a
+                                   domain admin.
+
+  THE RECOMMENDATION, which must be SPECIFIC:
+    1. Remove the GENERICALL on &quot;IT Support&quot;. It should be Read, not
+       Full Control. Who granted it, and why, in 2019?
+    2. Separate the deploy service account from Domain Admins. A
+       service account that deploys code should be able to deploy to
+       servers, not administer the domain.
+    3. Constrain what service accounts can be GenericWrite'd.
+
+  WHY THIS IS BETTER THAN &quot;review your ACLs&quot;:
+    because it names the two edges, names the accounts, and gives the
+    two actions that break the path. &quot;Review your ACLs&quot; is unfalsifiable.
+</code></pre>
+<h2 id="the-questions-that-find-things">The questions that find things</h2>
+<pre><code class="language-text">  1. WHAT IS THE SHORTEST PATH, AND WHAT IS THE EDGE?
+     A 1-hop path is a bug. A 5-hop path is a design problem, and the
+     LAST edge is usually the bug regardless of the length.
+
+  2. IS THE WIN CONDITION DCSYNC OR DOMAIN ADMIN?
+     Both matter. DCSync is usually the more surprising one and often
+     the shorter one.
+
+  3. IS THERE A COMPUTER ON THE PATH?
+     A computer account in the path means you can read its hash from
+     wherever it is currently authenticated - no domain traffic needed.
+
+  4. IS THERE A WRITE ON A GPO THAT LINKS TO A DC?
+     That is domain compromise without touching a DC.
+
+  5. WHAT IS THE UAC ON EACH EDGE?
+     'GENERICALL' at the end of a path you found by enumeration is a
+     finding. 'GENERICALL' in a path you found by exploiting is a
+     different (worse) finding, and it is the one that is in scope.
+
+  6. CAN THE PATH BE WALKED WITH WHAT I ALREADY HAVE?
+     If you are currently alice, and the path from alice is 3 hops,
+     you have 3 hops to take. If it is 1 hop to DCSync, you are done.
+     The graph tells you how many things you need to do, not just
+     that you can.
+</code></pre>
+<h2 id="the-graphs-own-failure-modes">The graph's own failure modes</h2>
+<pre><code class="language-text">  1. TRUNCATION
+     A collection that errored out on 30% of objects produces a graph
+     with missing edges. A missing path is not evidence of no path.
+     ALWAYS check: users count vs ldapsearch, Domain Admins membership
+     non-zero, no errors in the collector log.
+
+  2. STALENESS
+     A graph from hour 1 is wrong by hour 8. AD changes during an
+     engagement (that is part of what you are doing). Collect at the
+     start AND the end.
+
+  3. LABEL CASE
+     BloodHound labels are UPPERCASE. 'domain admins@lab.internal'
+     returns nothing and looks like 'no path'. This is the single most
+     common analysis error.
+
+  4. CLUSTER BOUNDARIES
+     BloodHound can group principals into clusters for the GUI. A
+     cluster is NOT an equivalence of rights - it is a similarity
+     heuristic. Never report 'these 400 principals have the same
+     privileges' from a cluster.
+
+  5. READ-BASED, NOT WRITE-BASED
+     The graph shows what the ACLs PERMIT. It does not show what is
+     enforced elsewhere (a PAW, a jump host, a conditional access
+     policy, a network control). A path that crosses a firewall
+     boundary is still a path in the graph.
+     -&gt; You must overlay the NETWORK map on the GRAPH map. The
+        intersection is the real finding.
+
+  6. THE PATH IS NOT A PLAN
+     See bh-03. The graph says WHERE. The execution needs the
+     credential, the host, and the method.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Edge</strong></td>
+<td>A typed, directed relationship in the graph</td>
+</tr>
+<tr>
+<td><strong>Member / MemberOf</strong></td>
+<td>Group membership; the graph materialises the closure</td>
+</tr>
+<tr>
+<td><strong>HasSession</strong></td>
+<td>A user is authenticated to a computer now</td>
+</tr>
+<tr>
+<td><strong>AdminTo</strong></td>
+<td>A principal is a local admin on a computer</td>
+</tr>
+<tr>
+<td><strong>GenericAll / GenericWrite</strong></td>
+<td>Full or broad control of an object</td>
+</tr>
+<tr>
+<td><strong>WriteDACL</strong></td>
+<td>Can rewrite the ACL; equivalent to full control</td>
+</tr>
+<tr>
+<td><strong>WriteSPN</strong></td>
+<td>Can add an SPN; makes an account roastable</td>
+</tr>
+<tr>
+<td><strong>ReadGMSAPassword</strong></td>
+<td>Can read a gMSA's managed password</td>
+</tr>
+<tr>
+<td><strong>DCSync</strong></td>
+<td>Can replicate the directory</td>
+</tr>
+<tr>
+<td><strong>AllowedToDelegate</strong></td>
+<td>Can get tickets for an SPN as any user</td>
+</tr>
+<tr>
+<td><strong>Cluster</strong></td>
+<td>A UI similarity grouping; NOT a rights equivalence</td>
+</tr>
+<tr>
+<td><strong>Truncation</strong></td>
+<td>A partial collection producing false negatives</td>
+</tr>
+<tr>
+<td><strong>Staleness</strong></td>
+<td>A graph from earlier is not the graph now</td>
+</tr>
+<tr>
+<td><strong>Path length</strong></td>
+<td>Hops from a starting principal to the target</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/bh-02 &amp;&amp; cd ~/aegis/labs/bh-02
+
+# --- 1. build a realistic graph, then query it ---
+cat &gt; graph.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;A miniature AD graph and the queries that matter.
+
+You do not need BloodHound to understand it. Once you can see the
+edges on a 40-node graph, the tool is just this with 40,000 nodes.
+&quot;&quot;&quot;
+from collections import defaultdict, deque
+import sys
+
+class Graph:
+    def __init__(self):
+        self.out = defaultdict(list)
+        self.label = {}
+        self.props = {}
+
+    def p(self, name, kind, **props):
+        self.label[name] = kind
+        self.props[name] = props
+        self.out.setdefault(name, [])
+        return name
+
+    def e(self, src, kind, dst):
+        self.out[src].append((kind, dst))
+        self.out.setdefault(dst, [])
+
+    def path(self, src, dst, maxd=8):
+        q, seen = deque([(src, [])]), {src}
+        while q:
+            n, p = q.popleft()
+            if n == dst: return p
+            if len(p) &gt;= maxd: continue
+            for kind, t in self.out[n]:
+                if t not in seen:
+                    seen.add(t); q.append((t, p + [(kind, t)]))
+        return None
+
+    def who_can(self, dst, maxd=6):
+        back = defaultdict(list)
+        for s, es in self.out.items():
+            for kind, t in es: back[t].append((s, kind))
+        res, q, seen = {}, deque([(dst, 0)]), {dst}
+        while q:
+            n, d = q.popleft()
+            if d &gt;= maxd: continue
+            for s, kind in back[n]:
+                res.setdefault((d, s), kind)
+                if s not in seen: seen.add(s); q.append((s, d+1))
+        return res
+
+g = Graph()
+DA  = g.p(&quot;DOMAIN ADMINS@LAB.INTERNAL&quot;, &quot;group&quot;)
+IT  = g.p(&quot;IT SUPPORT@LAB.INTERNAL&quot;, &quot;group&quot;)
+HD  = g.p(&quot;HELPDESK@LAB.INTERNAL&quot;, &quot;group&quot;)
+al  = g.p(&quot;ALICE@LAB.INTERNAL&quot;, &quot;user&quot;, kind=&quot;helpdesk&quot;)
+bo  = g.p(&quot;BOB@LAB.INTERNAL&quot;, &quot;user&quot;, kind=&quot;helpdesk&quot;)
+er  = g.p(&quot;ERIN@LAB.INTERNAL&quot;, &quot;user&quot;, kind=&quot;it&quot;)
+sv  = g.p(&quot;SVC-DEPLOY@LAB.INTERNAL&quot;, &quot;user&quot;, spn=&quot;HTTP/deploy.lab.internal&quot;,
+          delegated=True, groups=&quot;DOMAIN ADMINS@LAB.INTERNAL&quot;)
+wb  = g.p(&quot;WEB01@LAB.INTERNAL&quot;, &quot;computer&quot;, sessions=[&quot;ALICE@LAB.INTERNAL&quot;])
+dc  = g.p(&quot;DC01@LAB.INTERNAL&quot;, &quot;computer&quot;, isdc=True)
+wl  = g.p(&quot;WLS01@LAB.INTERNAL&quot;, &quot;computer&quot;)
+gmsa= g.p(&quot;GMSA-FILES@LAB.INTERNAL&quot;, &quot;user&quot;, isgmsa=True)
+
+g.e(al, &quot;MEMBER OF&quot;, HD)
+g.e(bo, &quot;MEMBER OF&quot;, HD)
+g.e(er, &quot;MEMBER OF&quot;, IT)
+g.e(sv, &quot;MEMBER OF&quot;, DA)
+g.e(HD, &quot;GENERICALL&quot;, IT)            # Helpdesk can rewrite IT Support
+g.e(IT, &quot;GENERICWRITE&quot;, sv)         # IT Support can add an SPN to svc-deploy
+g.e(wb, &quot;HAS SESSION&quot;, al)          # alice is authenticated to WEB01
+g.e(wb, &quot;ADMINTO&quot;, er)              # erin is local admin on WEB01
+g.e(wl, &quot;DCSYNC&quot;, dc)               # a COMPUTER can replicate the directory
+g.e(al, &quot;READGMSAPASSWORD&quot;, gmsa)    # alice can read the gMSA password
+
+def show(title, items):
+    print(f&quot;\n{'='*70}\n{title}\n{'='*70}&quot;)
+    for line in items: print(line)
+
+show(&quot;THE GRAPH&quot;, [f&quot;  {s:&lt;28} --{k:&lt;16}--&gt; {t}&quot; for s in sorted(g.out)
+                   for k, t in g.out[s]])
+
+show(&quot;QUERY 1: shortest path ALICE -&gt; DOMAIN ADMINS&quot;, 
+     [f&quot;  {n:&lt;28} --{k}--&gt;&quot; for k, n in (g.path(al, DA) or [])] or [&quot;  (none)&quot;])
+
+show(&quot;QUERY 2: who can DCSync (not the same as Domain Admin)&quot;,
+     [f&quot;  {s:&lt;28} depth {d}  (last edge: {k})&quot;
+      for (d, s), k in sorted(g.who_can(dc).items()) if k == &quot;DCSYNC&quot;])
+
+show(&quot;QUERY 3: who can DELEGATE&quot;,
+     [f&quot;  {s:&lt;28} -&gt; {t}&quot; for s in sorted(g.out) for k, t in g.out[s]
+      if k == &quot;GENERICWRITE&quot; and g.props.get(t, {}).get(&quot;delegated&quot;)])
+
+show(&quot;QUERY 4: who can READ a gMSA password&quot;,
+     [f&quot;  {s:&lt;28} can read {t}&quot; for s in sorted(g.out) for k, t in g.out[s]
+      if k == &quot;READGMSAPASSWORD&quot;])
+
+show(&quot;QUERY 5: SESSIONS - the most immediately exploitable edges&quot;,
+     [f&quot;  {t} is authenticated to {s} (NOW)&quot; for s in sorted(g.out)
+      for k, t in g.out[s] if k == &quot;HAS SESSION&quot;])
+
+show(&quot;READING THE ALICE PATH, not just seeing it&quot;,
+     [f&quot;  MEMBER OF {HD}      - the starting point: alice is a normal&quot;,
+      &quot;                         helpdesk user, no admin, nothing special&quot;,
+      f&quot;  GENERICALL on {IT}   - she can rewrite the IT Support group, so&quot;,
+      &quot;                         she can add HERSELF to it&quot;,
+      f&quot;  GENERICWRITE on {sv} - IT Support can set any attribute on the&quot;,
+      &quot;                         deploy service account, including an SPN.&quot;,
+      &quot;                         That makes it roastable. Then a wordlist.&quot;,
+      f&quot;  MEMBER OF {DA}      - the account at the end is a domain admin&quot;,
+      &quot;&quot;,
+      &quot;  THE RECOMMENDATION, which must be specific:&quot;,
+      &quot;    1. Remove GENERICALL on 'IT Support' - it should be Read, not&quot;,
+      &quot;       Full Control. Who granted it, and why, in 2019?&quot;,
+      &quot;    2. Separate the deploy service account from Domain Admins - a&quot;,
+      &quot;       service account that deploys code should deploy to servers,&quot;,
+      &quot;       not administer the domain.&quot;,
+      &quot;    3. Constrain which service accounts can be GenericWrite'd.&quot;,
+      &quot;&quot;,
+      &quot;  This is better than 'review your ACLs' because it names the two&quot;,
+      &quot;  edges, names the accounts, and gives two actions that break the path.&quot;])
+PY
+python3 graph.py 2&gt;&amp;1 | tee 01-graph.txt
+
+# --- 2. the SQL form, for a real collection ---
+cat &gt; 02-queries.sql &lt;&lt;'EOF'
+-- BloodHound collections are SQLite. These are the queries.
+-- Labels are UPPERCASE: 'DOMAIN ADMINS@LAB.INTERNAL'. Getting the case
+-- wrong returns zero rows and reads as &quot;no path exists&quot; - the single
+-- most common analysis error.
+
+-- 0. what is in here?
+SELECT 'users' t, COUNT(*) n FROM users
+UNION ALL SELECT 'computers', COUNT(*) FROM computers
+UNION ALL SELECT 'groups', COUNT(*) FROM groups
+UNION ALL SELECT 'sessions', COUNT(*) FROM sessions;
+
+-- 1. shortest path alice -&gt; Domain Admins
+WITH RECURSIVE p(from, to, depth) AS (
+  SELECT 'ALICE@LAB.INTERNAL', 'DOMAIN ADMINS@LAB.INTERNAL', 0
+  UNION ALL
+  SELECT e.source, p.to, p.depth + 1
+  FROM edge_acl e JOIN p ON e.target = p.from
+  WHERE p.depth &lt; 8
+)
+SELECT * FROM p WHERE from = 'ALICE@LAB.INTERNAL' AND depth &gt; 0;
+
+-- 2. who can DCSync (NOT the same set as Domain Admin membership)
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'DCSync';
+
+-- 3. delegation - unconstrained and constrained
+SELECT DISTINCT source, target FROM edge_acl
+WHERE type IN ('AllowedToDelegate', 'AllowedToDelegateTo');
+
+-- 4. WriteSPN - make any account roastable, with no credential
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'WriteSPN';
+
+-- 5. ReadGMSAPassword - a 120-char password you can just read
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'ReadGMSAPassword';
+
+-- 6. GenericWrite/All on USERS (the roast/setup surface)
+SELECT source, target FROM edge_acl
+WHERE type IN ('GenericWrite','GenericAll','WriteDACL')
+  AND target IN (SELECT objectid FROM users);
+
+-- 7. sessions (SessionLoop) - who is where, now
+SELECT source, target, time FROM sessions ORDER BY time DESC LIMIT 100;
+
+-- 8. local admin (LocalAdmin collection)
+SELECT DISTINCT source, target FROM edge_acl WHERE type = 'AdminTo';
+
+-- 9. computers that can reach Domain Admin (a computer can be dumped)
+WITH RECURSIVE p(from, to, depth) AS (
+  SELECT 'DOMAIN ADMINS@LAB.INTERNAL', 'DOMAIN ADMINS@LAB.INTERNAL', 0
+  UNION ALL
+  SELECT e.source, p.to, p.depth + 1 FROM edge_acl e JOIN p ON e.target = p.from
+  WHERE p.depth &lt; 6
+)
+SELECT DISTINCT from FROM p WHERE depth &gt; 0 AND from LIKE 'COMPUTER%';
+
+-- 10. Validate: the group graph is not truncated
+SELECT COUNT(*) FROM edge_group WHERE memberof = 'DOMAIN ADMINS@LAB.INTERNAL';
+-- if 0, the collection failed; &quot;no path&quot; is not a finding.
+EOF
+
+# --- 3. the overlay: graph meets network ---
+cat &gt; 03-overlay.md &lt;&lt;'EOF'
+# The graph is not the network
+
+```text
+  A BloodHound path says &quot;alice CAN reach Domain Admin&quot;.
+  It does not say &quot;alice CAN reach it from where she is&quot;.
+
+  The graph models AUTHORISATION. The network models REACHABILITY.
+  A path is exploitable only if every hop is also a network path.
+
+  THE OVERLAY:
+    1. take the BloodHound path: alice -&gt; svc-deploy -&gt; Domain Admins
+    2. take the network map: where is alice's session?
+       (the HasSession edge tells you the host)
+    3. is svc-deploy reachable FROM THAT HOST?
+       if svc-deploy is in a segment alice's host cannot route to,
+       the path is still a finding (it is still a privilege
+       escalation) but it needs a pivot, and the pivot may be
+       blocked.
+
+  WHY THIS MATTERS FOR THE REPORT:
+    &quot;alice can reach Domain Admin&quot; and &quot;alice can reach Domain Admin
+     from her workstation, in three network hops, using one pivot&quot;
+     are different findings with different remediations.
+
+  THE CONVERSE, which is more common and more valuable:
+    the graph shows NO path from alice, but the NETWORK shows she can
+    reach a host where a privileged user IS logged in.
+    That is a relay opportunity, not a graph path. Sessions and
+    network reachability combine into something neither shows alone.
+
+  THE OVERLAY, AS A DELIVERABLE:
+    draw the network (segments, firewalls, which host is in which)
+    and draw the graph (who can reach what)
+    and put them side by side.
+    The finding is in the INTERSECTION.
+
+  WHAT DOES NOT APPEAR IN EITHER:
+    - PAWs (a host that only admins can log into)
+    - Conditional Access / Azure AD policies
+    - Jump hosts (a host you must go through, and what it logs)
+    - Application-layer authorisation that is not in the ACLs
+    - The fact that the deploy pipeline DEPLOYS the thing you need
+      to compromise, so you do not need to escalate at all
+</code></pre>
+<p>EOF<br />
+cat 03-overlay.md<br />
+rm -f graph.py<br />
+```</p>
+<p><strong>Step 1 is the deliverable</strong>: a 10-node graph where <code>alice</code> is an ordinary helpdesk user with<br />
+a <em>three-hop</em> path to Domain Admin, and the script then reads that path back as a paragraph of<br />
+analysis with two specific remediation actions. That is the difference between "alice can reach<br />
+Domain Admin" (unfalsifiable) and "remove GENERICALL on IT Support; it should be Read, not Full<br />
+Control" (a fix).</p>
+<p>It also surfaces the two edges people miss: a <strong>computer account with DCSync</strong> (in no group list<br />
+anywhere) and <strong>alice reading a gMSA password</strong> — a 120-character random credential that is<br />
+useless to brute-force and completely defeated by one ACL.</p>
+<p><strong>Record:</strong> <code>01-graph.txt</code> and <code>03-overlay.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name eight edge types and what each enables.</li>
+<li>Why is <code>HasSession</code> the most immediately exploitable edge?</li>
+<li>Why is DCSync not the same as Domain Admin membership?</li>
+<li>What does <code>WriteSPN</code> let you do without any credential?</li>
+<li>Why is <code>ReadGMSAPassword</code> a total compromise despite the 120-char password?</li>
+<li>Give three failure modes of the graph itself (not the collection).</li>
+<li>Why is label casing a "silent zero-rows" failure?</li>
+<li>Why must the network map be overlaid on the graph?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>BloodHound</strong> → <strong>Active Directory Trust Paths</strong> → <strong>Graph</strong> → <strong>DCSync</strong> →<br />
+<strong>Privilege Escalation (Windows)</strong>.<br />
+<code>bh-03</code> turns the path into a plan.</p>

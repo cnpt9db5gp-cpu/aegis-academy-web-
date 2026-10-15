@@ -1,0 +1,289 @@
+<h1 id="reporting-and-retrospective">Reporting and Retrospective</h1>
+<h2 id="summary">Summary</h2>
+<p>Capstone stage five, and the closing note of the curriculum. The report is the deliverable, and the<br />
+retrospective is the part that makes the <em>next</em> engagement better.</p>
+<p>The framing: <strong>the retrospective is not about what you learned. It is<br />
+about what you would do differently, written while you still remember<br />
+exactly how it felt.</strong></p>
+<h2 id="the-capstone-report">The capstone report</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cap-06 &amp;&amp; cd ~/aegis/labs/cap-06
+mkdir -p report
+
+cat &gt; 01-executive-summary.md &lt;&lt;'EOF'
+# Penetration Test — Executive Summary
+
+**Client:** AEGIS lab (aegis.lab forest, VirtualBox host-only)
+**Engagement:** CAP-2026-001   **Dates:** 14 October 2026
+**Assessor:** nwpcs           **Report version:** 1.0
+
+## Overall risk: CRITICAL
+
+## What we did
+We assessed the aegis.lab Active Directory forest and four hosts across
+an internal-only network, from the position of an unauthenticated host
+on the lab range. We performed passive reconnaissance, anonymous
+directory enumeration, credential extraction through Kerberos ticket
+harvesting, authenticated testing with recovered credentials, privilege
+escalation, and a directory replication to confirm domain-wide impact.
+We did not perform denial of service, social engineering, or physical
+testing. We did not exfiltrate data: the objective was met by
+demonstrating schema access only.
+
+## What we found
+| # | Finding | Severity | Business impact |
+|---|---|---|---|
+| F-01 | A domain administrator's password is recoverable by anyone who can reach port 88, without credentials | **Critical** | Complete domain compromise from any network-adjacent host |
+| F-02 | Service account passwords recoverable in four minutes from a standard user account | **Critical** | Any authenticated user reaches a privileged account |
+| F-03 | Directory replication rights granted to a non-administrative group | **Critical** | Every account hash in the forest, in one request |
+| F-04 | Local privilege escalation to LocalSystem on both domain controllers | High | A compromised workstation becomes a domain foothold |
+| F-05 | Unconstrained delegation on a web server | High | Session tickets for every user who logs in to it |
+| F-06 | A helpdesk group can rewrite a privileged group | High | Long path to domain admin for 147 accounts |
+| F-07 | Directory objects modified without alerting | Medium | The attack above was effectively invisible |
+
+## The three things that matter
+
+**1. No credentials were required.** The most severe finding did not
+need a valid account. An unauthenticated host on the same network as
+the domain controllers harvested a Kerberos credential for a domain
+administrator, recovered the password offline in under a minute, and
+logged in. Nothing about this required a vulnerability in any product.
+
+**2. The client's detection would have fired after the attack had
+already succeeded.** The offline password cracking generated no events
+at all, because there was no server to generate them on. The
+directory replication that confirmed domain compromise is detectable
+with a single GPO that was not enabled. The two hours of attack before
+that point generated almost nothing.
+
+**3. The whole path is configuration.** Every finding can be closed by
+a domain administrator without a purchase, without a vendor, and in
+most cases without a code change. This is not a budget problem.
+
+## What we recommend, in order
+| Priority | Action | Owner | Effort |
+|---|---|---|---|
+| 1 | Clear &quot;Do not require Kerberos preauthentication&quot; on all accounts | Domain Admins | Immediate |
+| 2 | Move all service accounts to gMSA and enforce AES-only Kerberos | Domain Admins | Immediate |
+| 3 | Enable Advanced Audit Policy &gt; DS Access &gt; Directory Service Changes = Success | Security | Immediate (GPO) |
+| 4 | Enable Audit Kerberos Authentication Service = Success, alert on 4768/4769 from non-DCs | Security | Immediate (GPO) |
+| 5 | Remove directory replication rights from the backup group | Domain Admins | Immediate |
+| 6 | Remove unconstrained delegation; use constrained delegation | Domain Admins | 1 sprint |
+| 7 | Audit every GPO delegation and every OU | Security | 1 sprint |
+
+Recommendations 1 and 2 close the two Critical findings. 3 and 4 are
+one GPO each and would have surfaced this attack in its first ten
+minutes. 5 through 7 close the High findings.
+
+## What we did not test
+- Denial of service. Not authorised and not recommended.
+- Third-party, cloud and SaaS systems. Not owned by the client.
+- Physical security and social engineering. Out of scope.
+- The effectiveness of the client's detection. We produced log events;
+  whether they were alerted on is a question for the client (F-07).
+- The security of the lab hosts themselves. Metasploitable was used as
+  the escalation target by design and its findings are not the
+  client's.
+
+## Limitations
+- Findings reflect the state of the systems on 14 October 2026.
+- Credential material was recovered sufficient to demonstrate impact.
+  It was not used outside the in-scope targets, and it was not tested
+  against any other system.
+- The database was accessed to read table schema only. No customer
+  data was retrieved, and none exists in the lab.
+- Escalation used an intentionally vulnerable host as a foothold. On a
+  real client this path would not exist, and the time to domain
+  administrator would have been longer.
+EOF
+echo &quot;written: 01-executive-summary.md&quot;
+</code></pre>
+<h2 id="the-findings-and-the-one-that-reorders-everything">The findings, and the one that reorders everything</h2>
+<pre><code class="language-markdown">## F-01 · Domain administrator credential recoverable without any credentials · **CRITICAL**
+
+**Risk**
+Any host that can open a TCP connection to a domain controller on port
+88 can obtain a Kerberos credential for the `svc-legacy` service
+account, which is a member of Domain Administrators, and recover the
+account's password by brute force against the credential's encryption
+key. No valid account, no exploit, and no interaction with any user is
+required. From that password, full administrative control of the
+forest.
+
+**Prerequisite for exploitation**
+A network route to port 88 on a domain controller. This is true for
+every host on the internal network, and — depending on the firewall
+configuration — potentially for hosts beyond it.
+
+**Evidence**
+The account has the `msDS-UserDoesNotNeedPreAuth` attribute set, which
+returns an AS-REP encrypted with a key derived from the account's
+password when an authentication request is made without preauth:
+
+</code></pre>
+<p>AS-REQ (no preauth) for svc-legacy  -&gt;  KDC<br />
+AS-REP (encrypted with ktab)         -&gt;  requester</p>
+<pre><code>
+The AS-REP was harvested with `GetNPUsers`, which requires **no
+credentials at all**, and the password was recovered offline in
+approximately 40 seconds against the standard rockyou wordlist with
+rule mutations. The recovered password was used to authenticate as
+`svc-legacy`, which is a member of Domain Administrators, at
+2026-10-14T10:35:11Z.
+
+**Steps to reproduce**
+1. From any host with a route to port 88: `GetNPUsers.py -dc-ip &lt;DC&gt; -format hash`
+2. `hashcat -m 18200 -a 0 &lt;output&gt; rockyou.txt -r best64.rule`
+3. Authenticate as `svc-legacy`.
+
+**Not claimed**
+We did not determine how many other accounts share the preauth flag,
+though the attribute is queryable anonymously and we found one. We did
+not use the recovered password for anything beyond authenticating to
+confirm the membership.
+
+**Root cause**
+&quot;Do not require Kerberos preauthentication&quot; exists for systems
+predating Windows 2003. It is deprecated and has no legitimate use in a
+modern forest. The account was presumably created during a migration
+and the flag was never cleared. The attribute is readable by any
+unauthenticated client, so the account is trivially discoverable — which
+is why this is Critical rather than Medium.
+
+**Remediation**
+| # | Action | Owner | Effort | Priority |
+|---|---|---|---|---|
+| 1 | Clear `msDS-UserDoesNotNeedPreAuth` on all accounts; monitor for reintroduction | Domain Admins | Immediate | P1 |
+| 2 | Add a scheduled report of accounts with the flag set, to the monitoring pipeline | Security | 1 hour | P2 |
+| 3 | Audit accounts with RC4 support while you are enumerating; the same query finds them | Domain Admins | Immediate | P2 |
+
+**Re-test** 30 days. Re-run the anonymous enumeration and confirm zero
+accounts have the flag set, and confirm the scheduled report fires.
+
+---
+
+## The finding that reorders the engagement
+
+**This is stated here because it changes how every other finding
+should be read.**
+
+F-02 (Kerberoasting) is the more technically interesting finding and
+takes far longer to explain. It is also *less* severe in practice,
+because it requires a valid account. F-01 requires nothing.
+
+An attacker who can reach the network does not choose the five-edge
+path that a graph search finds first, or the most interesting
+technique. They choose the zero-edge path: harvest a credential with
+no authentication, crack it offline, log in as a domain
+administrator.
+
+**The report's most important sentence is the one about what the
+attacker would actually do.** Everything else is context.
+</code></pre>
+<h2 id="the-retrospective">The retrospective</h2>
+<pre><code class="language-markdown"># Retrospective — CAP-2026-001
+
+## What went well
+- **The scope guard worked.** It refused 192.168.1.120 — my own
+  machine's real LAN address — on every single call, and it caught
+  two DNS resolutions that would have gone outside the lab. Without
+  it, &quot;it's technically mine&quot; would have become &quot;therefore it's in
+  scope&quot; at least once.
+- **Least-privilege-first was the right order.** Testing the
+  unauthenticated path first meant the report's worst finding was
+  known in the first hour, and everything after it was corroboration.
+  Had I started with Kerberoasting I would have spent forty minutes
+  establishing a *lesser* finding and not known about F-01 until the
+  end.
+- **Writing the decision record before each exploit** stopped two
+  attempts I would otherwise have made for no reason.
+
+## What went badly
+- **I scanned before I read the plan.** Twenty minutes on WKS01 before
+  I re-read `01-PLAN.md` and realised the map did not list an exposed
+  service there. That is twenty minutes of unnecessary traffic and a
+  slightly weaker recon story.
+- **The timeline took longer than the attack.** The engagement ran 176
+  minutes to the objective and a further 90 minutes to build the
+  timeline and verify the cleanup. I budgeted 20% for documentation
+  and it consumed 34% of the elapsed time. Budget it at 50% next time.
+- **I left the domain in a modified state for 27 minutes.** The LDAP
+  write at minute 172 and its undo at minute 198 is the single largest
+  risk in the engagement, and it was for a demonstration that the
+  report could arguably have made with the graph alone.
+
+## What I would do differently
+1. **Take the domain-wide snapshot before any write, not after.** I
+   took `04-PRE-EXERCISE` before the exercises but did not take a
+   post-write snapshot until the end, which meant the recovery option
+   during the 27-minute window was a manual LDAP revert.
+2. **Run the detection review *during* the engagement, not after.**
+   If I had known at minute 14 that anonymous LDAP generates no events,
+   I would have written that finding down as it happened, while I still
+   knew exactly which query produced it. Reconstructing it afterwards
+   from my own shell history is worse.
+3. **Push the cleanup discipline earlier.** Verify-and-revert after
+   *each* write, not after all of them. Two writes with an undo
+   between them would have cut the exposure window from 27 minutes to
+   under one.
+
+## What I got wrong in the technical work
+- I initially tried to reach the internal range directly from the
+  workstation and could not, and spent ten minutes diagnosing it as a
+  tooling problem before realising it was the segmentation working
+  correctly. **A failed connection is a finding**, and I should have
+  written it down as one when it happened.
+- My first BloodHound collection was truncated (a collection error in
+  the log that I did not read), which produced a graph with a false
+  negative on one path. `bh-01`'s validation section exists for
+  exactly this and I skipped it.
+
+## What the engagement says about the curriculum
+- `bh-02`'s point about the graph showing *which* path is real
+  (rather than merely which path exists) was the single most useful
+  idea in tiers 1–7, and it came directly out of reading the graph
+  writeup carefully rather than skipping to the tool.
+- `cs161-02`'s statement that nonce reuse is *arithmetic* rather than
+  cryptanalysis is what made the Kerberoasting exercise feel solid
+  rather than like memorising a tool invocation.
+- `for-06`'s coverage table — specifically the &quot;residual risk&quot; column
+  that nobody fills in — is the shape of the finding in F-07. Without
+  that note I would have written &quot;detection is not enabled&quot; instead
+  of &quot;the attack would have succeeded before the detection fired&quot;.
+
+## The honest summary
+The engagement succeeded because the *preparation* succeeded. Every
+stage that had a template and a discipline worked. The two stages
+that had none — the ad-hoc scanning and the improvised timeline — are
+where the time and the errors went.
+
+That is the argument for the parts of this curriculum that are
+procedure rather than technique.
+</code></pre>
+<p><strong>The two deliverables are in the files above.</strong> The report's most important sentence is the one<br />
+about <strong>what the attacker would actually do</strong>: F-02 (Kerberoasting) is more technically interesting<br />
+and takes far longer to explain — and it is <em>less</em> severe in practice, because it requires a valid<br />
+account. F-01 requires nothing.</p>
+<p><strong>The retrospective is the honest part.</strong> Three self-assessments with receipts: scanned before<br />
+reading the plan (20 minutes wasted), documentation took 34% of elapsed time against a 20% budget,<br />
+and left the domain modified for 27 minutes. Plus two specific technical mistakes — <strong>a failed<br />
+connection was a finding and I diagnosed it as a tooling problem</strong>, and a truncated BloodHound<br />
+collection produced a graph with a false negative.</p>
+<p>And the closing argument: <em>the engagement succeeded because the preparation succeeded. Every stage<br />
+that had a template and a discipline worked; the two stages that had none are where the time and<br />
+the errors went.</em></p>
+<p><strong>Record:</strong> <code>01-executive-summary.md</code> and <code>03-retrospective.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What makes F-01 worse than F-02, and why is the less interesting finding more severe?</li>
+<li>What is the report's most important sentence, and why?</li>
+<li>Name three things that went well, with the specific evidence for each.</li>
+<li>Name three things that went badly, with the time or risk cost of each.</li>
+<li>Why is a failed connection a finding rather than a tooling problem?</li>
+<li>What is the danger of a truncated BloodHound collection?</li>
+<li>What fraction of elapsed time did documentation actually take, against what was budgeted?</li>
+<li>What is the closing argument about why the engagement succeeded?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pentest Reporting</strong> → <strong>Retrospective</strong> → <strong>Risk Likelihood Impact</strong> → <strong>Remediation</strong> →<br />
+<strong>Detection Engineering</strong>.<br />
+This closes Tier 8, and the curriculum.</p>

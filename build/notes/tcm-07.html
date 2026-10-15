@@ -1,0 +1,472 @@
+<h1 id="report-writing">Report Writing</h1>
+<h2 id="summary">Summary</h2>
+<p>The report is the deliverable. Everything before it is preparation; everything after it is<br />
+remediation. A technically successful engagement with an unusable report has failed the client.</p>
+<p>The lecture's argument is that most of the value of a pentest arrives in the writing: the<br />
+technical part is a prerequisite for a report that changes decisions, and nothing else.</p>
+<blockquote>
+<p>This is the closing note of Tier 3, and it closes the loop with <code>tcm-01</code>:<br />
+the ROE said what you would do; the report proves you did exactly that<br />
+and nothing more.</p>
+</blockquote>
+<h2 id="what-a-reader-actually-needs">What a reader actually needs</h2>
+<pre><code class="language-text">  WHO READS IT
+  - an executive:      &quot;what is the risk, what do we do, what does it cost?&quot;
+  - a manager:         &quot;who owns this, when will it be fixed, do we accept risk?&quot;
+  - an engineer:       &quot;exactly what, exactly where, exactly how do I fix it?&quot;
+
+  AND THEY DISAGREE ABOUT DETAIL.
+
+  So: layer it. Executive summary first (one page, no jargon).
+  Technical detail in the body. Evidence in the appendix.
+  A reader who stops after page one must still be able to act.
+</code></pre>
+<h2 id="structure-that-works">Structure that works</h2>
+<pre><code class="language-text">  1. Executive summary      one page, risk-ranked, with the recommendation
+  2. Scope and methodology  what was tested, how, what was excluded, limits
+  3. Findings               risk-ranked, one per finding, consistent template
+  4. Remediation            specific, owned, dated
+  5. Appendices             evidence, tool output, command transcripts
+</code></pre>
+<h2 id="the-finding-template">The finding template</h2>
+<pre><code class="language-text">  ## F-01  Unauthenticated remote code execution on WEB-01          [CRITICAL]
+
+  **Risk**        An unauthenticated attacker on the internal network can
+                  execute arbitrary code as root on the customer-facing web
+                  server, and read the production customer database.
+
+  **Evidence**
+    Target      192.168.56.20:8080
+    Method      Unauthenticated HTTP GET to /admin/records (verbatim in
+                Appendix A)
+    Observed    HTTP 200, 14,238 bytes, no credentials sent
+    Access      root (uid=0), confirmed with `id`
+    Impact      Read access to 41,882 customer records (structure only;
+                no records exfiltrated)
+
+  **Steps to reproduce**
+    1. From the internal range, `curl http://192.168.56.20:8080/admin/records`
+    2. No authentication is requested or required
+    3. The response contains customer records
+
+  **Root cause**
+    The administrative endpoint was added during a migration and has no
+    authentication, and the host's firewall rule permitting 8080 from the
+    internal range was never scoped to the app servers only.
+
+  **Remediation**
+    1. Remove the endpoint or place it behind authentication  [Owner: Web
+       Platform, Priority: Immediate]
+    2. Restrict 8080 at the firewall to the app server range only
+    3. Add a CI check that fails on unauthenticated admin routes
+
+  **Re-test**   included at +30 days
+</code></pre>
+<h2 id="severity-likelihood-impact-and-being-honest-about-both">Severity: likelihood × impact, and being honest about both</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Low impact</th>
+<th>Medium</th>
+<th>High</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Likely</strong></td>
+<td>Medium</td>
+<td>High</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td><strong>Possible</strong></td>
+<td>Low</td>
+<td>Medium</td>
+<td>High</td>
+</tr>
+<tr>
+<td><strong>Unlikely</strong></td>
+<td>Informational</td>
+<td>Low</td>
+<td>Medium</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-text">  TWO THINGS GO WRONG, IN OPPOSITE DIRECTIONS:
+
+  1. INFLATED:  &quot;Critical&quot; for something with no reachable path.
+     - Fix: ask &quot;what must be true for this to be exploited?&quot; and answer
+       it in the finding. If the answer is &quot;the attacker already has
+       domain admin&quot;, downgrade it.
+
+  2. DEFLATED:  &quot;Informational&quot; for something the client will not fix.
+     - Fix: severity is about the business, not about you being able to
+       demonstrate it. &quot;The backup files contain the full user database
+       and are world-readable&quot; is Critical even if you did not read them.
+</code></pre>
+<p><strong>The corrective for both is the same sentence:</strong> <em>state the prerequisite<br />
+for exploitation explicitly, in the finding, and let the reader judge.</em></p>
+<h2 id="writing-for-remediation-not-for-proof">Writing for remediation, not for proof</h2>
+<pre><code class="language-text">  BAD  : &quot;The server is running an outdated version of OpenSSH with a
+          buffer overflow vulnerability.&quot;
+  GOOD : &quot;Upgrade OpenSSH to 9.6 or later on WEB-01 (current: 7.4).
+          The package is in the standard repository; no custom build is
+          required. Estimated effort: 15 minutes, no restart of the app
+          if the SSH daemon is restarted in place.&quot;
+
+  BAD  : &quot;Improve the security of the passwords.&quot;
+  GOOD : &quot;Enforce a 14-character minimum via the domain password policy
+          (currently 8), and require MFA for all accounts in the
+          Privileged Access Groups. Estimated effort: policy change,
+          staged rollout over two weeks.&quot;
+</code></pre>
+<p>The second version is actionable by someone who was not on the engagement.<br />
+That is the entire test.</p>
+<h2 id="evidence-handling">Evidence handling</h2>
+<pre><code class="language-text">  - evidence must be reproducible by a third party from what you wrote
+  - redact credentials, tokens, personal data - ALWAYS
+  - screenshots: blur, do not crop (cropping hides context)
+  - attach raw tool output as appendices, not screenshots of it
+  - hash your evidence archive so it cannot be altered later
+  - store encrypted, delete on the contractual date
+  - a finding whose evidence contains live credentials is a breach of
+    your own engagement terms
+</code></pre>
+<h2 id="the-two-reviews-before-you-send-it">The two reviews before you send it</h2>
+<pre><code class="language-text">  REVIEW 1 - TECHNICAL ACCURACY (a peer, not the author)
+    - does every finding reproduce from the stated steps alone?
+    - is every version, port and path correct?
+    - is any severity indefensible?
+    - is anything claimed that was not actually observed?
+
+  REVIEW 2 - USABILITY (someone who was not on the engagement)
+    - read only the executive summary. Can they name the top three risks
+      and the first action?
+    - read only finding F-04. Can the owner fix it without asking you?
+    - is every finding owned by a named team with a date?
+</code></pre>
+<p>Review 2 is the one nobody does and the one that determines whether the<br />
+report gets acted on.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Executive summary</strong></td>
+<td>One page, no jargon, risk-ranked</td>
+</tr>
+<tr>
+<td><strong>Finding</strong></td>
+<td>A demonstrated vulnerability with evidence</td>
+</tr>
+<tr>
+<td><strong>Risk rating</strong></td>
+<td>Likelihood × impact</td>
+</tr>
+<tr>
+<td><strong>CVSS</strong></td>
+<td>A scoring system; useful for consistency, not for priority</td>
+</tr>
+<tr>
+<td><strong>Remediation</strong></td>
+<td>The specific fix</td>
+</tr>
+<tr>
+<td><strong>Mitigation</strong></td>
+<td>A temporary reduction in impact, not a fix</td>
+</tr>
+<tr>
+<td><strong>Retest</strong></td>
+<td>Verification that remediation worked</td>
+</tr>
+<tr>
+<td><strong>Evidence</strong></td>
+<td>Reproducible proof</td>
+</tr>
+<tr>
+<td><strong>Appendix</strong></td>
+<td>Raw output, kept out of the reader's path</td>
+</tr>
+<tr>
+<td><strong>Root cause</strong></td>
+<td>Why the vulnerability exists</td>
+</tr>
+<tr>
+<td><strong>Risk acceptance</strong></td>
+<td>A business decision to live with a risk</td>
+</tr>
+<tr>
+<td><strong>Executive risk language</strong></td>
+<td>Impact on the business, not on the CVE</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/tcm-07 &amp;&amp; cd ~/aegis/labs/tcm-07
+
+# --- 1. build the finding database as you go, not at the end ---
+cat &gt; findings.csv &lt;&lt;'EOF'
+id,title,severity,cvss,asset,prereq,status,owner,due
+F-01,Unauthenticated RCE on web server,critical,9.8,192.168.56.20:8080,&quot;internal network access&quot;,confirmed,Web Platform,
+F-02,Local privilege escalation via sudo NOPASSWD,high,7.8,192.168.56.20,&quot;any local account&quot;,confirmed,Linux Ops,
+F-03,SMB signing not required,medium,5.9,192.168.56.21,&quot;LAN position&quot;,confirmed,Windows Ops,
+F-04,Dev HTTP server on routable interface,low,3.7,192.168.56.20,&quot;internal network access&quot;,confirmed,Web Platform,
+EOF
+column -t -s, findings.csv | sed 's/^/  /'
+
+# --- 2. the honest severity calculator ---
+cat &gt; severity.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Severity = likelihood x impact, with the prerequisite written down.
+
+The point of this script is not the number. It is the PROMISED column:
+&quot;this is only exploitable IF &lt;prerequisite&gt;&quot;. A finding without a stated
+prerequisite is either inflated or deflated, and both destroy trust.
+&quot;&quot;&quot;
+import csv, sys
+
+LIKELIHOOD = {&quot;unlikely&quot;: 1, &quot;possible&quot;: 2, &quot;likely&quot;: 3}
+IMPACT     = {&quot;low&quot;: 1, &quot;medium&quot;: 2, &quot;high&quot;: 3}
+
+MATRIX = {  # likelihood -&gt; impact
+    (1,1): (&quot;informational&quot;, 0.0), (1,2): (&quot;low&quot;, 2.0), (1,3): (&quot;medium&quot;, 4.0),
+    (2,1): (&quot;low&quot;, 2.5),           (2,2): (&quot;medium&quot;, 4.5), (2,3): (&quot;high&quot;, 7.0),
+    (3,1): (&quot;medium&quot;, 5.0),        (3,2): (&quot;high&quot;, 7.5),    (3,3): (&quot;critical&quot;, 9.5),
+}
+
+rows = list(csv.DictReader(open(&quot;findings.csv&quot;)))
+print(f&quot;  {'ID':&lt;5} {'SEVERITY':&lt;14} {'PREREQUISITE (must be true to exploit)'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*78)
+for r in rows:
+    # likelihood is derived from the prerequisite's difficulty, decided by you
+    prereq = r[&quot;prereq&quot;]
+    lik = &quot;unlikely&quot; if &quot;domain admin&quot; in prereq else \
+          &quot;possible&quot; if prereq else &quot;likely&quot;
+    imp = {&quot;critical&quot;: &quot;high&quot;, &quot;high&quot;: &quot;high&quot;, &quot;medium&quot;: &quot;medium&quot;,
+           &quot;low&quot;: &quot;low&quot;, &quot;informational&quot;: &quot;low&quot;}.get(r[&quot;severity&quot;], &quot;medium&quot;)
+    sev, _ = MATRIX[(LIKELIHOOD[lik], IMPACT[imp])]
+    # CVSS disagrees with the honest assessment? That is worth a sentence.
+    flag = &quot;&quot;
+    if r[&quot;cvss&quot;] and float(r[&quot;cvss&quot;]) &gt;= 9 and sev in (&quot;low&quot;, &quot;informational&quot;):
+        flag = &quot;  &lt;-- CVSS and honest severity disagree; explain in the finding&quot;
+    print(f&quot;  {r['id']:&lt;5} {sev:&lt;14} {prereq}{flag}&quot;)
+print()
+print(&quot;  When CVSS and the honest assessment disagree, the honest one wins,&quot;)
+print(&quot;  and the finding explains why. CVSS measures technical severity;&quot;)
+print(&quot;  the report measures business risk.&quot;)
+PY
+python3 severity.py | tee 01-severity.txt
+
+# --- 3. evidence handling, as automation ---
+cat &gt; 02-evidence.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Package evidence so it cannot be silently altered later.
+set -euo pipefail
+STAMP=$(date +%Y%m%d-%H%M%S)
+OUT=&quot;evidence-${STAMP}&quot;
+mkdir -p &quot;$OUT&quot;
+
+echo &quot;  collecting&quot;
+cp -f findings.csv &quot;$OUT&quot;/ 2&gt;/dev/null || true
+cp -f 01-severity.txt &quot;$OUT&quot;/ 2&gt;/dev/null || true
+cp -f 0*-DIARY.txt &quot;$OUT&quot;/ 2&gt;/dev/null || true
+cp -f scan-*.txt &quot;$OUT&quot;/ 2&gt;/dev/null || true
+
+echo &quot;  redacting (credentials, tokens, personal data) before packaging&quot;
+# A redaction pass is a process, not a one-liner. Grep for what must go.
+grep -rniE &quot;password[[:space:]]*[:=]|passwd=|secret=|token=|api[_-]?key=|BEGIN .*PRIVATE KEY&quot; &quot;$OUT&quot; \
+  &amp;&amp; echo &quot;  ^ REVIEW THESE before sending anything to the client&quot; \
+  || echo &quot;  no obvious credentials found in the evidence package&quot;
+
+echo &quot;  hashing&quot;
+(cd &quot;$OUT&quot; &amp;&amp; sha256sum * | tee SHA256SUMS)
+echo
+echo &quot;  the client can now verify the evidence has not been altered:&quot;
+echo &quot;    sha256sum -c SHA256SUMS&quot;
+EOF
+chmod +x 02-evidence.sh
+./02-evidence.sh 2&gt;&amp;1 | tee 03-evidence.txt
+rm -rf evidence-*
+
+# --- 4. the executive summary, in its real form ---
+cat &gt; 04-executive-summary.md &lt;&lt;'EOF'
+# Penetration Test — Executive Summary
+
+**Engagement:** AEGIS-LAB-2026-001
+**Client:** [organisation]
+**Dates:** [start] – [end]
+**Assessor:** [name]
+**Overall risk:** **CRITICAL**
+
+## What we did
+We assessed [scope: N hosts, M web applications, the internal Active
+Directory] from [external/internal] perspective, over [N] days, using
+network scanning, service enumeration, authenticated and unauthenticated
+testing, and post-exploitation to establish impact. No denial-of-service
+testing was performed. No data was modified.
+
+## What we found
+| # | Finding | Severity | Business impact |
+|---|---|---|---|
+| F-01 | Unauthenticated remote code execution on the customer-facing web server | **Critical** | An attacker on the internal network can reach the production customer database |
+| F-02 | Local privilege escalation on every Linux host | High | Any low-privilege account, including a compromised web account, becomes root |
+| F-03 | SMB signing not enforced | Medium | A hostile host on the same network can impersonate any user |
+| F-04 | Development server bound to a routable interface | Low | Information disclosure; increases the attack surface |
+
+Full technical detail in section 3.
+
+## The three things that matter
+1. **One internet-facing weakness reaches your customer data.** F-01 is a
+   single HTTP request. No authentication, no special tooling.
+2. **Compromise of any one host means compromise of all of them.** There is
+   no segmentation between the web tier and the database tier; this was
+   demonstrated end to end.
+3. **Nothing here required a sophisticated attacker.** Every finding used
+   standard tooling and, in three cases, no tooling at all.
+
+## What we recommend, in order
+| Priority | Action | Owner | Effort |
+|---|---|---|---|
+| 1 | Remove or authenticate `/admin/records` on WEB-01 | Web Platform | Immediate |
+| 2 | Segment the web tier from the data tier | Network Ops | 1 sprint |
+| 3 | Remove NOPASSWD sudo on the deploy account | Linux Ops | Immediate |
+| 4 | Enforce SMB signing domain-wide | Windows Ops | 1 sprint |
+
+## Limitations
+- No denial-of-service testing was performed or authorised
+- UDP services were not scanned (not in scope)
+- Physical and social engineering were out of scope
+- Internal testing was limited to [N] hours on [date]
+- Findings reflect the state of the systems on the dates above
+
+## Confidentiality
+This document contains information about vulnerabilities in
+[organisation]'s systems. It is provided under the terms of the
+engagement letter dated [date] and must not be distributed further.
+EOF
+echo &quot;written: 04-executive-summary.md&quot;
+
+# --- 5. the findings section ---
+cat &gt; 05-findings.md &lt;&lt;'EOF'
+# Section 3 — Findings
+
+&gt; Every finding uses the same template. Consistency is what lets an
+&gt; engineer scan the document and act, and lets a manager compare items.
+
+---
+
+## F-01 · Unauthenticated remote code execution on WEB-01 · **CRITICAL**
+
+**Asset**  192.168.56.20:8080 (customer-facing web server)
+
+**Risk**
+An attacker with access to the internal network can execute arbitrary
+operating-system commands as root on the customer-facing web server, and
+from there read the production customer database containing 41,882 records
+(including names, email addresses, and partial payment data).
+
+**Prerequisite for exploitation**
+The attacker must be able to open a TCP connection to port 8080 from the
+internal range. No credentials, no user interaction, no special tooling.
+
+**Evidence**
+```http
+GET /admin/records HTTP/1.1
+Host: 192.168.56.20:8080
+Connection: close
+</code></pre>
+<pre><code class="language-http">HTTP/1.0 200 OK
+Server: SimpleHTTP/0.6 Python/3.13.2
+Content-Length: 14238
+
+[REDACTED — structure shown; 1 sample row redacted; no data retained]
+</code></pre>
+<p>The request contained no <code>Cookie</code> and no <code>Authorization</code> header. The same<br />
+response was received from a fresh session with an empty cookie jar.</p>
+<p>On the resulting session:</p>
+<pre><code>$ id
+uid=0(root) gid=0(root) groups=0(root)
+$ hostname
+WEB-01
+$ cat /etc/app/database.yml | head -3
+database:
+  host: 10.10.10.6          # &lt;- the internal database
+  user: app_ro
+</code></pre>
+<p><strong>Impact demonstrated</strong><br />
+Read access to the customer records endpoint was confirmed from the<br />
+database host. No records were retrieved beyond confirming the query<br />
+returned data; see the engagement diary at 11:16.</p>
+<p><strong>Root cause</strong><br />
+The administrative endpoint was introduced during the 2024 migration and<br />
+never placed behind authentication. It is served by a development HTTP<br />
+server (<code>python -m http.server</code>) rather than the production application<br />
+server, which suggests it bypassed the normal routing and middleware.</p>
+<p><strong>Remediation</strong><br />
+| # | Action | Owner | Effort |<br />
+|---|---|---|---|<br />
+| 1 | Remove the endpoint; it is not required by the application | Web Platform | Immediate |<br />
+| 2 | Migrate remaining endpoints from the dev server to the app server | Web Platform | 2 days |<br />
+| 3 | Restrict 8080 at the firewall to the app server range | Network Ops | Immediate |<br />
+| 4 | Add a CI check that fails when an admin route has no authentication | Web Platform | 1 sprint |</p>
+<p><strong>Re-test</strong> 30 days after remediation, included in this engagement.</p>
+<hr />
+<h2 id="f-02-local-privilege-escalation-via-nopasswd-sudo-high">F-02 · Local privilege escalation via NOPASSWD sudo · <strong>HIGH</strong></h2>
+<p><em>(same template; abbreviated here for space — see <code>findings.csv</code> for the index)</em><br />
+EOF<br />
+echo "written: 05-findings.md"</p>
+<h1 id="-6-the-pre-send-reviews-">--- 6. the pre-send reviews ---</h1>
+<p>cat &gt; 06-review.md &lt;&lt;'EOF'</p>
+<h1 id="pre-send-review">Pre-send review</h1>
+<h2 id="review-1-technical-accuracy-a-peer-not-the-author">Review 1 — technical accuracy (a peer, not the author)</h2>
+<ul>
+<li>[ ] Every finding reproduces from its stated steps alone, on a clean system</li>
+<li>[ ] Every version, port, path and hostname is correct and was observed</li>
+<li>[ ] Every severity can be defended if challenged</li>
+<li>[ ] Nothing is claimed that was not actually observed</li>
+<li>[ ] The prerequisite is stated in every finding</li>
+<li>[ ] No credentials, tokens or personal data appear anywhere in the document</li>
+<li>[ ] The scope section matches the ROE exactly — including what was excluded</li>
+<li>[ ] The engagement diary has no unexplained gaps</li>
+</ul>
+<h2 id="review-2-usability-someone-who-was-not-on-the-engagement">Review 2 — usability (someone who was not on the engagement)</h2>
+<ul>
+<li>[ ] Reading only the executive summary, can they name the top three risks?</li>
+<li>[ ] Can they name the first action to take?</li>
+<li>[ ] Reading only finding F-04, can its owner fix it without asking you?</li>
+<li>[ ] Is every finding owned by a named team with a target date?</li>
+<li>[ ] Are the remediations specific enough to estimate and schedule?</li>
+<li>[ ] Is the report under [N] pages for the executive portion?</li>
+</ul>
+<h2 id="if-both-reviews-pass-send-it-if-either-fails-do-not">If both reviews pass, send it. If either fails, do not.</h2>
+<p>EOF<br />
+echo "written: 06-review.md"<br />
+```</p>
+<p><strong>Step 2 is the deliverable</strong>: <code>severity.py</code> forces every finding to state its prerequisite<br />
+explicitly, and flags the cases where CVSS disagrees with an honest assessment. That<br />
+disagreement is where most reports lose the reader's trust — and where the finding that<br />
+explains it earns it back.</p>
+<p><strong>Step 4</strong> is the one-page executive summary that every finding in the tier has been<br />
+building toward. If someone reads only that page, they can still act.</p>
+<p><strong>Record:</strong> <code>01-severity.txt</code>, <code>04-executive-summary.md</code> and <code>06-review.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Who reads a pentest report, and what does each need from it?</li>
+<li>Give the finding template sections in order and explain what each is for.</li>
+<li>Why is severity a function of impact rather than of CVSS?</li>
+<li>Give the two ways people get severity wrong, and the corrective for each.</li>
+<li>What is the prerequisite sentence, and why must every finding have one?</li>
+<li>Name four things to redact from evidence, and why screenshots must be blurred<br />
+   rather than cropped.</li>
+<li>What is review 2, and why does it decide whether the report gets acted on?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pentest Reporting</strong> → <strong>Risk Likelihood Impact</strong> → <strong>Rules of Engagement</strong> →<br />
+<strong>Remediation</strong> → <strong>Retest</strong>.<br />
+This closes Tier 3. Next: <code>lo-01</code>..<code>lo-05</code>, then Tier 4.</p>

@@ -1,0 +1,274 @@
+<h1 id="introduction-and-threat-models">Introduction and Threat Models</h1>
+<h2 id="summary">Summary</h2>
+<p>Lecture 1 of 6.858 sets the frame for everything else: what is being protected, from whom, and<br />
+why. The central move is separating <strong>assets</strong>, <strong>adversaries</strong> and <strong>security goals</strong> before<br />
+discussing a single mechanism.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>A <strong>threat model</strong> answers: who are we defending against, what do they want, what can they do?</li>
+<li><strong>Assets</strong> are what matter; security effort is spent in proportion to their value</li>
+<li><strong>Adversaries</strong> differ in capability enormously — an end user, a malicious process, a<br />
+  compromised kernel, the vendor, a network attacker</li>
+<li><strong>Security goals</strong>: confidentiality, integrity, availability, plus correctness and<br />
+  accountability</li>
+<li><strong>Attacker-controlled input</strong> is the root of most vulnerabilities: untrusted data reaching a<br />
+  trusted computation</li>
+<li>The lecture's running example: a web server that crashes on malformed input is a <em>vulnerability</em><br />
+  even if you do not yet know how to exploit it</li>
+</ul>
+<h2 id="the-frame-assets-adversaries-goals">The frame: assets, adversaries, goals</h2>
+<table>
+<thead>
+<tr>
+<th>Adversary</th>
+<th>Capability</th>
+<th>Realistic goal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remote user</td>
+<td>Send crafted requests</td>
+<td>Code execution on the server</td>
+</tr>
+<tr>
+<td>Malicious app</td>
+<td>Run code as the user</td>
+<td>Read other users' files, escalate</td>
+</tr>
+<tr>
+<td>Compromised process</td>
+<td>Same privileges as the victim</td>
+<td>Escalate to more privilege</td>
+</tr>
+<tr>
+<td>Network attacker</td>
+<td>Read/modify traffic</td>
+<td>MitM, inject, drop</td>
+</tr>
+<tr>
+<td>Kernel/VM escape</td>
+<td>Full hypervisor control</td>
+<td>Escape to host</td>
+</tr>
+<tr>
+<td>Insider</td>
+<td>Legitimate access</td>
+<td>Exfiltrate data, or sabotage</td>
+</tr>
+</tbody>
+</table>
+<p>The same bug has very different risk depending on which row you are in. <strong>Severity is a function<br />
+of the threat model</strong>, not of the CWE number.</p>
+<h2 id="untrusted-input-and-trusted-computation">Untrusted input and trusted computation</h2>
+<pre><code class="language-text">  untrusted                          trusted
+  --------                           -------
+  HTTP request  ──►  server code  ──►  kernel / memory
+                      ▲
+                      └── this boundary is where bugs live
+</code></pre>
+<p>Buffer overflows, SQL injection, XSS and deserialisation are all the same shape: attacker data<br />
+reaching a computation that trusts it. Defences are mostly about narrowing that trust.</p>
+<h2 id="why-a-crash-is-a-finding">Why a crash is a finding</h2>
+<p>A server that segfaults on a malformed request has, at minimum:<br />
+- lost availability (and possibly a crash loop)<br />
+- demonstrated that input reaches an unsafe operation</p>
+<p><strong>You do not need code execution to have a vulnerability.</strong> That framing matters in a report:<br />
+"remote crash, unauthenticated, on the public interface" is already a serious finding.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Threat model</strong></td>
+<td>Assets, adversaries, and security goals</td>
+</tr>
+<tr>
+<td><strong>Asset</strong></td>
+<td>What you are protecting</td>
+</tr>
+<tr>
+<td><strong>Attack surface</strong></td>
+<td>Where untrusted input can enter</td>
+</tr>
+<tr>
+<td><strong>Adversary</strong></td>
+<td>Who you are defending against, and with what capability</td>
+</tr>
+<tr>
+<td><strong>Trust boundary</strong></td>
+<td>Where privilege or assumption changes</td>
+</tr>
+<tr>
+<td><strong>Principal</strong></td>
+<td>The identity on whose behalf something acts</td>
+</tr>
+<tr>
+<td><strong>Authentication</strong></td>
+<td>Proving who you are</td>
+</tr>
+<tr>
+<td><strong>Authorisation</strong></td>
+<td>Deciding what you may do</td>
+</tr>
+<tr>
+<td><strong>Vulnerability</strong></td>
+<td>A flaw that can be triggered by some adversary</td>
+</tr>
+<tr>
+<td><strong>Exploit</strong></td>
+<td>Code that reliably triggers it</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- start every engagement here, on paper ---
+# 1. What is this host for?
+# 2. What data on it matters most?
+# 3. Who could reach it, and with what privileges?
+# 4. What would an attacker want here?
+# 5. Which assumption are you relying on?
+
+# --- turn the paper model into observations ---
+# what is the attack surface?
+ss -tulpn | head -15
+nmap -sV -p- 127.0.0.1 2&gt;/dev/null | grep open | head
+
+# --- what is running with privilege? ---
+ps aux --sort=-%mem | head -8
+cat /proc/1/status | grep -E &quot;Uid|CapEff&quot;
+
+# --- what data is on this host that would matter? ---
+ls -la /home/ 2&gt;/dev/null
+find / -maxdepth 2 -name &quot;*.db&quot; -o -maxdepth 2 -name &quot;*.env&quot; 2&gt;/dev/null | head
+
+# --- what does the service believe about its callers? ---
+# a request header is untrusted input; see what the server echoes back
+curl -s -H &quot;X-Test: $(python3 -c 'print(&quot;A&quot;*500)')&quot; http://127.0.0.1:8080/ 2&gt;/dev/null | head -5
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a real threat model for a system you own, then test one assumption in it.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-01 &amp;&amp; cd ~/aegis/labs/mit858-01
+
+cat &gt; threat-model.md &lt;&lt;'EOF'
+# Threat Model: &lt;system name&gt;
+
+## 1. Assets
+| Asset | Value if lost | Where it lives |
+|---|---|---|
+| account credentials | critical | /etc/shadow, browser profile |
+| SSH private keys | critical | ~/.ssh/ |
+| this repo (notes + progress) | high | ~/Projects/ |
+| lab VMs | medium | ~/VirtualBox VMs/ |
+
+## 2. Adversaries
+| Who | Capability | Reachable? |
+|---|---|---|
+| someone on my LAN | can send traffic to my listeners | yes |
+| a malicious web page I visit | can reach my loopback listeners | yes - see notes |
+| a malicious package I install | arbitrary code as my user | yes |
+| physical access | none assumed | no |
+
+## 3. Security goals
+- confidentiality: my keys, my notes
+- integrity: my progress file and git history
+- availability: nothing critical runs on this host
+
+## 4. Trust boundaries
+1. network boundary of my Wi-Fi
+2. process boundary (each program)
+3. user/root boundary (sudo)
+
+## 5. Assumptions I am relying on
+- [ ] everything on my loopback is mine
+- [ ] nothing I run is listening on 0.0.0.0
+- [ ] my SSH key has no passphrase but the machine is physical-only
+- [ ] the git remote is private and my key is only on this box
+
+## 6. Attack surface
+- listening sockets:
+- web pages I open (they can reach 127.0.0.1!)
+- third-party packages I install
+
+## 7. Mitigations already in place
+- ...
+EOF
+
+{
+  echo &quot;=== OBSERVE: what is actually true? ===&quot;
+  echo
+  echo &quot;--- assumption: nothing listening on 0.0.0.0 ---&quot;
+  ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/ {print &quot;  VIOLATION: &quot; $1, $5, $7}'
+  ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/' | wc -l | xargs echo &quot;  violations:&quot;
+  echo
+  echo &quot;--- assumption: my key material is where I think ---&quot;
+  ls -la ~/.ssh/ 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;--- assumption: my repo is private ---&quot;
+  git -C ~/Projects/aegis-academy remote -v | sed 's/^/  /'
+  echo
+  echo &quot;--- attack surface: processes with unusual privileges ---&quot;
+  ps -eo user,pid,comm --sort=user | awk 'NR==1 || $1==&quot;root&quot;' | head -8
+  echo
+  echo &quot;--- data that would matter if this host were compromised ---&quot;
+  ls -la ~/ 2&gt;/dev/null | grep -E &quot;\.ssh|\.gnupg|Projects|Dropbox&quot; | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 01-observations.txt
+
+# --- 6. test one assumption: the browser-to-loopback boundary ---
+cat &gt; 02-browser-attack-surface.md &lt;&lt;'EOF'
+# The boundary people forget
+
+A web page you visit runs code in your browser, and the browser can make
+requests to **localhost** on your behalf. Modern browsers block some of this
+with Private Network Access, but the general problem remains: your local
+services are reachable from hostile JavaScript.
+
+Practical consequences:
+- a dev server on :3000 is reachable by any page you load
+- anything listening on a wildcard interface is reachable from the LAN
+- browser extensions add their own privilege to the mix
+
+This is the concrete reason `docs/RULES-OF-ENGAGEMENT.md` says labs bind to
+127.0.0.1 or a host-only adapter, never to 0.0.0.0.
+EOF
+cat 02-browser-attack-surface.md
+
+# --- 7. the crash-as-finding demonstration ---
+cat &gt; 03-crash-is-a-finding.md &lt;&lt;'EOF'
+# A crash is already a vulnerability
+
+You do not need code execution to report a serious issue:
+
+- &quot;Unauthenticated remote crash of the public service by a malformed request&quot;
+  is a denial-of-service finding on its own.
+- &quot;Input reaches an unsafe operation&quot; is evidence, even without an exploit.
+
+The mistake is waiting until you have RCE before you write anything down. In a
+report, a reproducible crash with a request that triggers it is valuable,
+specific, and actionable.
+
+MIT 6.858 Lab 1 is exactly this: find a crash, then take it further.
+EOF
+cat 03-crash-is-a-finding.md
+
+echo
+echo &quot;Fill in threat-model.md from 01-observations.txt, then continue to mit858-02.&quot;
+</code></pre>
+<p><strong>Record:</strong> <code>threat-model.md</code> filled in. This is a reusable document — you will write one per<br />
+engagement.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What three questions does a threat model answer?</li>
+<li>Why can the same bug have different severity under different threat models?</li>
+<li>What is the root shape shared by buffer overflows, SQLi and XSS?</li>
+<li>Why is a crash reportable before you have an exploit?</li>
+<li>Name three adversaries with different capability levels.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Threat Model</strong> → <strong>Attack Surface</strong> → <strong>CIA Triad</strong> → <strong>Vulnerability / Risk / Exploit</strong> →<br />
+<strong>Risk = Likelihood x Impact</strong>.</p>

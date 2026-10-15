@@ -1,0 +1,218 @@
+<h1 id="tcp-handshakes-retransmits-and-anomalies">TCP Handshakes, Retransmits and Anomalies</h1>
+<h2 id="summary">Summary</h2>
+<p>Every TCP conversation has a recognisable shape. Anomalies in that shape are how scans, drops,<br />
+injections and evasions look in a capture.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>Three-way handshake, four-way teardown, and the state in between</li>
+<li><strong>Retransmission</strong>: a SYN resent because no reply came. One is normal; many is a symptom</li>
+<li><strong>RST</strong>: abortive close. Unexpected RSTs mean a firewall, a closed port, or a scanner</li>
+<li><strong>Half-open connections</strong>: SYN seen without the final ACK — a SYN scan's signature</li>
+<li><strong>Sequence numbers</strong> should advance monotonically; a reset or a jump is anomalous</li>
+<li><strong>Window size 0</strong> means "stop sending", which is backpressure</li>
+<li><strong>TIME_WAIT</strong> accumulation on a port indicates churn or scanning against you</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Retransmission</strong></td>
+<td>An unacknowledged packet sent again</td>
+</tr>
+<tr>
+<td><strong>RST</strong></td>
+<td>Reset; immediate, ungraceful close</td>
+</tr>
+<tr>
+<td><strong>Half-open</strong></td>
+<td>SYN without the completing ACK</td>
+</tr>
+<tr>
+<td><strong>Sequence number</strong></td>
+<td>Byte position counter</td>
+</tr>
+<tr>
+<td><strong>ACK number</strong></td>
+<td>The next byte expected</td>
+</tr>
+<tr>
+<td><strong>Window</strong></td>
+<td>Receive buffer size, used for flow control</td>
+</tr>
+<tr>
+<td><strong>Keepalive</strong></td>
+<td>Probes to detect a dead peer</td>
+</tr>
+<tr>
+<td><strong>Zero window</strong></td>
+<td>Receiver cannot accept more data</td>
+</tr>
+<tr>
+<td><strong>TIME_WAIT</strong></td>
+<td>Waiting 2MSL after close</td>
+</tr>
+<tr>
+<td><strong>RTT</strong></td>
+<td>Round-trip time, observable from the handshake</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- capture a handshake and read the numbers ---
+sudo tcpdump -i lo -n -c 20 &quot;tcp port 9000&quot; 2&gt;/dev/null | head -20
+
+# --- SYN scan detection filters ---
+sudo tcpdump -i any -n &quot;tcp[tcpflags] &amp; tcp-syn != 0 and tcp[tcpflags] &amp; tcp-ack == 0&quot;
+tshark -i any -Y &quot;tcp.flags.syn == 1 &amp;&amp; tcp.flags.ack == 0&quot; 2&gt;/dev/null | head
+
+# --- scan traffic, if any ---
+sudo timeout 10 tcpdump -i any -n &quot;tcp[tcpflags] &amp; tcp-syn != 0 and tcp[tcpflags] &amp; tcp-ack == 0&quot; 2&gt;/dev/null \
+  | awk '{print $3}' | cut -d. -f1-4 | sort | uniq -c | sort -rn | head
+
+# --- connection state on this host ---
+ss -tan state time-wait | wc -l
+ss -tan state syn-recv | wc -l
+ss -tan state established | wc -l
+
+# --- kernel counters ---
+grep -A1 &quot;^Tcp:&quot; /proc/net/snmp | tail -1 | tr ' ' '\n' | head -20
+cat /proc/net/netstat | grep -A1 TcpExt | tail -1 | tr ' ' '\n' | grep -iE &quot;retrans|syn|listen&quot; | head
+
+# --- one-shot server to watch a handshake ---
+timeout 5 bash -c 'nc -l -p 9000' &amp;
+sleep 1; echo hi | timeout 2 nc 127.0.0.1 9000
+wait 2&gt;/dev/null
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> identify handshakes, retransmits and half-opens in a real capture.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/pkt-04 &amp;&amp; cd ~/aegis/labs/pkt-04
+
+# --- 1. capture a normal conversation ---
+sudo timeout 12 tcpdump -i lo -n -w normal.pcap -s 0 &quot;tcp port 9000&quot; 2&gt;/dev/null &amp;
+TC=$!; sleep 1
+( timeout 8 nc -l -p 9000 &gt;/dev/null 2&gt;&amp;1 &amp; )
+sleep 1
+echo &quot;hello&quot; | timeout 3 nc 127.0.0.1 9000 2&gt;/dev/null
+sleep 4; kill $TC 2&gt;/dev/null; wait $TC 2&gt;/dev/null
+
+echo &quot;=== the packets, with flags spelled out ===&quot;
+tshark -r normal.pcap \
+  -T fields -e frame.number -e tcp.flags.str -e tcp.seq -e tcp.ack -e tcp.len 2&gt;/dev/null \
+  | awk 'BEGIN{printf &quot;  %-5s %-12s %-10s %-10s %s\n&quot;,&quot;#&quot;,&quot;FLAGS&quot;,&quot;SEQ&quot;,&quot;ACK&quot;,&quot;LEN&quot;}' | tee 01-flags.txt
+echo
+cat &lt;&lt;'EOF'
+  Look for: SYN (seq=X, len=0), SYN,ACK (seq=Y, ack=X+1), ACK (ack=Y+1), then PSH,ACK.
+  The ACK number always acknowledges one more than the peer's sequence number.
+  If it does not, the stack is lying to you.
+EOF
+
+# --- 2. measure RTT from the handshake, by hand ---
+python3 - &lt;&lt;'PY' | tee 02-rtt.txt
+import socket, time, statistics
+
+def rtt(host, port, tries=10):
+    times = []
+    for _ in range(tries):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        t0 = time.perf_counter()
+        try:
+            s.connect((host, port))
+            times.append((time.perf_counter() - t0) * 1000)
+        except OSError:
+            pass
+        finally:
+            s.close()
+        time.sleep(0.05)
+    return times
+
+ts = rtt(&quot;127.0.0.1&quot;, 22)     # SSH, if running
+if ts:
+    print(f&quot;  TCP connect RTT to 127.0.0.1:22 over {len(ts)} tries&quot;)
+    print(f&quot;    min {min(ts):.3f} ms   avg {statistics.mean(ts):.3f} ms   max {max(ts):.3f} ms&quot;)
+else:
+    print(&quot;  nothing listening on 22 - run: sudo systemctl start ssh&quot;)
+print()
+print(&quot;  RTT is used by tcp-syncookies, by Nagle, and by every timing-based&quot;)
+print(&quot;  side channel in this course. Measure it before you rely on it.&quot;)
+PY
+
+# --- 3. a SYN scan against YOUR OWN loopback, and the signature it leaves ---
+echo
+echo &quot;=== SYN scan against 127.0.0.1 (authorised, local only) ===&quot;
+sudo nmap -sS -p 1-200 --min-rate 2000 127.0.0.1 -oN synscan.txt 2&gt;/dev/null
+echo &quot;  open ports found: $(grep -c open synscan.txt)&quot;
+echo
+echo &quot;=== the packet signature: SYN with no ACK, many ports, one source ===&quot;
+sudo timeout 12 tcpdump -i lo -n &quot;tcp[tcpflags] &amp; tcp-syn != 0 and tcp[tcpflags] &amp; tcp-ack == 0&quot; 2&gt;/dev/null \
+  | head -12 | tee 03-synsignature.txt
+echo
+echo &quot;Signature to memorise: same source port 0, many destination ports,&quot;
+echo &quot;SYN set and ACK clear. A full connect scan looks nothing like this.&quot;
+
+# --- 4. retransmissions and RSTs, both of which appear in normal life ---
+{
+  echo &quot;=== TCP retransmit counters on this host ===&quot;
+  grep -A1 &quot;^TcpExt:&quot; /proc/net/netstat | tail -1 | tr ' ' '\n' | \
+    grep -iE &quot;^TcpRetransSegs|^TcpExtTCPSynRetrans&quot; | head -3
+  echo &quot;  (column headers: $(grep '^TcpExt:' /proc/net/netstat | tail -1 | tr ' ' '\n' | grep -n RetransSegs | cut -d: -f1))&quot;
+  echo
+  echo &quot;=== states that indicate recent scanning or churn ===&quot;
+  echo &quot;  SYN-RECV (half-open): $(ss -tan state syn-recv 2&gt;/dev/null | tail -n +2 | wc -l)&quot;
+  echo &quot;  TIME-WAIT:             $(ss -tan state time-wait 2&gt;/dev/null | tail -n +2 | wc -l)&quot;
+} 2&gt;&amp;1 | tee 04-anomalies.txt
+
+# --- 5. the anomaly catalogue ---
+cat &gt; 05-anomalies.md &lt;&lt;'EOF'
+# TCP anomalies and what they mean
+
+| Observation | Likely cause |
+|---|---|
+| SYN, no reply, repeated | Port filtered by a firewall, or host down |
+| SYN, SYN-ACK, no ACK | SYN scan (half-open), or the client vanished |
+| RST immediately on SYN | Port closed, or a stateless firewall rejected it |
+| Many SYNs from one source, many ports | Port scan |
+| Many SYNs from one source, sequential ports | Sequential scan (nmap default) |
+| SYN to many *hosts*, same port | Host sweep / ping sweep |
+| Retransmissions with no RST | Packet loss, or a filter dropping silently |
+| Window of 0 held open | Application-level DoS (slowloris shape) |
+| Sequence numbers not incrementing | Middlebox rewriting, or an evasion attempt |
+| Connection to a high port, then nothing | Successful exploit callback - investigate immediately |
+| Thousands of TIME_WAIT | Local port exhaustion, or you are being scanned |
+EOF
+cat 05-anomalies.md
+</code></pre>
+<p><strong>Step 3 is the key exercise</strong> — generate a real SYN scan against loopback and see the signature<br />
+your IDS would alert on.</p>
+<p><strong>Record:</strong> <code>03-synsignature.txt</code> and <code>05-anomalies.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the packet signature of a SYN scan?</li>
+<li>How does an RST differ in meaning from a dropped packet?</li>
+<li>What does a huge TIME_WAIT count suggest?</li>
+<li>How do you compute RTT from a handshake?</li>
+<li>What does a non-increasing sequence number suggest?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>TCP Three-Way Handshake</strong> → <strong>SYN Scan</strong> → <strong>TCP State</strong> → <strong>IDS / IPS</strong> → <strong>Evasion</strong> →<br />
+<strong>Reverse Shell</strong>.</p>

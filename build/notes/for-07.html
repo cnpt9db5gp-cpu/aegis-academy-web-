@@ -1,0 +1,314 @@
+<h1 id="network-forensics-from-pcap">Network Forensics from PCAP</h1>
+<h2 id="summary">Summary</h2>
+<p>A packet capture is the highest-fidelity record of what actually crossed a network boundary. It<br />
+answers questions no log answers — who initiated, what exactly was said, in what order — and it<br />
+does so without trusting the machine that was compromised.</p>
+<p>The framing: <strong>the network does not lie about the order of events.</strong> A<br />
+compromised host can forge its own logs. It cannot forge the order of<br />
+packets that arrived.</p>
+<blockquote>
+<p>Companion to <code>for-02</code> (timeline) and <code>ccnad-*</code> (the protocols). This<br />
+note is tshark-driven analysis of your own captures.</p>
+</blockquote>
+<h2 id="the-workflow">The workflow</h2>
+<pre><code class="language-text">  1. KNOW YOUR CAPTURE
+     what was the capture point, what was in and out of it?
+     A capture taken on the wrong side of NAT cannot be correlated with
+     the server's logs, because the addresses do not match.
+
+  2. THE CONVERSATIONS
+     tshark -q -z conv,tcp        who talked to whom, how much
+     the first question is always &quot;what is the shape of this?&quot;
+
+  3. THE PROTOCOL MIX
+     tshark -q -z io,phs          what protocols, and how much
+     a sudden DNS TXT, or a beacon to a new domain, shows up here.
+
+  4. THE DNS
+     every domain resolved, in order. The first unfamiliar one is
+     usually where the story starts.
+
+  5. THE HTTP
+     the requests, in order, with the User-Agent. Downloads from a
+     new domain, by a browser, at 03:00.
+
+  6. THE TLS METADATA
+     you cannot read the payload, but you CAN read the SNI, the
+     certificate chain, the JA3 fingerprint, and the timing and size
+     of every flow. That is enough.
+
+  7. THE BEACONS
+     periodic, small, to the same destination. C2 looks like nothing
+     else in a capture.
+
+  8. THE EXFILTRATION
+     a large outbound transfer, or a lot of small ones, to a new
+     destination, or to a port that does not belong there.
+</code></pre>
+<h2 id="the-two-that-catch-exfiltration">The two that catch exfiltration</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/for-07 &amp;&amp; cd ~/aegis/labs/for-07
+
+# --- 1. the analysis script ---
+cat &gt; 01-analyse.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# PCAP analysis, in the order that finds things.
+P=&quot;${1:?usage: ./01-analyse.sh capture.pcap}&quot;
+[ -f &quot;$P&quot; ] || { echo &quot;no such capture&quot;; exit 1; }
+tshark -r &quot;$P&quot; -q 2&gt;/dev/null &gt;/dev/null || { echo &quot;tshark cannot read $P&quot;; exit 1; }
+
+echo &quot;==============================================================&quot;
+echo &quot; $P&quot;
+echo &quot;==============================================================&quot;
+echo &quot;  packets: $(tshark -r &quot;$P&quot; 2&gt;/dev/null | wc -l)&quot;
+echo &quot;  span   : $(tshark -r &quot;$P&quot; -q -z io,phs 2&gt;/dev/null | head -2 | tail -1)&quot;
+
+echo
+echo &quot;=== 1. THE CONVERSATIONS (the shape) ===&quot;
+tshark -r &quot;$P&quot; -q -z conv,tcp 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  READ THIS FIRST. It answers: who talked to whom, how much,&quot;
+echo &quot;  and for how long. Every later step is a refinement of it.&quot;
+echo
+echo &quot;  The things to look for:&quot;
+echo &quot;    - a host talking to something new and external&quot;
+echo &quot;    - a periodic pair with a small, constant byte count&quot;
+echo &quot;    - a very large transfer OUT that has no IN counterpart&quot;
+echo &quot;    - a DNS server being talked to by more hosts than usual&quot;
+
+echo
+echo &quot;=== 2. THE PROTOCOL MIX ===&quot;
+tshark -r &quot;$P&quot; -q -z io,phs 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  A sudden appearance of a protocol you do not normally see&quot;
+echo &quot;  (DNS over HTTPS, a new TLS port, ICMP with payload) is a&quot;
+echo &quot;  finding on its own.&quot;
+
+echo
+echo &quot;=== 3. DNS, IN ORDER (usually where the story starts) ===&quot;
+tshark -r &quot;$P&quot; -Y &quot;dns.flags.response==0&quot; \
+  -T fields -e frame.time -e ip.src -e dns.qry.name 2&gt;/dev/null \
+  | sort | uniq -c | sort -rn | head -25 | sed 's/^/  /'
+echo
+echo &quot;  The FIRST query to an unfamiliar domain, and the query BEFORE&quot;
+echo &quot;  it, are usually the delivery and the click. Print them in&quot;
+echo &quot;  chronological order, not by count:&quot;
+tshark -r &quot;$P&quot; -Y &quot;dns.flags.response==0&quot; \
+  -T fields -e frame.time -e ip.src -e dns.qry.name 2&gt;/dev/null \
+  | sort | sed 's/^/  /'
+
+echo
+echo &quot;=== 4. DNS TXT (tunneling shows here first) ===&quot;
+tshark -r &quot;$P&quot; -Y &quot;dns.qry.type==16&quot; -T fields -e dns.qry.name 2&gt;/dev/null \
+  | head -20 | sed 's/^/  /'
+echo &quot;  A long, base64-ish subdomain is tunnelling. A TXT query with a&quot;
+echo &quot;  long payload is data exfiltration over DNS.&quot;
+
+echo
+echo &quot;=== 5. HTTP REQUESTS, in order ===&quot;
+tshark -r &quot;$P&quot; -Y &quot;http.request&quot; \
+  -T fields -e frame.time -e ip.src -e http.host -e http.request.method \
+             -e http.request.uri -e http.user_agent 2&gt;/dev/null \
+  | sed 's/^/  /' | head -30
+
+echo
+echo &quot;=== 6. HTTP DOWNLOADS (what was fetched) ===&quot;
+tshark -r &quot;$P&quot; -Y &quot;http.response.code==200 &amp;&amp; http.content_type&quot; \
+  -T fields -e frame.time -e ip.dst -e http.content_type \
+             -e http.content_length 2&gt;/dev/null | sed 's/^/  /' | head -20
+echo
+echo &quot;  content_type of application/x-dosexec or similar, from a domain&quot;
+echo &quot;  you do not recognise, is the delivery.&quot;
+
+echo
+echo &quot;=== 7. TLS: SNI, certificate, and JA3 ===&quot;
+tshark -r &quot;$P&quot; -Y &quot;tls.handshake.extensions_server_name&quot; \
+  -T fields -e frame.time -e ip.dst -e tls.handshake.extensions_server_name \
+  2&gt;/dev/null | sort | uniq -c | sort -rn | sed 's/^/  /' | head -20
+echo
+echo &quot;  JA3 fingerprint (the TLS client hello parameters):&quot;
+tshark -r &quot;$P&quot; -Y &quot;tls.handshake.type==1&quot; \
+  -T fields -e tls.handshake.ja3_full 2&gt;/dev/null | sort | uniq -c | sort -rn | sed 's/^/  /'
+echo
+echo &quot;  A JA3 that appears for exactly one destination is a client that&quot;
+echo &quot;  is different from everything else on the network. That is&quot;
+echo &quot;  either the malware, or a legitimate client you did not know&quot;
+echo &quot;  was there. Both are worth a question.&quot;
+echo
+echo &quot;  NOTE: SNI is visible unless Encrypted Client Hello is in use.&quot;
+echo &quot;  It is the single most useful field in a capture and it is&quot;
+echo &quot;  going away. Record the SNI now.&quot;
+
+echo
+echo &quot;=== 8. BEACONS: periodic, small, same destination ===&quot;
+tshark -r &quot;$P&quot; -Y &quot;tcp&quot; -T fields -e ip.dst -e tcp.dstport -e frame.len \
+  -e frame.time_epoch 2&gt;/dev/null | sort | uniq -c | sort -rn | head -15 | sed 's/^/  /'
+echo
+echo &quot;  C2 has a shape: a small, constant-sized request every N&quot;
+echo &quot;  seconds, to one destination. Look for a count that divides&quot;
+echo &quot;  evenly into the capture's duration.&quot;
+
+echo
+echo &quot;=== 9. EXFILTRATION: bytes out vs bytes in ===&quot;
+tshark -r &quot;$P&quot; -q -z conv,ip 2&gt;/dev/null | sed 's/^/  /' | head -20
+echo
+echo &quot;  A host with 10 MB in and 10 MB OUT is normal. A host with&quot;
+echo &quot;  200 KB in and 40 MB out is an incident.&quot;
+EOF
+chmod +x 01-analyse.sh
+
+# --- 2. capture your own traffic, locally, to practise ---
+{
+  echo &quot;=== making a capture of THIS machine's own traffic (loopback only) ===&quot;
+  echo &quot;  tshark -i lo -c 2000 -w lab.pcap&quot;
+  echo
+  echo &quot;  Then, in another terminal, generate some traffic:&quot;
+  echo &quot;    curl -s http://127.0.0.1:8080/ &gt;/dev/null&quot;
+  echo &quot;    python3 -m http.server 8099 &amp;&quot;
+  echo &quot;    curl -s http://127.0.0.1:8099/ &gt;/dev/null&quot;
+  echo
+  echo &quot;  Both stay on loopback. There is no outbound traffic.&quot;
+} 2&gt;&amp;1 | tee 02-capture.txt
+
+# start a loopback listener and capture against it
+nohup python3 -m http.server 8099 --bind 127.0.0.1 &gt;/dev/null 2&gt;&amp;1 &amp;
+SRV=$!
+timeout 12 tshark -i lo -c 500 -w lab.pcap &gt;/dev/null 2&gt;&amp;1 &amp;
+CAP=$!
+sleep 2
+curl -s --max-time 3 http://127.0.0.1:8099/ &gt;/dev/null 2&gt;&amp;1
+curl -s --max-time 3 http://127.0.0.1:8099/ &gt;/dev/null 2&gt;&amp;1
+curl -s --max-time 3 &quot;http://127.0.0.1:8099/?search=test&quot; &gt;/dev/null 2&gt;&amp;1
+wait $CAP 2&gt;/dev/null
+kill $SRV 2&gt;/dev/null
+sleep 1
+ls -la lab.pcap 2&gt;/dev/null | sed 's/^/  /' | tee -a 02-capture.txt
+
+# --- 3. run the analysis ---
+if [ -s lab.pcap ]; then
+  ./01-analyse.sh lab.pcap 2&gt;&amp;1 | head -70 | tee 03-analysis.txt
+fi
+
+# --- 4. the structure-reading skills ---
+cat &gt; 04-reading.md &lt;&lt;'EOF'
+# Reading a capture structurally
+
+```text
+  THE FIVE-STEP READ, and it is the same every time.
+
+  1. SHAPE         tshark -q -z conv,tcp
+                    Who, to whom, how much, how long. Nothing else
+                    comes before this.
+
+  2. TIMELINE      tshark -T fields -e frame.time -e ip.src -e ip.dst
+                    Sort by time. Now you can see the SEQUENCE, which
+                    is where the story is. A capture has no order
+                    until you impose one.
+
+  3. THE FIRST NEW THING
+                    What is the first packet in this capture that
+                    does not belong to the routine? Not the largest
+                    transfer - the FIRST unfamiliar thing. In
+                    practice it is almost always a DNS query to a
+                    domain nobody in the business has heard of.
+
+  4. THE PAYLOAD   For that: DNS query content, HTTP request, TLS SNI
+                    and certificate. tshark -Y &quot;&lt;filter&gt;&quot; -V for the
+                    full detail.
+
+  5. THE AMOUNT    bytes in vs out for the host involved. Delivery is
+                    small. Exfiltration is large. The asymmetry is
+                    the finding.
+</code></pre>
+<h2 id="the-filters-worth-memorising">The filters worth memorising</h2>
+<pre><code class="language-bash"># the conversation list
+tshark -r c.pcap -q -z conv,tcp
+
+# HTTP, all requests, in order
+tshark -r c.pcap -Y &quot;http.request&quot; -T fields \
+  -e frame.time -e ip.src -e ip.dst -e http.host -e http.request.method -e http.request.uri
+
+# TLS SNI
+tshark -r c.pcap -Y &quot;tls.handshake.extensions_server_name&quot; -T fields \
+  -e frame.time -e ip.dst -e tls.handshake.extensions_server_name
+
+# JA3 / JA3S
+tshark -r c.pcap -Y &quot;tls.handshake.type==1&quot; -T fields -e tls.handshake.ja3_full
+tshark -r c.pcap -Y &quot;tls.handshake.type==2&quot; -T fields -e tls.handshake.ja3s_full
+
+# DNS queries, in order
+tshark -r c.pcap -Y &quot;dns.flags.response==0&quot; -T fields \
+  -e frame.time -e ip.src -e dns.qry.name
+
+# SMB, and specifically the relay-relevant one
+tshark -r c.pcap -Y &quot;smb2.cmd==15&quot; -T fields -e frame.time -e ip.src -e ip.dst
+
+# Kerberos, and the TGT request that means a new session
+tshark -r c.pcap -Y &quot;kerberos.msgType==10&quot; -T fields -e frame.time -e ip.src
+
+# everything to or from one host
+tshark -r c.pcap -Y &quot;ip.addr==192.168.56.20&quot; -T fields -e frame.time -e ip.dst -e _ws.col.Protocol
+
+# only the failures (errors, resets, retransmits)
+tshark -r c.pcap -Y &quot;tcp.flags.reset==1 || tcp.analysis.retransmission || icmp.type==3&quot;
+
+# a full dissection of one packet
+tshark -r c.pcap -Y &quot;frame.number==1234&quot; -V
+</code></pre>
+<h2 id="what-a-capture-proves-and-what-it-does-not">What a capture proves, and what it does not</h2>
+<pre><code class="language-text">  PROVES
+    the order of events on the wire
+    what bytes were sent, in the clear
+    which host initiated (the source address and port)
+    timing, to microseconds
+    TLS metadata (SNI, certificate, JA3) even without decryption
+
+  DOES NOT PROVE
+    what happened off the wire
+    who was at the keyboard at that address
+    intent (a request to a domain is not malicious by itself)
+    anything about a capture point that was on the wrong side of NAT,
+      a proxy, or a load balancer - the addresses will not match the
+      server's logs and you will spend a day finding out why
+
+  THE PRACTICAL CONSEQUENCE:
+    a PCAP is the best single artefact for reconstructing a sequence
+    and the worst single artefact for attributing intent. Use it for
+    the sequence. Use disk, memory and logs for the attribution.
+
+  THE HASH, ALWAYS:
+    pcap files are large and they contain everything anybody on the
+    wire said. Hash one and record it like any other evidence.
+</code></pre>
+<pre><code class="language-bash"># hash a capture
+sha256sum lab.pcap
+md5sum    lab.pcap
+tshark -r lab.pcap -T fields -e frame.comment 2&gt;/dev/null | grep -i &quot;^#&quot;
+# ^ pcapng can carry a COMMENT. Whoever made the capture may have
+#   written why. Read it before you ask.
+</code></pre>
+<p>EOF<br />
+cat 04-reading.md<br />
+rm -f lab.pcap<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: an actual <code>tshark</code> capture of loopback traffic, analysed by the<br />
+script. It shows the workflow on real packets — conversations first, then DNS in order, then<br />
+SNI and JA3 — rather than describing it.</p>
+<p><strong><code>04-reading.md</code></strong> is the discipline note: the network doesn't lie about <em>order</em>, but it can't<br />
+attribute <em>intent</em>. Use PCAP for the sequence, disk and memory and logs for the attribution —<br />
+and read the <code>pcapng</code> comment before asking whoever made the capture why they made it.</p>
+<p><strong>Record:</strong> <code>03-analysis.txt</code> and <code>04-reading.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What must you know about a capture point before trusting a correlation with server logs?</li>
+<li>Why is <code>conv,tcp</code> the first command you run?</li>
+<li>Give the two things that make DNS queries look like exfiltration.</li>
+<li>What is JA3, and what does a JA3 seen for exactly one destination suggest?</li>
+<li>Name the two shapes of C2 in a capture.</li>
+<li>Why is the in/out byte asymmetry a finding?</li>
+<li>Name seven filters worth memorising.</li>
+<li>What does a PCAP prove, and what does it not? Why is that distinction the one that matters?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Network Forensics</strong> → <strong>PCAP Analysis</strong> → <strong>Beaconing</strong> → <strong>Data Exfiltration</strong> →<br />
+<strong>Timeline Analysis</strong>.<br />
+<code>for-02</code> is where this joins disk and memory into one story.</p>

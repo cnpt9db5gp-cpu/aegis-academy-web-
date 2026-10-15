@@ -1,0 +1,543 @@
+<h1 id="digital-signatures-and-randomness">Digital Signatures and Randomness</h1>
+<h2 id="summary">Summary</h2>
+<p>A signature gives you two things a MAC cannot: <strong>non-repudiation</strong> (the signer cannot credibly<br />
+deny it) and <strong>transferability</strong> (a third party can verify without a shared secret). The price is<br />
+a signature scheme is a <em>randomised</em> construction, and that fact causes most of its bugs.</p>
+<p>The lecture's framing: the signing algorithm itself is easy; the<br />
+surrounding sign/verify protocol is where everything goes wrong.</p>
+<h2 id="what-a-signature-is-for">What a signature is for</h2>
+<pre><code class="language-text">  MAC   integrity + authentication, needs a SHARED SECRET
+        -&gt; both parties can forge it -&gt; no repudiation
+
+  SIGNATURE  integrity + authenticity + non-repudiation
+        -&gt; the public key verifies, the private key signs
+        -&gt; only the holder could have produced it
+        -&gt; a third party can verify with no prior relationship
+
+  THE PRICE:
+    - slower (asymmetric)
+    - larger (256 bytes vs 32)
+    - it needs a certificate to bind a public key to an identity
+      (cry-07), because a bare public key proves nothing about WHO
+    - and it introduces randomness, which is where the bugs live
+</code></pre>
+<h2 id="schnorr-signatures">Schnorr signatures</h2>
+<pre><code class="language-text">  THE SIMPLEST CORRECT CONSTRUCTION, and the clearest:
+
+  SETUP
+    private key  x  (a random scalar)
+    public key   y = g^x mod p
+
+  SIGN(m, x)
+    k = random nonce                       &lt;- THE CRITICAL LINE
+    R = g^k mod p
+    e = H(R || y || m)      a hash into the challenge
+    s = k - e*x mod (p-1)
+    signature = (R, s)
+
+  VERIFY(m, (R,s), y)
+    e = H(R || y || m)
+    check:  g^s == R * y^e  mod p
+
+  WHY IT WORKS:
+    e binds R and m. s encodes k - e*x. Substituting g^s:
+      g^s = g^(k-e*x) = g^k * (g^x)^(-e) = R * y^(-e)
+    so g^s == R * y^e iff s = k - e*x for SOME k, i.e. iff the
+    signer knew x and the discrete log of R. Extractable.
+
+  THIS IS BIP340 / EdDSA / Ed25519. The security is a random oracle
+  model argument: forking lemma says an adversary who forges
+  efficiently can extract x.
+</code></pre>
+<pre><code class="language-python"># Schnorr from scratch, with the nonce made deliberately WRONG, then fixed
+import hashlib, secrets
+
+p = 2**255 - 19
+g = 5
+
+def H(*parts):
+    h = hashlib.sha256()
+    for x in parts: h.update(x.to_bytes(32, &quot;little&quot;))
+    return int.from_bytes(h.digest(), &quot;little&quot;) % (p - 1) + 1
+
+def keygen():
+    x = secrets.randbelow(p - 1) + 1
+    return x, pow(g, x, p)
+
+def sign_fixed(m, x, y):
+    k = secrets.randbelow(p - 1) + 1        # RANDOM nonce, every time
+    R = pow(g, k, p)
+    e = H(R, y, m)
+    s = (k - e * x) % (p - 1)
+    return (R, s)
+
+def verify(m, sig, y):
+    R, s = sig
+    e = H(R, y, m)
+    return pow(g, s, p) == (R * pow(y, e, p)) % p
+
+def sign_bad_nonce_reuse(m, x, y, k):
+    &quot;&quot;&quot;THE BUG: reusing the nonce leaks the private key in two queries.&quot;&quot;&quot;
+    R = pow(g, k, p)
+    e = H(R, y, m)
+    s = (k - e * x) % (p - 1)
+    return (R, s)
+
+x, y = keygen()
+m = b&quot;AEGIS-Schnorr-demo&quot;
+sig = sign_fixed(m, x, y)
+print(f&quot;  verify(m)        : {verify(m, sig, y)}&quot;)
+print(f&quot;  verify(tampered) : {verify(b'tampered', sig, y)}&quot;)
+print()
+
+print(&quot;  === now the bug: a REUSED nonce ===&quot;)
+k = secrets.randbelow(p - 1) + 1
+s1 = sign_bad_nonce_reuse(b&quot;message one&quot;, x, y, k)
+s2 = sign_bad_nonce_reuse(b&quot;message two&quot;, x, y, k)
+R1 = s1[0]; e1 = H(R1, y, b&quot;message one&quot;)
+R2 = s2[0]; e2 = H(R2, y, b&quot;message two&quot;)
+print(f&quot;  same R in both signatures: {R1 == R2}&quot;)
+# s1 = k - e1*x, s2 = k - e2*x   -&gt;   s1 - s2 = (e2 - e1)*x
+leaked = ((s1[1] - s2[1]) * pow(e2 - e1, -1, p - 1)) % (p - 1)
+print(f&quot;  private key extracted from the public signatures: {leaked == x}&quot;)
+print(f&quot;  recovered x = {leaked}&quot;)
+print()
+print(&quot;  TWO signatures. That is the entire cost of the bug.&quot;)
+print(&quot;  And it is the bug behind the PS3 ECDSA nonce failure (2010),&quot;)
+print(&quot;  the Android Bitcoin wallet thefts (2013), and still the most&quot;)
+print(&quot;  common implementation bug in signature schemes ever made.&quot;)
+PY
+</code></pre>
+<h2 id="ecdsa-and-its-nonce">ECDSA, and its nonce</h2>
+<pre><code class="language-text">  ECDSA:
+    sign:  k random, R = k*G, r = R.x mod n, s = k^-1 (H(m) + r*x) mod n
+    verify with the standardisation from BIP 62 / RFC 6979
+
+  THE NUMERICAL PROBLEM:
+    if k &lt; n and r*s and r are all in range, everything is fine.
+    if k or s wraps to 0, the signature is invalid.
+    if k or s is out of range [1, n-1], you have leaked information.
+
+    k = 0 -&gt; signing fails
+    s = 0 -&gt; signing fails
+    s &gt; n/2 -&gt; MALLEABLE: (r, n-s) is also a valid signature
+    k leaked -&gt; x = (s*k - H(m)) * r^-1 mod n
+
+  TWO MITIGATIONS, BOTH MANDATORY:
+    1. RFC 6979: DETERMINISTIC k = HMAC-SHA256(x || m).
+       No RNG at all in the nonce path. This ELIMINATES the entire
+       class of bug rather than mitigating it.
+    2. Low-S normalisation: reject s &gt; n/2.
+       Removes malleability. Also required by BIP 62.
+
+  AND THE MALLEABILITY CONSEQUENCE, which is a real DoS and a real
+  signature-forgery in the wrong context:
+    if a server accepts (r,s) and also (r, n-s), then any observer
+    who sees ONE valid signature can produce a SECOND valid signature
+    for the same message. That breaks systems that assume &quot;this
+    signature is unique&quot; - nonce-based dedup, transparent logging,
+    and some blockchain designs.
+</code></pre>
+<h2 id="what-the-random-number-generator-must-do">What the random number generator must do</h2>
+<pre><code class="language-text">  A SIGNATURE NONCE NEEDS:
+    - unpredictable (an attacker who knows k recovers x)
+    - UNIQUE (reuse leaks, as shown)
+    - uniformly distributed
+    - secret, until used
+
+  BECAUSE IT IS ONE SECRET VALUE PER OPERATION, a compromised or
+  biased RNG IS A PRIVATE KEY COMPROMISE. Not a degradation. Total loss.
+
+  THE FAILURE MODES, all of which have happened:
+    - the same seed reused (VMs cloned from a template image)
+    - a weak PRNG (early Bitcoin wallets: the Android SecureRandom bug)
+    - concurrent signers sharing a PRNG state and producing the same k
+    - fork() inheriting the same PRNG state across processes
+    - entropy starvation at boot -&gt; a low-entropy early nonce
+</code></pre>
+<pre><code class="language-python"># The concurrency bug, which is subtle and has caused real key theft
+import os, threading
+# A global PRNG shared between threads, with no locking:
+_counter = 0
+def weak_nonce():
+    global _counter
+    _counter += 1
+    return _counter          # never repeats... but two threads can race
+
+results = []
+def worker(m):
+    for _ in range(1000):
+        n = weak_nonce()
+        results.append(n)
+ts = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+[t.start() for t in ts]; [t.join() for t in ts]
+dupes = [n for n, c in __import__(&quot;collections&quot;).Counter(results).items() if c &gt; 1]
+print(f&quot;  {len(results)} nonces generated across 8 threads&quot;)
+print(f&quot;  duplicated nonces: {len(dupes)}&quot;)
+print(&quot;  ^ a COUNTER is safe from reuse and UNSAFE from prediction.&quot;)
+print(&quot;    A PRNG is the opposite. You need both properties:&quot;)
+print(&quot;      unpredictable AND never repeated.&quot;)
+print(&quot;    The only way to get both is a real CSPRNG with atomic&quot;)
+print(&quot;    state updates (getrandom(2), /dev/urandom, or a kernel&quot;)
+print(&quot;    syscall) - not a userspace counter, and not rand().&quot;)
+</code></pre>
+<h2 id="sign-then-verify-and-the-protocol-around-it">Sign-then-verify, and the protocol around it</h2>
+<pre><code class="language-text">  WHAT ACTUALLY NEEDS SIGNING (not just hashing):
+    - software updates and release artifacts
+    - configuration that changes authorisation
+    - firmware
+    - document signatures (PDF, code signing, package managers)
+    - anything where a MITM's edit must be detectable by a third party
+
+  WHERE PEOPLE USE A PLAIN HASH AND ARE FINE:
+    - an internal integrity check where all parties already share a secret
+    - a checksum for corruption detection
+    - a commitment inside a protocol that already authenticates
+
+  THE ANTI-PATTERN:
+    - &quot;we sign the SHA-256 of the file&quot; where the real fix is
+      verifying the signature at all. Never signed = never verified.
+    - verifying the hash AFTER using the data. Same bug as cry-02's
+      tag ordering.
+</code></pre>
+<h2 id="deterministic-signatures-the-elegant-middle">Deterministic signatures: the elegant middle</h2>
+<pre><code class="language-text">  Ed25519 signs deterministically: the nonce is derived from the
+  private key AND the message (RFC 8032).
+
+    k = SHA-512(private_key || message) mod L
+
+  Consequences:
+    + no RNG in the signing path at all
+    + signatures are reproducible, which makes them testable
+    + the nonce-reuse class is structurally impossible
+    - a deterministic signature on the same message is identical,
+      so it is not a unique identifier (Schnorr/BIP340 adds a
+      separate nonce for that reason)
+
+  BIP340 (Schnorr) adds an explicit nonce parameter for exactly this
+  privacy reason, while keeping the signature maths Schnorr's.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Digital signature</strong></td>
+<td>Integrity, authenticity, non-repudiation</td>
+</tr>
+<tr>
+<td><strong>Non-repudiation</strong></td>
+<td>The signer cannot credibly deny signing</td>
+</tr>
+<tr>
+<td><strong>Schnorr signature</strong></td>
+<td><code>g^s == R·y^e</code>; the basis of EdDSA</td>
+</tr>
+<tr>
+<td><strong>Forking lemma</strong></td>
+<td>Efficient forgery implies key extraction</td>
+</tr>
+<tr>
+<td><strong>ECDSA</strong></td>
+<td>The other widespread scheme; nonce-sensitive</td>
+</tr>
+<tr>
+<td><strong>RFC 6979</strong></td>
+<td>Deterministic ECDSA nonces; eliminates the bug class</td>
+</tr>
+<tr>
+<td><strong>Low-S normalisation</strong></td>
+<td>Reject <code>s &gt; n/2</code>; removes malleability</td>
+</tr>
+<tr>
+<td><strong>Signature malleability</strong></td>
+<td><code>(r,s)</code> and <code>(r,n-s)</code> both valid</td>
+</tr>
+<tr>
+<td><strong>Nonce reuse</strong></td>
+<td>Two signatures, one nonce, private key recovered</td>
+</tr>
+<tr>
+<td><strong>PS3 / Android failures</strong></td>
+<td>Real key thefts from this exact bug</td>
+</tr>
+<tr>
+<td><strong>Deterministic signature</strong></td>
+<td>No RNG; reproducible; Ed25519, BIP340</td>
+</tr>
+<tr>
+<td><strong>Code signing</strong></td>
+<td>The main real-world use</td>
+</tr>
+<tr>
+<td><strong>Signing hash vs signing data</strong></td>
+<td>Always hash first; never sign raw</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-06 &amp;&amp; cd ~/aegis/labs/cry-06
+
+# --- 1. nonce reuse leaks the key, run for real ---
+cat &gt; 01-nonce-reuse.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Schnorr signature nonce reuse: private key recovery.
+
+Two signatures, one nonce. The private key falls out with elementary
+arithmetic. This is the exact bug class behind the PS3 (2010) and
+Android Bitcoin wallet (2013) failures.
+&quot;&quot;&quot;
+import hashlib, secrets
+
+p  = 2**255 - 19
+n  = p - 1
+g  = 5
+
+def H(*parts) -&gt; int:
+    h = hashlib.sha256()
+    for x in parts: h.update(x.to_bytes(32, &quot;little&quot;))
+    return int.from_bytes(h.digest(), &quot;little&quot;) % n + 1
+
+x = secrets.randbelow(n) + 1
+y = pow(g, x, p)
+k = secrets.randbelow(n) + 1          # one nonce, used twice
+R = pow(g, k, p)
+
+def sign(m):
+    e = H(R, y, m)
+    return (k - e * x) % n             # s = k - e*x
+
+m1, m2 = b&quot;transfer 0100 to alice&quot;, b&quot;transfer 9900 to mallory&quot;
+s1, s2 = sign(m1), sign(m2)
+e1, e2 = H(R, y, m1), H(R, y, m2)
+
+print(&quot;  two signatures over different messages, same nonce:&quot;)
+print(f&quot;    (R, s1) for {m1.decode()}&quot;)
+print(f&quot;    (R, s2) for {m2.decode()}&quot;)
+print()
+print(&quot;    s1 = k - e1*x        (1)&quot;)
+print(&quot;    s2 = k - e2*x        (2)&quot;)
+print(&quot;    s1 - s2 = (e2-e1)*x  subtract (1)-(2)&quot;)
+print()
+recovered = ((s1 - s2) * pow(e2 - e1, -1, n)) % n
+print(f&quot;    recovered private key: {recovered}&quot;)
+print(f&quot;    matches the real one : {recovered == x}&quot;)
+print()
+print(&quot;    TWO SIGNATURES. That is the cost of the bug.&quot;)
+print()
+print(&quot;    ps3:      2010, Sony's ECDSA implementation returned the same&quot;)
+print(&quot;               k for every signature. Private keys extracted at will.&quot;)
+print(&quot;    android:  2013, Bitcoin wallets on a flawed SecureRandom.&quot;)
+print(&quot;    ed25519:  no nonce RNG at all - k = SHA512(privkey || msg).&quot;)
+print(&quot;    rfc6979:  same for ECDSA. The class is eliminated, not mitigated.&quot;)
+PY
+python3 01-nonce-reuse.py 2&gt;&amp;1 | tee 02-reuse-demo.txt
+
+# --- 2. the concurrency bug ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-concurrency.txt
+import threading, collections, os, secrets
+
+print(&quot;  === a shared counter 'nonce' under concurrency ===&quot;)
+_counter = 0
+lock = threading.Lock()
+results = []
+def worker():
+    global _counter
+    for _ in range(5000):
+        _counter += 1                       # NOT atomic: read-modify-write
+        results.append(_counter)
+ts = [threading.Thread(target=worker) for _ in range(8)]
+[t.start() for t in ts]; [t.join() for t in ts]
+c = collections.Counter(results)
+dupes = sum(v - 1 for v in c.values() if v &gt; 1)
+print(f&quot;    nonces generated : {len(results)}&quot;)
+print(f&quot;    duplicates       : {dupes}&quot;)
+print()
+print(&quot;    with a lock:&quot;)
+_counter = 0; results2 = []
+def worker2():
+    global _counter
+    for _ in range(5000):
+        with lock:
+            _counter += 1
+            results2.append(_counter)
+ts = [threading.Thread(target=worker2) for _ in range(8)]
+[t.start() for t in ts]; [t.join() for t in ts]
+print(f&quot;    duplicates       : {sum(v-1 for v,c in collections.Counter(results2).items() if v&gt;1)}&quot;)
+print()
+print(&quot;  === and the kernel's answer ===&quot;)
+import getpass, platform
+print(f&quot;    getrandom(2) available: {hasattr(os, 'getrandom')}&quot;)
+b = os.getrandom(32)
+print(f&quot;    os.getrandom(32)       : {b.hex()[:32]}...&quot;)
+print(f&quot;    is it unique per call? : &quot;, end=&quot;&quot;)
+print(len({os.getrandom(32) for _ in range(200)}) == 200)
+print()
+print(&quot;  THE RULE: the signing nonce must be UNPREDICTABLE and NON-REPEATING.&quot;)
+print(&quot;  A counter is predictable. math.random is predictable and repeats.&quot;)
+print(&quot;  Only a kernel CSPRNG (getrandom, /dev/urandom, BCryptGenRandom)&quot;)
+print(&quot;  gives both. And with RFC 6979 / Ed25519 you can avoid the RNG&quot;)
+print(&quot;  in the signing path entirely, which is strictly better.&quot;)
+PY
+cat 03-concurrency.txt
+
+# --- 3. signature malleability, the DoS ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-malleability.txt
+print(&quot;  === signature malleability (the 'low-S' problem) ===\n&quot;)
+n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+print(f&quot;  curve order n = {hex(n)}&quot;)
+r, s = 0x1234567890abcdef, 0x00fedcba98765432 % n
+print(f&quot;  a valid signature (r, s)&quot;)
+print(f&quot;    r = {hex(r)}&quot;)
+print(f&quot;    s = {hex(s)}&quot;)
+print(f&quot;  an attacker produces (r, n-s):&quot;)
+print(f&quot;    n-s = {hex(n - s)}&quot;)
+print()
+print(&quot;  (r, n-s) is ALSO a valid signature for the same message.&quot;)
+print(&quot;  Both verify. The verifier that does not check s &lt;= n/2 accepts both.&quot;)
+print()
+print(&quot;  CONSEQUENCES:&quot;)
+print(&quot;    1. a signature seen on the wire can be REPLAYED in a new form,&quot;)
+print(&quot;       so any system treating the signature bytes as a unique&quot;)
+print(&quot;       identifier can be forced to store it twice (a DoS)&quot;)
+print(&quot;    2. 'has this message been signed?' checks that dedupe on the&quot;)
+print(&quot;       signature bytes fail&quot;)
+print(&quot;    3. in a transparent log, the same signature appears twice&quot;)
+print()
+print(&quot;  THE FIX is one line, and it is in BIP62, Bitcoin and most&quot;)
+print(&quot;  hardened libraries now:&quot;)
+print(&quot;    if s &gt; n/2: reject  (or canonicalise to n-s before storing)&quot;)
+print()
+print(&quot;  So the check is: a signature must satisfy&quot;)
+print(&quot;    1 &lt;= r &lt; n    AND    1 &lt;= s &lt;= n/2   (low-S)&quot;)
+PY
+cat 04-malleability.txt
+
+# --- 4. the verification protocol, and where people skip it ---
+cat &gt; 05-protocol.md &lt;&lt;'EOF'
+# The signing protocol, not just the algorithm
+
+The maths is the easy part. Almost every real signature failure is a
+protocol failure.
+
+```text
+  WHAT MUST HAPPEN, IN ORDER:
+    1. hash the content                     (never sign the raw bytes)
+    2. sign the hash with a DETERMINISTIC nonce  (RFC 6979 / Ed25519)
+    3. normalise s to low-S
+    4. attach the signature AND the certificate chain
+    5. the verifier:
+         a. parse strictly                (length-prefixed, not delimited)
+         b. validate the certificate chain to a trusted root
+         c. check validity dates AND the hostname
+         d. check key usage and constraints
+         e. verify the signature
+         f. check revocation status
+         g. ONLY NOW use the content
+```
+
+## The orderings that produce real bugs
+
+| Bug | Consequence |
+|---|---|
+| verify the signature, then use the data | forging is still a forgery, but the bug is a verification-ordering bug and you will be asked about it in the report |
+| check the chain but not the hostname | a certificate for `example.com.evil.tld` validates |
+| ignore expiry | a compromised 2018 key still works |
+| ignore revocation | CRL/OCSP checked but a failure is treated as &quot;valid&quot; |
+| accept any key the user supplies | no trust anchor at all; TOFU without the TOFU |
+| cache a verification result by URL alone | ignores the cert entirely on a hit |
+| compare a signature with `==` | timing oracle on the signature |
+
+## Verification checklist to run against any deployment
+
+```bash
+# what is actually trusted here
+openssl s_client -connect TARGET:443 -servername TARGET -showcerts &lt;/dev/null 2&gt;/dev/null \
+  | openssl x509 -noout -text | grep -E &quot;Issuer|Subject|Not|Key Usage|Extended&quot; | sed 's/^/  /'
+
+# is the chain actually checked, or is -verify_return_error used?
+echo | openssl s_client -connect TARGET:443 2&gt;&amp;1 | grep -E &quot;Verify return code|verify error&quot; | sed 's/^/  /'
+#  &quot;Verify return code: 0 (ok)&quot;  is the only good answer
+#  &quot;Verify return code: 10 (certificate has expired)&quot; is a finding
+```
+
+- [ ] hostname verified against the certificate, not the URL's suffix
+- [ ] expiry enforced
+- [ ] revocation checked (CRL or OCSP), and a failure is a FAILURE
+- [ ] the chain terminates at a trust anchor the app controls
+- [ ] signature compared with a constant-time function
+- [ ] the hash is verified BEFORE any use of the content
+- [ ] low-S enforced where the format allows malleability
+EOF
+cat 05-protocol.md
+
+# --- 5. audit ---
+cat &gt; 06-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. signature code ===&quot;
+grep -rniE &quot;sign\(|verify\(|ECDSA|ed25519|schnorr|pkeyutl|openssl.*dgst|signtool&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.go&quot; . 2&gt;/dev/null | head -15 | sed 's/^/  /'
+
+echo; echo &quot;=== 2. the nonces (must be deterministic or from a CSPRNG) ===&quot;
+grep -rniE &quot;nonce *= *random\.|k *= *random\.|rand\(|Math\.random&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; . | sed 's/^/  FINDING: /'
+grep -rniE &quot;RFC ?6979|ed25519|Ed25519&quot; . | sed 's/^/  ok: /'
+
+echo; echo &quot;=== 3. is the content verified before use? ===&quot;
+grep -rn -A3 -iE &quot;verify_signature|public_key.*verify|\.verify\(&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; . | grep -B3 -A1 -iE &quot;exec|eval|write|open\(|render|query&quot; \
+     | sed 's/^/  CHECK ORDER: /'
+
+echo; echo &quot;=== 4. certificate hygiene, on the hosts you connect to ===&quot;
+for h in example.com github.com; do
+  info=$(echo | timeout 6 openssl s_client -connect $h:443 -servername $h 2&gt;/dev/null \
+         | openssl x509 -noout -text 2&gt;/dev/null)
+  sig=$(echo &quot;$info&quot; | grep &quot;Signature Algorithm&quot; | head -1 | awk -F': ' '{print $2}')
+  exp=$(echo | timeout 6 openssl s_client -connect $h:443 -servername $h 2&gt;/dev/null \
+        | openssl x509 -noout -enddate 2&gt;/dev/null)
+  san=$(echo &quot;$info&quot; | grep -A1 &quot;Subject Alternative Name&quot; | tail -1 | cut -c1-60)
+  printf &quot;  %-14s sig=%-28s %s\n&quot; &quot;$h&quot; &quot;$sig&quot; &quot;$exp&quot;
+  printf &quot;                 san=%s\n&quot; &quot;$san&quot;
+done
+
+echo; echo &quot;=== 5. low-S / malleability handling ===&quot;
+grep -rniE &quot;low[_-]?s|malleab|n/2|canonicalis|canonicaliz&quot; . 2&gt;/dev/null | sed 's/^/  /'
+echo &quot;  (absent is not necessarily a finding: most modern libs do it internally.&quot;
+echo &quot;   It IS a finding in hand-rolled verification code.)&quot;
+
+echo; echo &quot;=== 6. how many places verify, and do they all check the hostname? ===&quot;
+grep -rniE &quot;check_hostname|CERT_REQUIRED|rejectUnauthorized|SSL_VERIFY_PEER|verify_mode&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.go&quot; . | sed 's/^/  /'
+echo &quot;  (verify_mode = CERT_NONE or rejectUnauthorized: false is a CRITICAL finding)&quot;
+EOF
+chmod +x 06-audit.sh
+./06-audit.sh 2&gt;&amp;1 | tee 07-audit.txt
+rm -f 01-nonce-reuse.py
+</code></pre>
+<p><strong>Step 1 is the deliverable</strong>: two Schnorr signatures over different messages with one nonce, and<br />
+the private key recovered with <code>(s1 - s2) / (e2 - e1)</code> mod n. Four lines of arithmetic. That is<br />
+the entire PS3 failure, the entire Android Bitcoin wallet theft, and the entire reason RFC 6979<br />
+exists.</p>
+<p><strong>Step 3</strong> is the one people miss — a <em>counter</em> is safe from reuse and unsafe from prediction;<br />
+a PRNG is the reverse. You need both properties, and only a kernel CSPRNG gives you both.</p>
+<p><strong>Record:</strong> <code>02-reuse-demo.txt</code> and <code>04-malleability.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What do signatures provide that MACs cannot, and what do they cost?</li>
+<li>Write the Schnorr verify equation and explain why it works.</li>
+<li>Explain nonce reuse's key recovery as an equation.</li>
+<li>What is the forking lemma, and what does it imply?</li>
+<li>Name three real-world key thefts caused by nonce failure.</li>
+<li>What does RFC 6979 do, and why is it better than a "good" RNG?</li>
+<li>What is low-S normalisation, and what attack does it stop?</li>
+<li>Why are Ed25519 signatures deterministic, and what privacy problem does that cause?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Digital Signature</strong> → <strong>Signing</strong> → <strong>Entropy &amp; Randomness</strong> → <strong>Nonce</strong> →<br />
+<strong>Signature Malleability</strong> → <strong>Certificate</strong>.<br />
+<code>cry-07</code> is the certificate that binds all of this to an identity.</p>

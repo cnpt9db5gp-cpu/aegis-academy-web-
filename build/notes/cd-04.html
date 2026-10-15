@@ -1,0 +1,332 @@
+<h1 id="network-forensics-challenges">Network Forensics Challenges</h1>
+<h2 id="summary">Summary</h2>
+<p>Network challenges have the highest ground truth and the shortest path to an answer. A capture is<br />
+small, fast to load, and every question is answerable from specific fields.</p>
+<p>The framing: <strong>a PCAP's questions are all "who, when, how much"</strong> —<br />
+and the only hard part is knowing which field holds each one.</p>
+<blockquote>
+<p>Companion to <code>for-07</code> (the methodology) and <code>vol-03</code> (the memory-side<br />
+network analysis). This note is the discipline against real captures.</p>
+</blockquote>
+<h2 id="the-protocol-inventory">The protocol inventory</h2>
+<pre><code class="language-text">  PROTOCOL          WHERE THE ANSWER IS              PORT
+  --------------------------------------------------------------------------
+  DNS               the queries, in order; the cache
+                    (a TXT query with a long payload)
+
+  HTTP              the requests and responses, with
+                    full URLs, headers and User-Agent
+
+  TLS               the SNI (the hostname), the
+                    certificate chain (subject, issuer, SAN,
+                    validity, and the SELF-SIGNED one),
+                    JA3 (the client fingerprint), ALPN
+
+  SMB               the tree connect (which share), the
+                    session setup (which account, NTLM hash,
+                    signing negotiated), and the file names
+
+  Kerberos          the AS-REQ (which user, which SPN),
+                    the TGS-REQ (which service), the
+                    encryption type, and the 4768-equivalent
+
+  SMB2 NEGOTIATE    the dialects offered - and whether
+                    signing is required is NEGOTIATED HERE
+
+  ICMP              unusual payloads (a covert channel), or
+                    a connectivity story
+
+  FTP / TFTP        an EXFILTRATION CHANNEL, in the clear,
+                    on a non-standard port
+
+  DNS TUNNELLING    long, base64-ish subdomains, high
+                    query volume, uniform lengths
+
+  JA3S              the server's fingerprint; a JA3S that is
+                    not a known stack is interesting
+
+  EVERYTHING ELSE   a finding. Which ports are talking, and
+                    why?
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cd-04 &amp;&amp; cd ~/aegis/labs/cd-04
+mkdir -p work/{export,carved}
+
+cat &gt; 01-inventory.md &lt;&lt;'MD'
+# The capture inventory
+
+```bash
+P=&quot;challenge.pcap&quot;
+
+# 0. THE CAPTURE ITSELF
+capinfos &quot;$P&quot;
+#   ^ number of packets, duration, average rate, and the ENCRYPTION
+#     flag. If it says encrypted, TLS is in play. If it says no
+#     packets, you have the wrong file.
+
+# 1. THE CONVERSATIONS  (always first)
+tshark -r &quot;$P&quot; -q -z conv,tcp
+tshark -r &quot;$P&quot; -q -z conv,udp
+#   ^ who, to whom, how much, how long. This is the shape of the
+#     whole capture and it answers &quot;what is going on here&quot; before
+#     any detail.
+
+# 2. THE PROTOCOL HIERARCHY  (what's in it at all)
+tshark -r &quot;$P&quot; -q -z io,phs
+#   ^ bytes per protocol. A protocol you do not expect, or a
+#     protocol carrying an unusual number of bytes, is the story.
+
+# 3. THE PROTOCOL HIERARCHY TREE (which ports)
+tshark -r &quot;$P&quot; -q -z io,phs -z endpoints,tcp
+tshark -r &quot;$P&quot; -q -z endpoints,ip
+
+# 4. THE EXPERT INFO  (tshark's own analysis)
+tshark -r &quot;$P&quot; -q -z expert
+#   ^ malformed packets, retransmissions, checksum errors,
+#     and protocol anomalies. A capture with a lot of expert info
+#     usually means something unusual is happening.
+
+# 5. THE HIERARCHY AS A TREE, for finding the odd port
+tshark -r &quot;$P&quot; -q -z tree,tcp
+```
+MD
+cat 01-inventory.md
+
+cat &gt; 02-protocols.md &lt;&lt;'MD'
+# Per-protocol questions and the filters that answer them
+
+````bash
+P=&quot;challenge.pcap&quot;
+
+# === DNS ===
+# every query, in chronological order
+tshark -r &quot;$P&quot; -Y &quot;dns.flags.response==0&quot; -T fields \
+  -e frame.time -e ip.src -e dns.qry.name -e dns.qry.type \
+  | sort
+# the questions are: the first unfamiliar domain, the domain before
+# it, the query volume per domain, any TXT, any very long name
+
+# DNS TXT (exfiltration over DNS)
+tshark -r &quot;$P&quot; -Y &quot;dns.qry.type==16&quot; -T fields \
+  -e frame.time -e dns.qry.name
+# a TXT query with base64 in the name is data leaving over DNS
+
+# a long subdomain
+tshark -r &quot;$P&quot; -Y &quot;dns.qry.name&quot; -T fields -e dns.qry.name \
+  | awk '{print length($0), $0}' | sort -rn | head
+
+# === HTTP ===
+tshark -r &quot;$P&quot; -Y &quot;http.request&quot; -T fields \
+  -e frame.time -e ip.src -e ip.dst -e http.host -e http.request.method \
+  -e http.request.uri -e http.user_agent | sort
+# the download, its URL, its time, and the User-Agent
+
+# what came back
+tshark -r &quot;$P&quot; -Y &quot;http.response.code&quot; -T fields \
+  -e frame.time -e ip.src -e http.response.code -e http.content_type \
+  -e http.content_length | sort
+# 200 with application/x-dosexec from a new host is the delivery
+
+# upload vs download (exfiltration)
+tshark -r &quot;$P&quot; -Y &quot;http.request.method==POST&quot; -T fields \
+  -e frame.time -e ip.dst -e http.content_length | sort
+
+# === TLS ===
+# the SNI: the hostname, even though the payload is encrypted
+tshark -r &quot;$P&quot; -Y &quot;tls.handshake.extensions_server_name&quot; -T fields \
+  -e frame.time -e ip.dst -e tls.handshake.extensions_server_name | sort | uniq -c
+
+# the certificate (a self-signed one is a finding)
+tshark -r &quot;$P&quot; -Y &quot;tls.handshake.certificate&quot; -T fields \
+  -e x509sat.printableString -e x509ce.dNSName 2&gt;/dev/null | head
+tshark -r &quot;$P&quot; -Y &quot;tls.handshake.type==11&quot; -V | grep -A2 &quot;Issuer&quot;
+
+# JA3: the client fingerprint. One destination, one JA3 = notable.
+tshark -r &quot;$P&quot; -Y &quot;tls.handshake.type==1&quot; -T fields \
+  -e ip.dst -e tls.handshake.ja3_full | sort | uniq -c | sort -rn
+
+# === SMB ===
+# the tree connect: which share
+tshark -r &quot;$P&quot; -Y &quot;smb2.cmd==3&quot; -T fields \
+  -e frame.time -e ip.src -e ip.dst -e smb2.share_name 2&gt;/dev/null
+
+# the session setup: which account, which hash, signing?
+tshark -r &quot;$P&quot; -Y &quot;smb2.cmd==1&quot; -T fields \
+  -e frame.time -e ip.src -e smb2.session_setup_echo 2&gt;/dev/null
+tshark -r &quot;$P&quot; -Y &quot;smb2&quot; -V | grep -iE &quot;signing|NTLMSSP|negotiate&quot; | head
+
+# SMB signing is NEGOTIATED in SMB2 NEGOTIATE. That is where you check.
+tshark -r &quot;$P&quot; -Y &quot;smb2.cmd==0&quot; -V | grep -iE &quot;signing|dialect&quot;
+
+# the file operations: what was copied where
+tshark -r &quot;$P&quot; -Y &quot;smb2.cmd==8&quot; -T fields \
+  -e frame.time -e ip.src -e ip.dst -e smb2.filename 2&gt;/dev/null
+
+# === KERBEROS ===
+# the AS-REQ: who is authenticating, to which service
+tshark -r &quot;$P&quot; -Y &quot;kerberos.msgType==10&quot; -T fields \
+  -e frame.time -e ip.src -e kerberos.CNameString -e kerberos.SNameString
+
+# the TGS-REQ: a service ticket. High volume = enumeration (roasting)
+tshark -r &quot;$P&quot; -Y &quot;kerberos.msgType==12&quot; -T fields \
+  -e frame.time -e kerberos.SNameString | sort | uniq -c | sort -rn
+# ^ ONE host requesting tickets for MANY service names, in a burst,
+#   is Kerberoasting happening live. The SNameString column is the
+#     list of SPNs it went for.
+
+# the encryption type (RC4 = 23, AES = 17/18). RC4 in a modern
+# domain is a finding about the domain's configuration.
+tshark -r &quot;$P&quot; -Y &quot;kerberos&quot; -T fields -e kerberos.encProvider 2&gt;/dev/null \
+  | sort | uniq -c
+
+# === THE ONES THAT ARE ALWAYS A FINDING ===
+# a non-standard port carrying anything
+tshark -r &quot;$P&quot; -T fields -e tcp.dstport -e tcp.len | sort -n | uniq -c | sort -rn
+# DNS over a non-53 port, HTTP over 443 (without TLS), FTP on 21
+# with a large transfer - all findings
+EOF
+
+# --- the canonical AD-over-the-wire finding ---
+cat &gt; 03-kerberos-in-capture.md &lt;&lt;'MD'
+# Finding an attack in a capture, not just a conversation
+
+```text
+  THE QUESTION: &quot;did the attacker enumerate the domain from this host?&quot;
+
+  THE ANSWER IS NOT A SINGLE PACKET. It is a SHAPE.
+
+  Shape 1: A BURST OF TGS-REQUESTS FROM ONE SOURCE
+    tshark -r c.pcap -Y &quot;kerberos.msgType==12&quot; -T fields \
+      -e frame.time -e ip.src -e kerberos.SNameString | sort
+    Look at: one IP, many SNames, within a few seconds.
+    A normal user requests 2-5 service tickets. An attacker requests
+    one per SPN in the domain. That is the difference between 5 and
+    400, and it is visible in the timestamps.
+
+  Shape 2: RC4 ENCRYPTION TYPE, IN A DOMAIN THAT USES AES
+    tshark -r c.pcap -Y &quot;kerberos&quot; -T fields -e kerberos.encProvider \
+      | sort | uniq -c
+    If the domain has msDS-SupportedEncryptionTypes = 0x18, the DC
+    will not issue RC4 tickets except to accounts that still support
+    RC4. So an RC4 ticket in the capture means the roasting is
+    targeting a specific RC4-enabled account. The timestamp of that
+    ticket, against the DC's own activity, is the finding.
+
+  Shape 3: THE HOST IS A WORKSTATION, NOT A SERVER
+    Combine with the conversation list: the source of the ticket
+    burst also has an outbound HTTP POST. That is exfiltration of
+    the tickets. Two findings from one capture.
+
+  THE WRITE-UP, in the shape the grader wants:
+    &quot;At 2026-06-11 15:22:03 UTC, host 10.10.10.50 issued 412
+     Kerberos TGS-REQ messages to the domain controller, requesting
+     tickets for 412 distinct service principal names over 87 seconds.
+     Every other host in the capture issued fewer than six. The
+     encryption type on 388 of those requests was 0x17 (RC4),
+     indicating the target accounts still support RC4. This is
+     consistent with SPN enumeration and service ticket harvesting.
+     Source: challenge.pcap, frames 88410-89222.&quot;
+```
+
+```bash
+# the count, which is the number that makes the finding
+tshark -r challenge.pcap -Y &quot;kerberos.msgType==12&quot; \
+  -T fields -e ip.src 2&gt;/dev/null | sort | uniq -c | sort -rn | head
+echo &quot;  ^ one source with three orders of magnitude more TGS-REQs&quot;
+echo &quot;    than any other is the finding, and the count is the proof.&quot;
+```
+
+```text
+  AND THE NETWORK-SIDE OF AN AD ENGAGEMENT, which is what makes
+  captures valuable even when disk and memory answer nothing:
+
+    DC01 --(AS-REQ, alice)--&gt; KDC          normal login
+    WORK1 --(TGS-REQ, SPN=cifs/dc01)       one service: normal
+    WORK1 --(TGS-REQ, SPN=http/sql01)       two services: normal
+    WORK1 --(TGS-REQ, SPN=cifs/dc01)       ...
+    WORK1 --(TGS-REQ, SPN=mysql/x)         400 of these: roasting
+    WORK1 --(HTTP POST, 2.4 MB)--&gt; x.x.x.x  exfiltration
+
+    The capture shows the whole chain, in order, from a device that
+    was not compromised and cannot lie about it.
+```
+MD
+cat 03-kerberos-in-capture.md
+
+# --- offline: the shape concept ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-shape.txt
+print(&quot;  === a conversation versus a shape ===\n&quot;)
+print(&quot;  THE WEAKEST QUESTION AND WHY IT IS WEAK:\n&quot;)
+print(&quot;    'Which IP talked to which IP?'&quot;)
+print(&quot;    A conversation list answers it in one command. Every&quot;)
+print(&quot;    challenge can be answered from a conversation list alone,&quot;)
+print(&quot;    and a challenge answered that way means you have not&quot;)
+print(&quot;    actually read the capture.\n&quot;)
+print(&quot;  THE QUESTIONS THAT REQUIRE THE SHAPE:\n&quot;)
+print(&quot;    'How many DISTINCT service names did one host request in&quot;)
+print(&quot;     a burst?'          -&gt; a distribution, not a conversation&quot;)
+print()
+print(&quot;    'What is the interval between beacons to one destination?'&quot;)
+print(&quot;                           -&gt; periodicity, not a conversation&quot;)
+print()
+print(&quot;    'Did the byte count in one direction exceed the other?'&quot;)
+print(&quot;                           -&gt; asymmetry, not a conversation&quot;)
+print()
+print(&quot;    'Which JA3 appears for exactly one destination?'&quot;)
+print(&quot;                           -&gt; uniqueness, not a conversation&quot;)
+print()
+print(&quot;  THE FOUR SHAPES, and every network challenge's answer is one:\n&quot;)
+print(f&quot;  {'SHAPE':&lt;28} {'HOW TO SEE IT':&lt;38} {'WHAT IT MEANS'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*90)
+print(f&quot;  {'BURST / FAN-OUT':&lt;28} {'uniq -c on one field':&lt;38} enumeration&quot;)
+print(f&quot;  {'PERIODICITY':&lt;28} {'sort by time, diff the times':&lt;38} C2 beaconing&quot;)
+print(f&quot;  {'ASYMMETRY':&lt;28} {'bytes out vs bytes in':&lt;38} exfiltration&quot;)
+print(f&quot;  {'UNIQUENESS':&lt;28} {'a fingerprint seen once':&lt;38} a new client/tool&quot;)
+print()
+print(&quot;  EACH IS ONE LINE OF awk. EACH IS WORTH MORE POINTS THAN THE&quot;)
+print(&quot;  ENTIRE CONVERSATION LIST, because the conversation list is&quot;)
+print(&quot;  what the capture SHOWS and the shape is what it MEANS.&quot;)
+print()
+print(&quot;  EXAMPLE, the periodicity, done properly:&quot;)
+print()
+base = 0
+period = 60
+print(f&quot;    {'time':&lt;16} {'delta':&lt;10} destination&quot;)
+print(&quot;    &quot; + &quot;-&quot;*46)
+prev = None
+for i in range(12):
+    t = base + i * period
+    d = &quot;-&quot; if prev is None else f&quot;{t-prev}s&quot;
+    prev = t
+    print(f&quot;    {t:&lt;16} {d:&lt;10} 198.51.100.44&quot;)
+print()
+print(f&quot;    delta is exactly {period}s, twelve times, to the same address.&quot;)
+print(f&quot;    That is not a user. That is a beacon. And a beacon with a&quot;)
+print(f&quot;    constant interval is either a default configuration or a&quot;)
+print(f&quot;    test - either way it is not human behaviour.&quot;)
+PY
+cat 04-shape.txt
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: a conversation versus a shape. The conversation list answers<br />
+"which IP talked to which IP" in one command — and <strong>a challenge answered that way means you<br />
+haven't read the capture</strong>. The four shapes are burst/fan-out, periodicity, asymmetry, and<br />
+uniqueness, each with the one-line <code>awk</code> that finds it and what it means.</p>
+<p><strong><code>03-kerberos-in-capture.md</code></strong> shows the shape applied to the canonical AD finding: 412 TGS-REQ<br />
+messages from one host for 412 distinct SPNs in 87 seconds, when a normal user issues 2–5. The<br />
+count is the proof, and the RC4 encryption type on 388 of them tells you <em>which accounts</em> the<br />
+roasting targeted.</p>
+<p><strong>Record:</strong> <code>03-kerberos-in-capture.md</code> and <code>04-shape.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does <code>capinfos</code> tell you, and what does an "encrypted" flag change about your approach?</li>
+<li>Why is the conversation list the weakest possible starting point?</li>
+<li>Name the four shapes and what each indicates.</li>
+<li>Give the tshark filter for TGS-REQ messages and what the SNameString column answers.</li>
+<li>What does a burst of TGS-REQs from one host tell you, and how does the count prove it?</li>
+<li>Why is RC4 encryption type in a modern domain a finding about the <em>domain's</em> configuration?</li>
+<li>How do you spot certificate-based exfiltration in a TLS capture?</li>
+<li>What is JA3, and why is a JA3 seen for exactly one destination notable?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Network Forensics</strong> → <strong>PCAP Analysis</strong> → <strong>Kerberos</strong> → <strong>Beaconing</strong> →<br />
+<strong>Data Exfiltration</strong>.<br />
+<code>cd-03</code> is the same questions against a memory dump.</p>

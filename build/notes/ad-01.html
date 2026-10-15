@@ -1,0 +1,680 @@
+<h1 id="active-directory-fundamentals-forests-domains-and-trusts">Active Directory Fundamentals, Forests, Domains and Trusts</h1>
+<h2 id="summary">Summary</h2>
+<p>Active Directory is the object store and trust substrate for almost every Windows network on<br />
+earth. Understanding it is not optional for internal work, because <strong>everything an attacker does<br />
+in AD is a graph traversal</strong> — and the graph is defined by objects, groups, sessions and ACLs.</p>
+<p>The lecture's framing: AD is not a user database. It is a namespace, a trust boundary<br />
+system, and a <em>delegation</em> mechanism. Every misconception about it comes from treating it as a<br />
+flat user list.</p>
+<blockquote>
+<p>Companion to <code>mit858-05</code> (operating systems) and <code>tcm-06</code>'s trust-path<br />
+section. This note is the substrate; <code>ad-02</code> is the protocol on top.</p>
+</blockquote>
+<h2 id="the-objects">The objects</h2>
+<pre><code class="language-text">  USER              a security principal: a login identity
+  GROUP             a collection of principals, used for authorisation
+  COMPUTER          a machine account; a USER with a $ in the name
+  ORGANIZATIONAL UNIT (OU)  a container for delegation of administration
+  DOMAIN            the security boundary; a database (NTDS.dit) + a set of servers
+  FOREST            the top of the hierarchy; a security boundary of last resort
+  GLOBAL CATALOG    a read-only, forest-wide index, replicated to every DC
+  SYSVOL            the NETLOGON share; scripts and GPOs, world-readable
+  GPO               a set of registry settings and scripts, applied by link order
+  ACL / ACE          who can do what to an object. The graph's edges.
+</code></pre>
+<h2 id="the-hierarchy">The hierarchy</h2>
+<pre><code class="language-text">  FOREST  (aegis.local)
+    └── DOMAIN  (aegis.local)
+          ├── DC01  (domain controller, holds NTDS.dit)
+          ├── DC02
+          ├── OU=Workstations
+          ├── OU=Servers
+          ├── OU=Users
+          │      ├── alice
+          │      ├── bob
+          │      └── erin
+          └── CN=Users (the default container)
+
+  EVERY OBJECT HAS:
+    a SID          SecurityIdentifier: domain-5-21-...-1104
+    a DN           DistinguishedName: CN=alice,OU=Users,DC=aegis,DC=local
+    an objectGUID  a GUID that NEVER CHANGES, unlike the SID
+    a name        which CAN change, and often does
+</code></pre>
+<p><strong>SIDs are what authorisation is written against, not names.</strong> When a<br />
+group is renamed, the SID does not change and every ACL keeps working.<br />
+That is why AD ACLs are so hard to reason about by hand: you cannot see<br />
+what a SID means without resolving it.</p>
+<h2 id="groups-the-three-types-and-why-the-distinction-matters">Groups: the three types, and why the distinction matters</h2>
+<pre><code class="language-text">  DOMAIN LOCAL     scope: THIS domain. Can contain foreign domain
+                   principals. Used for file shares and local resources.
+  GLOBAL           scope: THIS forest. The membership travels with the
+                   account. Used for role-based access.
+  UNIVERSAL        scope: ANY domain, any domain local group.
+                   Membership is stored in the Global Catalog, which
+                   makes them slow. Used for cross-domain needs.
+
+  NESTING GROUPS are where the real complexity lives:
+    Domain Admins &gt; IT Staff &gt; alice
+    alice is a Domain Admin by TRANSITIVITY, three hops away, and
+    &quot;who is in Domain Admins&quot; does not answer it.
+</code></pre>
+<h2 id="authentication-ntlm-vs-kerberos">Authentication: NTLM vs Kerberos</h2>
+<pre><code class="language-text">  NTLM   a challenge-response protocol. The client proves knowledge of
+         the password hash, in three messages.
+         + works everywhere, even without a DC
+         + no clock dependency
+         - sends a challenge that can be relayed
+         - NTLMv1 is trivially broken; NTLMv2 is required
+         - the hash is the credential (pass-the-hash)
+
+  KERBEROS
+         + tickets, mutual authentication, delegation, no password on the wire
+         + replay-resistant, clock-bounded
+         - requires a DC and clock synchronisation
+         - introduces the whole ticket model (ad-02)
+         - TGTs and service tickets are GOLD if stolen
+</code></pre>
+<p>The migration story in every environment is: <strong>NTLM is being retired,<br />
+and the tickets that replace it are more valuable to steal.</strong> That trade<br />
+is the entire reason AD attacks escalated in the 2010s.</p>
+<h2 id="password-hashes-and-why-there-are-two">Password hashes, and why there are two</h2>
+<pre><code class="language-text">  NT HASH   MD4(password). 21 bytes.
+            Fast. STORED EVERYWHERE: NTDS.dit, SAM, the registry,
+            DCSync output, any memory dump.
+            Not salted - which is why a rainbow table works and why
+            pass-the-hash works.
+
+  LM HASH   DES-based, first 8 characters, uppercase. Dead since
+            Windows 2000 but still present as the LMHASH field
+            (empty if LMCompatibilityLevel &gt;= 5). Finding a non-empty
+            LMHASH on a modern domain is a finding.
+
+  KERBEROS   If the account is configured with AES support, the
+  TICKET     ticket is encrypted with a key derived from the PASSWORD
+             and the REALM. Roast the ticket and you get the
+             password offline - that is Kerberoasting (ad-04).
+</code></pre>
+<p><code>NTDS.dit</code> holds all of it, and it is the single most valuable file in<br />
+a Windows domain. DCSync (ad-05) is the authenticated way to read it.</p>
+<h2 id="acls-and-how-authorisation-actually-works">ACLs and how authorisation actually works</h2>
+<pre><code class="language-text">  EVERY OBJECT HAS AN ACL: an ordered list of Access Control Entries.
+  Each ACE is:  (identity SID, permission bits, type, inherited?)
+
+  PERMISSION TYPES:
+    Generic All / Read / Write / Execute
+    Object-specific: WriteProperty, WriteDACL, WriteOwner,
+                     GenericWrite, GenericAll, ValidatedWrite
+    Extended rights: UserForceChangePassword, UserChangePassword,
+                     Self, AllValidatedWriteProperties
+
+  THE ACE TYPES:
+    ALLOW      grants
+    DENY       overrides (evaluated first in a DACL)
+
+  WHO IS EVALUATED, IN ORDER:
+    the object's owner (implicit READ_CONTROL and WRITE_DAC)
+    the object's DACL, top to bottom, deny before allow
+    the inherited ACEs from the parent
+    the user's token: their SID + every group SID they are in,
+                     transitively
+
+  THE ATTACK-SURFACE ACEs, the ones that matter:
+    GenericWrite        -&gt; can set almost anything, including a script
+    WriteDACL           -&gt; can grant themselves anything. GAME OVER.
+    WriteOwner          -&gt; can take ownership, then do the above
+    GenericAll          -&gt; done
+    ValidatedWrite      -&gt; conditional write, abused to force group membership
+    UserForceChangePassword -&gt; take over any account you can see
+    WriteSPN            -&gt; request a service ticket (Kerberoasting)
+    ReadGMSAPassword    -&gt; read the group's managed service account password
+    DCSync (on the domain)
+    Self on a group     -&gt; add yourself to it
+</code></pre>
+<h2 id="trusts">Trusts</h2>
+<pre><code class="language-text">  DIRECTIONAL       A trusts B: A's users can access B, not vice versa
+  BIDIRECTIONAL     both
+  FOREST           every domain in a forest trusts every other one
+                    transitively, without a configured trust object
+  TRANSITIVE (in)  auth flows onward into the forest
+  TRANSITIVE (out) auth flows into your trusted domains
+  EXTERNAL         a Windows domain trusting a non-Windows realm (MIT,
+                    cross-forest to ADFS/Azure AD)
+
+  THE DANGEROUS PATTERN:
+    Forest trusts every domain in it. So one weak domain anywhere in
+    the forest is an entry point to all of them. A forest is a trust
+    boundary only if every domain in it is strong.
+
+  EXTERNAL TRUSTS are the ones to audit:
+    does the trusted domain have weak authentication?
+    is the trust one-way?
+    does SID filtering apply?
+</code></pre>
+<h2 id="replication-and-why-it-matters">Replication, and why it matters</h2>
+<pre><code class="language-text">  Multi-Master Replication (since Windows Server 2003)
+    any DC can write; changes replicate out on a schedule
+    therefore: a DC can serve a replication request to a peer
+
+  DCSync: ask a DC for the directory data it replicates, as a peer.
+  Requires: Replicating Directory Changes (All) + Replicating Directory
+  Changes In Filtered Set, or DS-Replication-Get-Changes (all).
+  Without those three rights you should not be able to do it.
+  WITH them, you can dump every hash in the domain.
+
+  THAT IS THE ENTIRE POINT OF DCSync: it is a legitimate replication
+  operation that bypasses every other control, gated behind three
+  specific rights that are usually granted too broadly.
+</code></pre>
+<h2 id="building-a-lab">Building a lab</h2>
+<pre><code class="language-text">  YOU NEED A REAL DOMAIN CONTROLLER. Options, best first:
+
+  1. WINDOWS SERVER EVALUATION VM (recommended)
+     Two NICs: host-only (192.168.56.0/24) and an internal lab range.
+     Promote to DC with Install-ADDSForest. Full fidelity: Group Policy,
+     Kerberos, delegation, Sysinternals, the works.
+     Snapshots are essential; AD changes are not always reversible.
+
+  2. SAMBA AD DC ON A DEBIAN VM
+     lighter, faster to rebuild, good for the PROTOCOL mechanics
+     (Kerberos, LDAP, SMB, BloodHound collection). Limited: no Group
+     Policy modelling worth trusting, no RSAT.
+
+  3. A CLOUD EVAL (Azure AD Free / a Windows VM on a free tier)
+     realistic but changes the threat model and the network position.
+     Not useful for learning pivoting.
+
+  HARDWARE: your host has 30 GiB RAM and an i5-13500H. A DC VM wants
+  2 vCPU / 4 GiB; a workstation 2/4. Two VMs fit comfortably. Assign
+  the host-only range to the DC and a second internal range between
+  them so you can practise pivoting (ad-06).
+
+  SNAPSHOT BEFORE EVERY LECTURE. ad-07's GPO abuse will lock you out
+  of your own DC if you are not careful, and that is a real skill to
+  learn rather than a mistake to make twice.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Domain</strong></td>
+<td>Security boundary: a database plus a set of servers</td>
+</tr>
+<tr>
+<td><strong>Forest</strong></td>
+<td>One or more domains with a shared schema and transitive trust</td>
+</tr>
+<tr>
+<td><strong>DC</strong></td>
+<td>Domain controller; holds a writable copy of NTDS.dit</td>
+</tr>
+<tr>
+<td><strong>NTDS.dit</strong></td>
+<td>The directory database. The most valuable file in the domain</td>
+</tr>
+<tr>
+<td><strong>SID</strong></td>
+<td>Security identifier; the immutable identity authorisation uses</td>
+</tr>
+<tr>
+<td><strong>DN</strong></td>
+<td>Distinguished name; the LDAP path. Changes when things are renamed</td>
+</tr>
+<tr>
+<td><strong>objectGUID</strong></td>
+<td>A GUID that never changes</td>
+</tr>
+<tr>
+<td><strong>OU</strong></td>
+<td>Container for administrative delegation</td>
+</tr>
+<tr>
+<td><strong>GPO</strong></td>
+<td>Group Policy Object; registry settings and scripts</td>
+</tr>
+<tr>
+<td><strong>ACL / ACE</strong></td>
+<td>Ordered permission list on an object</td>
+</tr>
+<tr>
+<td><strong>WriteDACL</strong></td>
+<td>Can rewrite the ACL. Equivalent to full control</td>
+</tr>
+<tr>
+<td><strong>Transitive trust</strong></td>
+<td>Authentication flows onward automatically</td>
+</tr>
+<tr>
+<td><strong>Global Catalog</strong></td>
+<td>Forest-wide read-only index; holds universal group membership</td>
+</tr>
+<tr>
+<td><strong>Replication</strong></td>
+<td>Multi-master; any DC can answer a replication request</td>
+</tr>
+<tr>
+<td><strong>DCSync</strong></td>
+<td>Using replication rights to dump the whole directory</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ad-01 &amp;&amp; cd ~/aegis/labs/ad-01
+source ~/aegis/bin/scope-guard.sh
+
+# --- 0. the scope guard, because everything in Tier 5 is networked ---
+cat &gt; 00-scope.md &lt;&lt;'EOF'
+# Scope for Tier 5 labs
+
+## Authorisation
+I own the VirtualBox host-only lab domain. Everything in these notes
+targets infrastructure I control, for study purposes.
+
+## In scope
+| Target | Purpose |
+|---|---|
+| 192.168.56.0/24 | VirtualBox host-only range; my lab AD forest |
+| 10.10.10.0/24 | second internal range; only reachable via a pivot (ad-06) |
+| 127.0.0.1 | local analysis tools |
+
+## Out of scope
+- ALL public IPs. No exceptions. There is no authorised public target.
+- Any real organisation's domain, ever. These notes do not name one.
+- Any domain I do not own, including free/trial/eval instances shared
+  with other testers.
+
+## Rule for every command in this tier
+Every command below takes the DC as an explicit argument. None of them
+has a default target. If you have to type a hostname, you have to look
+at what you are typing. That is the guard.
+EOF
+
+# --- 1. is there a lab? report honestly rather than pretending ---
+{
+  echo &quot;=== lab status ===&quot;
+  if ip -br a | grep -q 192.168.56; then
+    echo &quot;  host-only range present:&quot;
+    ip -br a | grep 192.168.56 | sed 's/^/    /'
+  else
+    echo &quot;  NO host-only range yet.&quot;
+    echo &quot;  Create one: VirtualBox &gt; Host Network Manager &gt; Create&quot;
+    echo &quot;  set it to 192.168.56.1/24, then bring the DC VM onto it.&quot;
+  fi
+  echo
+  echo &quot;=== AD tooling available on this box ===&quot;
+  for t in ldapsearch kinit klist smbclient rpcclient crackmapexec \
+           impacket-psexec impacket-secretsdump bloodhound-python \
+           evil-winrm netexec responder.py crackmapexec; do
+    if command -v &quot;$t&quot; &gt;/dev/null 2&gt;&amp;1; then
+      printf &quot;  %-26s %s\n&quot; &quot;$t&quot; &quot;$(command -v $t)&quot;
+    else
+      printf &quot;  %-26s %s\n&quot; &quot;$t&quot; &quot;not installed&quot;
+    fi
+  done
+  echo
+  echo &quot;  install: sudo apt install samba-common-bin smbclient krb5-user&quot;
+  echo &quot;           pipx install impacket-toolkit  (or: pip install impacket)&quot;
+  echo &quot;           pipx install bloodhound-python&quot;
+  echo &quot;           pipx install crackmapexec    (netexec is the successor)&quot;
+  echo
+  echo &quot;=== DNS configuration check (is anything AD-aware set up?) ===&quot;
+  cat /etc/resolv.conf | grep -v &quot;^#&quot; | grep . | sed 's/^/  /'
+  echo
+  echo &quot;  ^ if this points at your DC, your workstation can join the lab.&quot;
+  echo &quot;    If it points at a public resolver, you cannot - deliberately.&quot;
+  echo &quot;    Do not point it at a domain you do not own.&quot;
+} 2&gt;&amp;1 | tee 01-lab-status.txt
+
+# --- 2. the structure, from first principles, offline ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-structure.txt
+print(&quot;  === a forest, drawn ===\n&quot;)
+print(&quot;  FOREST  aegis.local&quot;)
+print(&quot;   └── DOMAIN  aegis.local        (DC01, DC02)&quot;)
+print(&quot;        ├── OU=Users&quot;)
+print(&quot;        │     ├── alice   S-1-5-21-...-1104&quot;)
+print(&quot;        │     ├── bob     S-1-5-21-...-1105&quot;)
+print(&quot;        │     └── erin    S-1-5-21-...-1168   &lt;- Domain Admins&quot;)
+print(&quot;        ├── OU=ServiceAccounts&quot;)
+print(&quot;        │     └── svc-backup  S-1-5-21-...-1180&quot;)
+print(&quot;        └── CN=Computers&quot;)
+print(&quot;              ├── DC01$      S-1-5-21-...-500&quot;)
+print(&quot;              └── WKS01$      S-1-5-21-...-1200&quot;)
+print()
+print(&quot;  === why nesting matters ===&quot;)
+print(&quot;    Domain Admins (S-...-512)&quot;)
+print(&quot;      └── IT Staff (S-...-1201)&quot;)
+print(&quot;             └── erin         &lt;- Domain Admin by TRANSITIVITY&quot;)
+print()
+print(&quot;  'who is in Domain Admins?' does not answer that.&quot;)
+print(&quot;  'who can reach Domain Admins?' does. That is a graph query.&quot;)
+print(&quot;  Graph queries are what BloodHound is (bh-02).&quot;)
+print()
+print(&quot;  === the SID anatomy ===&quot;)
+sid = &quot;S-1-5-21-1566598888-3183897724-1061586828-1104&quot;
+parts = sid.split(&quot;-&quot;)
+print(f&quot;    {sid}&quot;)
+print(f&quot;    S            authority (5 = NT Authority)&quot;)
+print(f&quot;    21           subauthority (21 = domain SID)&quot;)
+print(f&quot;    1566598888   domain, 3183897724   domain, 1061586828   domain&quot;)
+print(f&quot;    1104         the RID: the identifier within this domain&quot;)
+print()
+print(&quot;    Well-known RIDs you will see constantly:&quot;)
+for rid, what in [(500,&quot;builtin Administrator&quot;), (501,&quot;Guest&quot;), (512,&quot;Domain Admins&quot;),
+                  (513,&quot;Domain Users&quot;), (514,&quot;Domain Guests&quot;), (516,&quot;Domain Computers&quot;),
+                  (518,&quot;IIS_IUSRS&quot;), (519,&quot;Cert Publishers&quot;), (546,&quot;Delegates&quot;)]:
+    print(f&quot;      ...-{rid:&lt;6} {what}&quot;)
+print()
+print(&quot;  NOTE: the domain portion is derived from the SID of the first&quot;)
+print(&quot;  account created. Any tool that knows a domain SID can compute&quot;)
+print(&quot;  the RID of any account from its RID. No enumeration required.&quot;)
+PY
+cat 02-structure.txt
+
+# --- 3. reading the three hashes, offline ---
+cat &gt; 03-hashes.md &lt;&lt;'EOF'
+# NT hash, LM hash, Kerberos ticket — what each one is
+
+## NT HASH
+</code></pre>
+<p>MD4(UNICODE(password))      -&gt; 21 bytes, always starts with a4b1c7<br />
+  "password" -&gt; 8846f7eaee8fb117ad06bdd830b7586c<br />
+                ^ first 4 bytes are always a4b1c7 (MD4 magic)<br />
+  Not salted. Ever. So:<br />
+    - one rainbow table cracks every account in every domain ever<br />
+    - the hash IS the credential: present it instead of the password<br />
+    - it is in NTDS.dit, SAM, the registry, and every memory dump<br />
+  Python, to prove it:<br />
+    hashlib.new("md4", "password".encode("utf-16-le")).hexdigest()<br />
+  (OpenSSL 3 removed MD4 from the default provider. On Kali:<br />
+     openssl dgst -provider legacy -md4 -binary ... or use impacket)</p>
+<pre><code>
+## LM HASH
+</code></pre>
+<p>DES(password[:8].upper()) padded to 16 bytes, twice if needed<br />
+  The first 8 characters, uppercased. Annihilating.<br />
+  Still present as the LMHASH field unless LMCompatibilityLevel &gt;= 5.<br />
+  Finding a non-empty LMHASH on a modern domain is a FINDING,<br />
+  because it means every password in that domain is at most 8<br />
+  uppercase alphanumeric characters, regardless of policy.</p>
+<pre><code>
+## KERBEROS TICKET
+</code></pre>
+<p>Ticket is encrypted with a key derived from the PASSWORD and the REALM.<br />
+  Domain Admins are in the same realm, so a DC decrypts any user's<br />
+  ticket using that user's password-derived key.<br />
+  Therefore: give me any user's TGS and I can decrypt it IF I know or<br />
+  guess their password.<br />
+  Roasting = take many tickets, guess passwords offline.<br />
+  The ticket itself tells you the account's AES key-usage number,<br />
+  which tells you whether it is roastable at all.</p>
+<pre><code>
+## What to check on a lab DC
+</code></pre>
+<p>LMCompatibilityLevel &gt;= 5     (in Default Domain Controllers policy)<br />
+  Netlogon\DisableLMCompatibility<br />
+  Use AES instead of DES for Kerberos (msDS-SupportedEncryptionTypes)<br />
+  msDS-AllowedToDelegateTo       (unconstrained delegation -&gt; ad-02)<br />
+  All service accounts: are any of them Domain Admins?</p>
+<pre><code>EOF
+cat 03-hashes.md
+
+# --- 4. read-only reconnaissance of the public surface ---
+{
+  echo &quot;=== what is NOT authenticated and still enumerable ===&quot;
+  echo
+  echo &quot;  Some information is retrievable from ANY domain controller&quot;
+  echo &quot;  by ANY network peer, with no credentials at all. Establish&quot;
+  echo &quot;  this baseline before you do anything else, because it tells&quot;
+  echo &quot;  you whether anonymous LDAP is still open.&quot;
+  echo
+  echo &quot;  (commands below take an explicit DC argument and only run&quot;
+  echo &quot;   against 192.168.56.0/24 - the guard refuses anything else)&quot;
+  echo
+  DC=&quot;&quot;
+  echo &quot;  DC not set. Examples of the read-only baseline, for your DC:&quot;
+  echo
+  echo &quot;    # 1. the rootDSE: naming contexts, config, schema&quot;
+  echo &quot;    ldapsearch -x -H ldap://\$DC -b '' -s base namingContexts&quot;
+  echo
+  echo &quot;    # 2. the domain naming context&quot;
+  echo &quot;    ldapsearch -x -H ldap://\$DC -b '' -s base defaultNamingContext&quot;
+  echo
+  echo &quot;    # 3. the global catalog port is 3268 - search it unauthenticated&quot;
+  echo &quot;    ldapsearch -x -H ldap://\$DC:3268 -b DC=lab,DC=internal \\&quot;
+  echo &quot;      '(objectClass=domainDNS)' -s base&quot;
+  echo
+  echo &quot;    # 4. SMB dialects and signing requirements&quot;
+  echo &quot;    nmap -p 139,445 --script smb2-security-mode,smb-os-discovery \$DC&quot;
+  echo
+  echo &quot;    # 5. SMB signing. DISABLED is the finding that enables ad-05/imp-03&quot;
+  echo &quot;    nmap -p 445 --script smb2-security-mode \$DC&quot;
+  echo
+  echo &quot;    # 6. LDAP signing policy (for LDAP relay, same class as SMB relay)&quot;
+  echo &quot;    nmap -p 389 --script ldap-rootdse \$DC&quot;
+  echo
+  echo &quot;  Every one of those is anonymous and read-only. Nothing to authorise.&quot;
+  echo &quot;  If anonymous binds are denied, several of these fail - which is&quot;
+  echo &quot;  the correct posture and worth recording as a positive finding.&quot;
+} 2&gt;&amp;1 | tee 04-anonymous.txt
+
+# --- 5. the ACL enumeration that builds the graph ---
+cat &gt; 05-acl-enum.md &lt;&lt;'EOF'
+# Enumerating ACLs without touching the domain
+
+BloodHound collects this (bh-01). Here is the reasoning, so you know
+what the graph means when you read it.
+
+```text
+  For every security-relevant object, you want its DACL.
+  For every ACE, you want:
+      principal SID  -&gt;  who
+      right          -&gt;  what
+      type           -&gt;  ALLOW or DENY
+
+  The interesting principals, in order of how often they are the answer:
+
+    -1              Everyone
+    S-1-5-18         LOCAL SYSTEM
+    S-1-5-32-544     Administrators
+    S-1-5-21-...-512  Domain Admins
+    &lt;domain users&gt;   the built-in Users group
+
+  The interesting rights, and what each one means for an attacker:
+
+    GenericAll            -&gt; done. Full control of the object.
+    GenericWrite          -&gt; can set almost any attribute, INCLUDING
+                             a script path on a computer object.
+    WriteDACL             -&gt; can rewrite the ACL. Equivalent to GenericAll
+                             because you can just grant yourself GenericAll.
+    WriteOwner            -&gt; can take ownership, then the above.
+    ValidatedWrite        -&gt; write conditioned on a check. Famous because
+                             'User is a member of &lt;group&gt;' was validated
+                             against the WRONG attribute (see ad-04).
+    WriteSPN              -&gt; request a service ticket for that account.
+                             Kerberoasting (ad-04).
+    ReadGMSAPassword      -&gt; read a group's managed service account password.
+    UserForceChangePassword -&gt; reset any account you can read.
+    Self (on a group)     -&gt; add yourself to that group.
+    DCSync                -&gt; replicate the whole directory.
+    AllowedToDelegateTo   -&gt; impersonate that account to any service.
+
+  WHAT MAKES A PATH WORTH REPORTING:
+    - it starts from a principal a normal user can BE
+    - it ends at Domain Admins, or at DCSync
+    - it is short. One hop is a bug. Five hops is a design smell.
+    - it does not require an exploit
+</code></pre>
+<h2 id="the-local-enumeration-version">The local enumeration version</h2>
+<pre><code class="language-bash"># On a machine you are already on, with whatever rights you have:
+# who can this token impersonate?
+whoami /priv 2&gt;/dev/null | grep -i impersonate
+
+# what SPNs exist on THIS host?
+setspn -Q */* 2&gt;/dev/null
+
+# what is in the delegation configuration?
+nltest /dsgetdc:lab.internal 2&gt;/dev/null
+
+# the ACLs on the local machine's objects
+dsacls \\lab.internal 2&gt;/dev/null | head -40
+</code></pre>
+<p>EOF<br />
+cat 05-acl-enum.md</p>
+<h1 id="-6-the-defensive-baseline-to-check-first-">--- 6. the defensive baseline, to check first ---</h1>
+<p>cat &gt; 06-baseline.md &lt;&lt;'EOF'</p>
+<h1 id="the-ad-defensive-baseline">The AD defensive baseline</h1>
+<p>Check these BEFORE attacking your own lab. A lab with a hardened<br />
+baseline is a better teaching tool than an open one, because you can<br />
+demonstrate both the attack and the fix.</p>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Setting</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SMB signing</td>
+<td>REQUIRED on all hosts</td>
+<td>GPO: Computer Config &gt; Policies &gt; Windows Settings &gt; Security Settings &gt; Microsoft Windows Defender &gt; Credential Guard &gt; Digitally sign client-server communications</td>
+</tr>
+<tr>
+<td>LDAP signing</td>
+<td>REQUIRED</td>
+<td>GPO: Domain Controllers &gt; Policies &gt; Windows Settings &gt; Security Settings &gt; Microsoft Windows Defender &gt; Credential Guard &gt; Domain controller secure LDAP communications</td>
+</tr>
+<tr>
+<td>LDAP channel binding</td>
+<td>ENFORCED</td>
+<td>KB5012122; blocks the most common LDAP relay</td>
+</tr>
+<tr>
+<td>SMB encryption</td>
+<td>on sensitive shares</td>
+<td>optional; blocks relay entirely on those shares</td>
+</tr>
+<tr>
+<td>LMCompatibilityLevel</td>
+<td>5 or above</td>
+<td>GPO: Computer Config &gt; Policies &gt; Windows Settings &gt; Security Settings &gt; Local Policies &gt; Security Options &gt; Network security: LMCompatibilityLevel</td>
+</tr>
+<tr>
+<td>AES for Kerberos</td>
+<td>enabled</td>
+<td><code>msDS-SupportedEncryptionTypes</code> on the account</td>
+</tr>
+<tr>
+<td>AS-REP roasting</td>
+<td>not vulnerable</td>
+<td>ADUC &gt; Attribute Editor &gt; <code>msDS-UserDoesNotNeedPreAuth</code> = FALSE</td>
+</tr>
+<tr>
+<td>Unconstrained delegation</td>
+<td>none</td>
+<td>ADUC &gt; Attribute Editor &gt; <code>msDS-AllowedToDelegateTo</code> empty on all accounts</td>
+</tr>
+<tr>
+<td>Admin/protected accounts</td>
+<td><code>msDS-ProtectedFromAccidentalDeletion</code></td>
+<td>sAMAccountName ends in an admin flag, or <code>msDS-AdminGroupQuota</code></td>
+</tr>
+<tr>
+<td>Service account in Domain Admins</td>
+<td>none</td>
+<td>the single most common real finding</td>
+</tr>
+<tr>
+<td>Privileged groups</td>
+<td>tiered, monitored</td>
+<td>PAW (Privileged Access Workstations)</td>
+</tr>
+<tr>
+<td>LAPS</td>
+<td>deployed</td>
+<td>random local admin passwords</td>
+</tr>
+<tr>
+<td>Credential filters</td>
+<td>LSASS protection</td>
+<td>run as a non-admin user, not a domain admin</td>
+</tr>
+<tr>
+<td>SMB share enumeration</td>
+<td>blocked</td>
+<td>block guest access, restrict null sessions</td>
+</tr>
+<tr>
+<td>Anonymous LDAP bind</td>
+<td>denied</td>
+<td>good hygiene, kills recon</td>
+</tr>
+<tr>
+<td>Kerberos armouring</td>
+<td>enabled</td>
+<td>protects tickets in memory</td>
+</tr>
+<tr>
+<td>Constrained delegation</td>
+<td>instead of unconstrained</td>
+<td>bind to a service, not to any SPN</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-audit-questions">The audit questions</h2>
+<ol>
+<li>Is SMB signing required everywhere, or "required except for X"?<br />
+   "Except" is where the exception lives.</li>
+<li>How many accounts have <code>msDS-AllowedToDelegateTo</code> set?<br />
+   Even one is a finding; it enables TGT forwarding to any service.</li>
+<li>How many accounts have preauth disabled?</li>
+<li>How many service accounts are in a privileged group?</li>
+<li>Can an authenticated non-admin change a group membership?</li>
+<li>Is LAPS deployed? (Uniqueness of local admin passwords.)</li>
+<li>Is LSASS protected by a credential filter? (MFA - creds available)</li>
+<li>Are there any enabled accounts with a blank password?</li>
+</ol>
+<h2 id="the-uncomfortable-answers-in-real-environments">The uncomfortable answers, in real environments</h2>
+<ul>
+<li>SMB signing "required except for the filer" — a filer that does not<br />
+  support it is one relay target away from being a domain compromise</li>
+<li>One service account in Domain Admins — because the script that runs<br />
+  as a service needs rights, and nobody made a second account</li>
+<li>Preauth disabled on one legacy service account — nobody has retired<br />
+  the account</li>
+<li>No LAPS — three workstations share the same local admin password, and<br />
+  it has been in a password file since 2019</li>
+</ul>
+<p>Each of these is a five-minute fix that has survived for years.</p>
+<pre><code>EOF
+cat 06-baseline.md
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong>: the forest structure, the nesting example that shows why "who is<br />
+in Domain Admins" doesn't answer who <em>is</em> a domain admin, and the RID anatomy that lets anyone<br />
+compute any account's SID without enumerating it.</p>
+<p><strong><code>06-baseline.md</code></strong> is the thing to check <em>before</em> touching the lab — an open lab teaches less<br />
+than one where you can demonstrate both the attack and the fix, and the uncomfortable-answers<br />
+section is what most real environments will actually say.</p>
+<p><strong>Record:</strong> <code>01-lab-status.txt</code> and <code>02-structure.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between a domain and a forest, and why does it matter for trust?</li>
+<li>Why is authorisation written against a SID rather than a name?</li>
+<li>Name the three group scopes and where universal group membership lives.</li>
+<li>Why is the NT hash dangerous in three specific ways?</li>
+<li>What does an LM hash reveal about every password in the domain?</li>
+<li>Give six ACL rights that are attacker goals, and what each enables.</li>
+<li>Why is a forest only as strong as its weakest domain?</li>
+<li>What is DCSync, and which three rights gate it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Active Directory</strong> → <strong>NTDS.dit</strong> → <strong>Active Directory Trust Paths</strong> →<br />
+<strong>Privilege Escalation (Windows)</strong> → <strong>Credential Access</strong>.<br />
+<code>ad-02</code> is the protocol running on top of all of this.</p>

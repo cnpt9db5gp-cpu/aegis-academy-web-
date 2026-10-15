@@ -1,0 +1,347 @@
+<h1 id="engagement-structure-scoping-rules-of-engagement-reporting">Engagement Structure: Scoping, Rules of Engagement, Reporting</h1>
+<h2 id="summary">Summary</h2>
+<p>This note is the template layer over <code>tcm-01</code> and <code>osi-05</code>: the four documents that define an<br />
+engagement, what each one decides, and the order they have to exist in.</p>
+<p>The framing: <strong>these documents are not paperwork. They are the<br />
+control surface.</strong> Every decision you make during an engagement was<br />
+either authorised here or was a mistake, and the only defence in<br />
+either case is the document.</p>
+<blockquote>
+<p>Companion to <code>tcm-01</code> (the operational doctrine) and <code>osi-05</code> (the<br />
+consent boundary). This note is the structure.</p>
+</blockquote>
+<h2 id="the-four-documents">The four documents</h2>
+<pre><code class="language-text">  1. ENGAGEMENT LETTER / SOW   the commercial contract. What is
+                               being bought, for how much, by when.
+                               Signed by both parties. It DEFERS to
+                               the ROE on technical specifics.
+
+  2. RULES OF ENGAGEMENT (ROE) the technical authorisation. What may
+                               be touched, when, how hard, and what is
+                               forbidden. Signed by the client's
+                               authorised representative, who has the
+                               authority to grant it.
+                               THIS IS THE DOCUMENT THAT MATTERS.
+
+  3. SCOPE STATEMENT            part of the ROE, often its own annex.
+                               The exact addresses, domains,
+                               hostnames, and wireless SSIDs, in and
+                               out. Written as lists, not descriptions.
+
+  4. DELIVERABLES AND SCHEDULE  what is produced, in what format, by
+                               when, and what retest is included.
+
+  THE ORDER THEY MUST EXIST IN
+    letter  -&gt;  ROE  -&gt;  scope  -&gt;  start working
+    ^ and the ROE cannot be started without the signature of someone
+      who can actually grant it, verified, not assumed.
+</code></pre>
+<h2 id="who-can-sign">Who can sign</h2>
+<pre><code class="language-text">  THE TEST: does this person have the AUTHORITY to permit what the
+  test will do to a system they may not own?
+
+  USUALLY YES
+    the CISO, the security manager, the IT director, the head of IT
+    the legal counsel who has consulted the client
+
+  USUALLY NO
+    an engineer on the team whose systems will be affected
+    a team lead with no authority over the budget or the risk
+    the vendor's account manager, who sells but cannot grant
+
+  AND THE FAILURE MODE
+    someone with authority signs for something they do not control.
+    The systems group finds out at 02:00 and the engagement is over.
+    This is why the ROE names the CLIENT'S technical contact AND the
+    person who can stop the test - and why you call them BEFORE the
+    window, not during it.
+
+  VERIFY, DON'T ASSUME
+    ask for the authorisation in writing, reference it in your diary,
+    and confirm the person has the role. A signed email from a
+    &quot;Head of Infrastructure&quot; is not the same as the CISO if the
+    systems are regulated or customer-facing.
+</code></pre>
+<h2 id="what-belongs-in-each-in-a-form-you-can-hand-over">What belongs in each, in a form you can hand over</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/rep-01 &amp;&amp; cd ~/aegis/labs/rep-01
+mkdir -p docs
+
+cat &gt; 00-STRUCTURE.md &lt;&lt;'EOF'
+# The engagement document set
+
+```text
+  ENGAGEMENT LETTER / SOW
+    Parties and authority
+    Objective (in business terms, not techniques)
+    Deliverables and dates
+    Fees
+    Confidentiality and data handling
+    Liability
+    &quot;The tester is bound by the Rules of Engagement in Annex A&quot;
+
+  RULES OF ENGAGEMENT
+    1. Authorisation (who grants it, and their authority)
+    2. Scope: in (addresses/domains/SSIDs) and out (everything else)
+    3. Time window, with timezone
+    4. Permitted techniques (a list)
+    5. Prohibited techniques (a list)
+    6. Data handling: what may be read, what must be destroyed
+    7. Contacts: technical, and the person who can stop the test
+    8. Deliverables and retest
+    9. Signatures
+
+  SCOPE ANNEX
+    A table of in-scope targets. ADDRESSES, not descriptions.
+    &quot;the internal network&quot; is not a scope. &quot;192.168.56.0/24 and
+     10.10.10.0/24&quot; is a scope.
+
+  TESTING HOURS
+    Sometimes different from the window. A window is when you MAY
+    test; hours are when you SHOULD. An overnight scan of a business
+    network is within the window and outside the hours, and only one
+    of those is a finding.
+```
+EOF
+
+cat &gt; 01-scope-annex.md &lt;&lt;'EOF'
+# Scope annex — TEMPLATE
+
+&gt; The single most common source of a ruined engagement is a scope
+&gt; written as a description rather than a list. Fill every cell.
+
+## In scope
+
+| Target | Type | Notes | Start | End |
+|---|---|---|---|---|
+| 192.168.56.0/24 | network | host-only lab range | | |
+| lab.internal | domain | AD forest | | |
+| https://app.lab.internal | application | | | |
+| SSID: AEGIS-LAB | wireless | | | |
+
+## Explicitly OUT of scope
+
+| Target | Reason |
+|---|---|
+| Everything not listed above | default deny |
+| 10.0.0.0/8 and 172.16.0.0/12 | not owned by the client |
+| Any public internet host | not in this engagement |
+| Third-party SaaS, CDN, and cloud | not owned by the client |
+| Physical locations | not in this methodology |
+| Staff social engineering | prohibited unless named in Appendix A |
+| Denial of service | PROHIBITED |
+| The client's customers | not testable by this engagement |
+
+## Credentials supplied
+
+| Account | Permitted for |
+|---|---|
+| LAB\alice (domain user) | network enumeration, AD reconnaissance |
+| LAB\svc-test (service) | authenticated web testing only |
+| app_test (application) | the application only; no OS access |
+
+Note explicitly: &quot;credentials may be used for authentication. They may
+NOT be used for post-exploitation outside the in-scope targets, and
+passwords found on one host may not be tried on another.&quot;
+
+## Rate limits and windows
+
+| Activity | Limit | Window |
+|---|---|---|
+| Scanning | 1000 pps maximum | 09:00–17:00 local |
+| Authentication attempts | 5 per account per hour | as above |
+| Exploitation | none outside 09:00–22:00 | as above |
+| Out-of-hours | nothing without written approval | — |
+
+## Test window
+
+| | |
+|---|---|
+| Start | (date, time, timezone) |
+| End | (date, time, timezone) |
+| Daily hours | 09:00–17:00, Mon–Fri |
+| Excluded dates | public holidays, change freezes, and &lt;dates&gt; |
+| Outside the window | all activity stops immediately |
+
+## Emergency procedure
+
+If the test causes an outage or a security incident:
+1. Stop testing immediately.
+2. Call the technical contact: __________________ (24h during window)
+3. Call the stop authority: __________________
+4. Do not attempt to remediate. That is the client's change process.
+
+The tester will not restart until the client says so, in writing.
+</code></pre>
+<p>EOF<br />
+echo "written: 01-scope-annex.md"</p>
+<p>cat &gt; 02-preflight.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash">!/usr/bin/env bash</h1>
+<h1 id="the-pre-engagement-check-run-it-the-week-before-nothing-here-is">The pre-engagement check. Run it the week before. Nothing here is</h1>
+<h1 id="optional-and-nothing-here-can-be-done-on-the-day">optional and nothing here can be done on the day.</h1>
+<p>echo "=============================================================="<br />
+echo " PRE-ENGAGEMENT CHECK"<br />
+echo "=============================================================="<br />
+f=0<br />
+chk() { if [ "$1" = "y" ]; then printf "  [ok]   %s\n" "$2"; else printf "  [MISS] %s\n" "$2"; f=1; fi; }</p>
+<p>echo<br />
+echo "--- authorisation ---"<br />
+chk "${AUTH_SIGNED:-n}" "ROE signed by the client's authorised representative"<br />
+chk "${AUTH_AUTHORITY_VERIFIED:-n}" "Signer's authority to grant this tested"<br />
+chk "${AUTH_WRITTEN:-n}" "Authorisation exists in writing, not verbally"<br />
+echo<br />
+echo "--- scope ---"<br />
+chk "${SCOPE_ADDRESSES:-n}" "In-scope targets written as addresses, not descriptions"<br />
+chk "${SCOPE_OUTLIST:-n}" "Out-of-scope list is explicit and non-empty"<br />
+chk "${SCOPE_CREDENTIALS:-n}" "Credentials supplied and their permitted use stated"<br />
+chk "${SCOPE_RATELIMITS:-n}" "Rate limits stated"<br />
+echo<br />
+echo "--- timing ---"<br />
+chk "${WINDOW_SET:-n}" "Start and end times, with timezone"<br />
+chk "${WINDOW_HOURS:-n}" "Daily testing hours stated"<br />
+chk "${WINDOW_EXCLUDED:-n}" "Excluded dates (holidays, change freezes) stated"<br />
+echo<br />
+echo "--- communications ---"<br />
+chk "${CONTACT_PRIMARY:-n}" "Technical contact named, with a number"<br />
+chk "${CONTACT_CALLTESTED:-n}" "Contact CALLED BEFORE the window, not during"<br />
+chk "${CONTACT_STOP:-n}" "One named person who can halt the test"<br />
+echo<br />
+echo "--- environment ---"<br />
+chk "${IP_WHITELISTED:-n}" "Source IPs whitelisted with the client's IDS"<br />
+chk "${IP_RECORDED:-n}" "Source IPs recorded in the diary"<br />
+chk "${LOGGING:-n}" "Logging enabled, so the client's IDS sees the traffic"<br />
+echo<br />
+echo "--- deliverable ---"<br />
+chk "${DELIVERABLES_FORMAT:-n}" "Report format agreed"<br />
+chk "${DELIVERABLES_DATE:-n}" "Delivery date agreed"<br />
+chk "${DELIVERABLES_RETEST:-n}" "Retest included or explicitly excluded"<br />
+echo<br />
+echo "--- personal preparation ---"<br />
+chk "${PREP_NOTES:-n}" "Notes template, tooling, and ROE to hand"<br />
+chk "${PREP_DIARY:-n}" "Engagement diary created (append-only)"<br />
+chk "${PREP_STOPCONDITIONS:-n}" "Stop conditions written BEFORE the test"<br />
+chk "${PREP_EXITPLAN:-n}" "Plan for leaving cleanly: remove tools, verify, notify"<br />
+echo<br />
+if [ "$f" -eq 0 ]; then<br />
+  echo "  All items present. The engagement can start."<br />
+else<br />
+  echo "  Items missing. Resolve them before the window opens."<br />
+  echo "  Every one of them has ended a real engagement."<br />
+fi<br />
+exit $f<br />
+EOF<br />
+chmod +x 02-preflight.sh</p>
+<pre><code>
+## The stop conditions, which are written before the test
+
+````bash
+cat &gt; 03-stop.md &lt;&lt;'EOF'
+# Stop conditions — written before the engagement starts
+
+```text
+  I WILL STOP IMMEDIATELY AND NOT RESUME WITHOUT WRITTEN INSTRUCTION IF:
+
+  1. A service I am testing becomes unavailable and I cannot explain
+     why within 5 minutes.
+  2. Any data appears to have been modified, encrypted, or deleted.
+  3. I encounter a system, network, or organisation I was not told
+     about - especially one that looks like a different client.
+  4. I obtain access to credential material I was not expecting,
+     on a system outside the in-scope list.
+  5. I am asked to stop by anyone at the client.
+  6. Any activity appears to be reaching something outside the scope
+     annex, even if I did not deliberately cause it.
+  7. My own tooling behaves in a way I did not expect and could cause
+     damage.
+
+  WHEN I STOP:
+    - I will not attempt to fix anything. That is the client's change
+      process, their backups, and their outage, not mine.
+    - I will call the technical contact, and if unanswered within 15
+      minutes, the stop authority.
+    - I will record the time, what I was doing, and what happened.
+    - I will wait for written instruction before resuming.
+    - If I caused it, I will say so, immediately, without
+      embellishment. A tester who says &quot;I don't know what happened&quot;
+      after causing it has a much worse problem than one who says
+      &quot;I ran X at 14:22 and the service went down at 14:23.&quot;
+
+  THE MAXIMUM
+    One exploit at a time against any single host. No parallel
+    exploitation. No persistence testing without explicit permission.
+
+  WHAT I WILL NOT DO, EVER, WITHOUT WRITTEN PERMISSION IN ADVANCE:
+    - denial of service, of any kind, even a &quot;small&quot; one
+    - modifying, deleting, or encrypting any data
+    - leaving a persistence mechanism on a host
+    - moving data off a host other than to prove impact on a named
+      finding
+    - contacting any third-party system
+    - any social engineering of any person
+</code></pre>
+<p>EOF<br />
+echo "written: 03-stop.md"</p>
+<p>cat &gt; 04-diary.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash_1">!/usr/bin/env bash</h1>
+<h1 id="an-append-only-engagement-diary-not-editable-not-truncatable">An append-only engagement diary. Not editable. Not truncatable.</h1>
+<p>D="${1:-diary.txt}"<br />
+touch "$D"; chmod 0444 "$D" 2&gt;/dev/null<br />
+log() {<br />
+  chmod 0644 "$D" 2&gt;/dev/null<br />
+  printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" &gt;&gt; "$D"<br />
+  chmod 0444 "$D" 2&gt;/dev/null<br />
+}</p>
+<h1 id="unset-it-so-the-caller-cannot-log-through-it">unset it so the caller cannot log through it</h1>
+<p>unset -f log</p>
+<h1 id="-the-entry-discipline-">--- the entry discipline ---</h1>
+<p>cat &lt;&lt;'NOTE'<br />
+WHAT EVERY ENTRY CONTAINS<br />
+  - a UTC timestamp (with the timezone, always)<br />
+  - what you did<br />
+  - on which target<br />
+  - with which credential (never the credential itself)<br />
+  - and, for anything disruptive or surprising, what you think<br />
+    happened and who you told</p>
+<p>WHAT IS NOT IN THE DIARY<br />
+  - passwords, tokens, or hashes. Ever. A diary is a document the<br />
+    client reads.<br />
+  - speculation presented as fact. Write "X appears to be" and<br />
+    separate it from what you observed.</p>
+<p>WHY IT IS APPEND-ONLY AND READ-ONLY<br />
+  Because its value is that it is complete. A diary with a gap, or a<br />
+  diary you can edit, is worth nothing in a dispute - and the dispute<br />
+  is exactly when you will want it.</p>
+<p>EXAMPLE ENTRY<br />
+  2026-10-14 09:02Z  START. ROE ref AEGIS-2026-001. Window 09:00-17:00 PDT.<br />
+  2026-10-14 09:05Z  Source IP whitelisted with client. Confirmed by J. Doe.<br />
+  2026-10-14 09:20Z  Recon complete: 3 hosts, 11 services, 1 flagged.<br />
+  2026-10-14 10:41Z  Access obtained on WEB-02 as www-data. Impact pending.<br />
+  2026-10-14 11:15Z  Escalated to root on WEB-02. Credentials redacted.<br />
+  2026-10-14 11:16Z  NOTIFIED client contact: database readable by this account.<br />
+  2026-10-14 11:40Z  Cleaned up: no files left, no persistence installed.<br />
+  2026-10-14 12:00Z  END. Evidence archived encrypted. Removal verified.<br />
+NOTE<br />
+````</p>
+<p><strong>Step 2 is the deliverable</strong>: <code>02-preflight.sh</code> — twenty-four checks in six categories that must<br />
+run <em>the week before</em>, and it exits non-zero if anything is missing. The note's claim is blunt:<br />
+every one of those items has ended a real engagement, and the two most commonly missed are<br />
+<strong>call the contact before the window, not during it</strong>, and <strong>IP whitelisting</strong>, without which<br />
+the client's own IDS files a ticket on you.</p>
+<p><strong><code>03-stop.md</code></strong> is the stop-conditions document, written <em>before</em> the test. The line that matters<br />
+most: <em>"A tester who says 'I don't know what happened' after causing it has a much worse problem<br />
+than one who says 'I ran X at 14:22 and the service went down at 14:23."</em></p>
+<p><strong>Record:</strong> <code>01-scope-annex.md</code> and <code>02-preflight.sh</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the four engagement documents and what each decides.</li>
+<li>In what order must they exist?</li>
+<li>Who can sign a ROE, and who usually cannot?</li>
+<li>Why must scope be addresses rather than descriptions?</li>
+<li>What is the difference between a test window and testing hours?</li>
+<li>What is the stop authority for, and how is it different from the technical contact?</li>
+<li>Give three stop conditions that must be written before the test.</li>
+<li>What must NOT appear in the engagement diary?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Rules of Engagement</strong> → <strong>Scope</strong> → <strong>Pentest Reporting</strong> → <strong>Engagement Process</strong> →<br />
+<strong>Evidence Handling</strong>.<br />
+<code>tcm-01</code> is the doctrine; this is the template.</p>

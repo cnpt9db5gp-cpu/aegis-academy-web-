@@ -1,0 +1,311 @@
+<h1 id="process-and-dll-listing-plugins">Process and DLL Listing Plugins</h1>
+<h2 id="summary">Summary</h2>
+<p>Processes are the first thing you look at and the easiest thing to lie about. Volatility gives you<br />
+three views — the process list, the process tree, and the command lines — and then the two<br />
+plugins that find what should not be there: <code>malfind</code> and the module lists.</p>
+<p>The framing: <strong>a process list is a claim, not a fact.</strong> The process<br />
+list is a doubly-linked list in the kernel, and anything with kernel<br />
+access can unlink itself from it. The command line is in user memory<br />
+and can be edited independently.</p>
+<blockquote>
+<p>Companion to <code>for-03</code> (the methodology) and <code>vol-04</code> (injection).<br />
+This note is the process layer in detail.</p>
+</blockquote>
+<h2 id="the-three-process-plugins">The three process plugins</h2>
+<pre><code class="language-bash">VOL=&quot;vol.py&quot;
+IMG=&quot;memory.raw&quot;
+
+# 1. pslist - the process list, walking the EPROCESS doubly-linked list
+$VOL windows.pslist -f &quot;$IMG&quot;
+#   columns: PID, PPID, ImageFileName, Offset, Threads, Handles,
+#            SessionId, Wow64, CreateTime, ExitTime, File output
+
+# 2. pstree - the same list, drawn as a tree
+$VOL windows.pstree -f &quot;$IMG&quot;
+#   ^ THIS IS THE ONE. A tree makes the parentage obvious, and the
+#     parentage is what you ask questions about.
+
+# 3. cmdline - every process's command line, with the full path
+$VOL windows.cmdline -f &quot;$IMG&quot;
+#   ^ &quot;what was actually run&quot;. A PowerShell process with a base64
+#     argument is the single most common thing you will find.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/vol-02 &amp;&amp; cd ~/aegis/labs/vol-02
+
+# --- 1. the shape of a process tree, and what is wrong with it ---
+cat &gt; 01-tree.md &lt;&lt;'MD'
+# Reading a process tree
+
+```text
+  THE NORMAL SHAPES (Windows 10/11, PID 4 is System, PID 0 idle)
+
+    System(4)
+     +-- smss.exe(224)              &lt;- session 0, first user-mode
+     |    +-- csrss.exe(308)
+     |    |    +-- wininit.exe(456) &lt;- the USER-mode shell
+     |    |    |    +-- explorer.exe(2100)
+     |    |    |    |    +-- chrome.exe(3200)
+     |    |    |    +-- userinit.exe(512)
+     |    |    +-- services.exe(620)
+     |    |         +-- svchost.exe(880)
+     |    |         +-- wmiprvse.exe(4100)
+     |    +-- winlogon.exe(388)
+     +-- (System)                   &lt;- session 0
+
+  THE SHAPES THAT ARE WRONG
+
+    explorer.exe
+     +-- cmd.exe                    &lt;- explorer spawning a shell
+     |    +-- powershell.exe
+         +-- notepad.exe
+
+    svchost.exe (at a non-system path)
+     +-- cmd.exe
+
+    winword.exe
+     +-- rundll32.exe               &lt;- a macro or a DLL side-load
+
+    explorer.exe
+     +-- mshta.exe
+         +-- powershell.exe
+
+    System
+     +-- explorer.exe               &lt;- EXPLORER BELOW SYSTEM. This is
+                                     wrong on every modern Windows and
+                                     is the shape of a rootkit that
+                                     failed to hide properly.
+
+  WHAT TO LOOK AT, IN ORDER
+    1. is the parent something that should NEVER spawn a child?
+       (services.exe spawning cmd.exe, winlogon spawning a shell)
+    2. is the executable at a path Windows does not use?
+       (C:\Users\\...\AppData\Local\Temp\svchost.exe)
+    3. is the name right but the PATH wrong?
+    4. is there a process whose PPID does not exist? (an orphan is a
+       sign the parent exited, which is normal, OR a sign of a fake)
+    5. is anything running in session 0 that should not be?
+       (a user process in session 0 means an interactive session
+        created it - a service, a scheduled task, or an implant)
+MD
+</code></pre>
+<pre><code class="language-bash"># --- 2. the questions to ask the tree ---
+cat &gt; 02-questions.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+VOL=&quot;${VOL:-vol.py}&quot;; IMG=&quot;${1:?usage: ./02-questions.sh memory.raw}&quot;
+echo &quot;=== 1. the tree ===&quot;
+$VOL windows.pstree -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;=== 2. the paths (the names lie, the paths do not) ===&quot;
+$VOL windows.cmdline -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /' | head -40
+echo
+echo &quot;  LOOK AT: anything not in C:\\Windows\\, C:\\Program Files\\,&quot;
+echo &quot;            or the user's AppData\\Roaming\\Microsoft\\Windows&quot;
+echo &quot;            (which is where a legitimate app installs itself).&quot;
+echo &quot;  Temp, Public, Downloads, and ProgramData are all findings.&quot;
+echo
+echo &quot;=== 3. the counts, which is where rootkits show ===&quot;
+$VOL windows.pslist -f &quot;$IMG&quot; 2&gt;/dev/null | grep -ci &quot;explorer.exe&quot; \
+  | xargs echo &quot;  explorer.exe instances:&quot;
+echo &quot;  1 is normal for an interactive session. 2+ on a workstation&quot;
+echo &quot;  is worth asking about (a remote session, or an extra shell).&quot;
+$VOL windows.pslist -f &quot;$IMG&quot; 2&gt;/dev/null | grep -ci &quot;winlogon.exe&quot; \
+  | xargs echo &quot;  winlogon.exe instances:&quot;
+echo &quot;  should be exactly 1 (or 2 with a fast-user-switching session).&quot;
+echo &quot;  ZERO means no interactive session: a server, or a live&quot;
+echo &quot;  capture of a machine nobody logged into.&quot;
+echo
+echo &quot;=== 4. the ones that are almost never legitimate ===&quot;
+for p in mimikatz procdump rundll32 regsvr32 mshta wscript cscript \
+         certutil bitsadmin nc ncat netcat plink; do
+  n=$($VOL windows.pslist -f &quot;$IMG&quot; 2&gt;/dev/null | grep -ci &quot;$p&quot;)
+  [ &quot;$n&quot; -gt 0 ] &amp;&amp; echo &quot;  $p x$n&quot;
+done
+echo
+echo &quot;=== 5. the boot time, from windows.info ===&quot;
+$VOL windows.info -f &quot;$IMG&quot; 2&gt;/dev/null | grep -iE &quot;systemtime|kernel|physical&quot; | sed 's/^/  /'
+echo
+echo &quot;  ^ SystemTime is your reference for every other timestamp.&quot;
+echo &quot;    Record it and the offset from your own clock.&quot;
+echo
+echo &quot;=== 6. the session mapping (who is at the keyboard) ===&quot;
+$VOL windows.getsids -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /' | head -30
+echo
+echo &quot;  ^ A process in session 0 that is NOT a service or a system&quot;
+echo &quot;    binary is a finding: an implant that registered as a service,&quot;
+echo &quot;    or a scheduled task that launched something interactive.&quot;
+EOF
+chmod +x 02-questions.sh
+
+# --- 3. the modules ---
+cat &gt; 03-modules.md &lt;&lt;'MD'
+# Module (DLL) listing
+
+```bash
+$VOL windows.dlllist -f &quot;$IMG&quot;
+$VOL windows.dlllist -f &quot;$IMG&quot; --pid 2100        # one process
+$VOL windows.dlllist.DllList --pid 2100 -f &quot;$IMG&quot;
+$VOL windows.getsids -f &quot;$IMG&quot;                    # pid -&gt; session
+```
+
+```text
+  WHAT YOU ARE LOOKING FOR
+
+  1. A DLL FROM A PATH THAT IS NOT WINDOWS.
+       C:\Users\&lt;user&gt;\AppData\... in the module list of a SYSTEM
+       process is the classic injection signature.
+
+  2. A DLL WITH A NAME THAT DOES NOT MATCH ITS PATH.
+       &quot;explorer.dll&quot; loaded from Temp. Name and path must agree.
+
+  3. A KNOWN-INJECTION DLL NAME.
+       There are public lists. The point is not the name; it is that
+       the name is a string in the injected process's memory, and
+       you should find it in the carved memory too.
+
+  4. A SYSTEM PROCESS WITH MODULES IT SHOULD NOT HAVE.
+       lsass.exe with a networking DLL. That is credential theft
+       tooling (see for-05's imports list).
+
+  5. THE ORDER. The injected module is usually loaded LAST, or has
+       the most recent LoadTime. LoadTime is the field that tells you.
+
+  6. NO MODULES AT ALL for a process that should have many.
+       A hollowed process (see vol-04) has almost nothing.
+```
+
+```bash
+# the module list is also a list of API availability
+# a process with crypt32.dll can decrypt. with winhttp.dll can
+# talk to a C2. with dbghelp.dll is doing anti-debug.
+```
+MD
+cat &gt; 03-modules.md
+
+# --- 4. offline: the injection shapes, which is the concept ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-injection-shapes.txt
+print(&quot;  === the four ways a process list and reality diverge ===\n&quot;)
+print(&quot;  1. UNLINKED FROM THE LIST (DKOM - Direct Kernel Object&quot;)
+print(&quot;     Manipulation)&quot;)
+print(&quot;     The process runs, but is not in the EPROCESS list.&quot;)
+print(&quot;       - vol.py windows.pslist MISSES IT&quot;)
+print(&quot;       - vol.py windows.pstree MISSES IT&quot;)
+print(&quot;       - vol.py windows.cmdline finds nothing (no entry)&quot;)
+print(&quot;       - BUT: it has threads, it has handles, it appears in&quot;)
+print(&quot;         the handles and scan tables, and its PID is missing&quot;)
+print(&quot;         from the process list while something uses its PID&quot;)
+print(&quot;     DETECTION:&quot;)
+print(&quot;       - a PID that appears in windows.netscan or&quot;)
+print(&quot;         windows.handles but not in windows.pslist&quot;)
+print(&quot;       - vol.py windows.psxview shows processes the list misses&quot;)
+print(&quot;         (run ALL THREE and diff the PID sets. That diff IS&quot;)
+print(&quot;          the finding.)&quot;)
+print()
+print(&quot;  2. PEB UNLINKING (user mode)&quot;)
+print(&quot;     The process removes itself from the PEB's InLoadOrder&quot;)
+print(&quot;     and InMemoryOrder module lists. Task Manager's image tab&quot;)
+print(&quot;     then shows nothing for it.&quot;)
+print(&quot;       - vol.py windows.pslist still finds it (kernel list)&quot;)
+print(&quot;       - vol.py windows.cmdline works (cmdline is in PEB, which&quot;)
+print(&quot;         is still readable)&quot;)
+print(&quot;       - vol.py windows.dlllist shows it, and windows.malfind&quot;)
+print(&quot;         shows the region is UNLINKED&quot;)
+print(&quot;     DETECTION: windows.malfind output flagged 'unlinked'&quot;)
+print()
+print(&quot;  3. PROCESS HOLLOWING&quot;)
+print(&quot;     A legitimate process is started suspended, its memory is&quot;)
+print(&quot;     replaced, and it is resumed. The name, the PID, and the&quot;)
+print(&quot;     path are all genuine; the code is not.&quot;)
+print(&quot;       - windows.pslist: a process with a normal name&quot;)
+print(&quot;       - windows.dlllist: almost NO modules (the real ones were&quot;)
+print(&quot;         unmapped) or an unexpected set&quot;)
+print(&quot;       - windows.malfind: a large private RWX region&quot;)
+print(&quot;       - windows.cmdline: often empty or the original's&quot;)
+print(&quot;       - the entry point is not inside any module's address&quot;)
+print(&quot;         range - that is the giveaway&quot;)
+print(&quot;     DETECTION: malfind + dlllist together. A process with a&quot;)
+print(&quot;                 huge RWX region and no modules is hollowed.&quot;)
+print()
+print(&quot;  4. REFLECTIVE LOADING&quot;)
+print(&quot;     The payload never appears as a module at all. It is&quot;)
+print(&quot;     mapped, its relocations are fixed up manually, and it is&quot;)
+print(&quot;     called directly.&quot;)
+print(&quot;       - windows.dlllist: nothing unusual (the module is not&quot;)
+print(&quot;         registered)&quot;)
+print(&quot;       - windows.malfind: several RWX regions&quot;)
+print(&quot;       - the code never touches disk&quot;)
+print(&quot;     DETECTION: malfind, and strings in the carved region&quot;)
+print()
+print(&quot;  === THE THREE-PLUGIN CROSS-CHECK, and it is the whole note ===&quot;)
+print()
+print(&quot;    pslist   vs   psxview      -&gt; DKOM / unlinked processes&quot;)
+print(&quot;    dlllist  vs   malfind      -&gt; hollowed processes&quot;)
+print(&quot;    malfind  vs   cmdline      -&gt; reflective loads and injected&quot;)
+print(&quot;                                    command lines&quot;)
+print()
+print(&quot;  Run all three. Diff them. The difference is the finding.&quot;)
+print(&quot;  This takes two minutes and it is the difference between&quot;)
+print(&quot;  'no suspicious processes' and 'a process that is running and&quot;)
+print(&quot;  is deliberately hidden'.&quot;)
+PY
+cat 04-injection-shapes.txt
+
+# --- 5. the shorthand plugin list ---
+cat &gt; 05-shorthands.md &lt;&lt;'MD'
+# Shorthand plugins that take the diff for you
+
+</code></pre>
+<h1 id="psxview-walks-four-different-kernel-lists-not-one">psxview: walks FOUR different kernel lists, not one.</h1>
+<h1 id="any-process-it-finds-that-pslist-does-not-is-a-dkom-victim">Any process it finds that pslist does not is a DKOM victim.</h1>
+<p>$VOL windows.pslist  -f "$IMG" | awk '{print $2}' | sort &gt; /tmp/pslist.pids<br />
+$VOL windows.psxview -f "$IMG" | awk '{print $2}' | sort &gt; /tmp/psxview.pids<br />
+comm -13 /tmp/pslist.pids /tmp/psxview.pids</p>
+<h1 id="the-answer-if-there-is-one-is-on-this-line">^ the answer, if there is one, is on this line</h1>
+<h1 id="handles-every-handle-in-the-system-grouped-by-type">handles: every handle in the system, grouped by type</h1>
+<p>$VOL windows.handles -f "$IMG" --pid 620</p>
+<h1 id="filescan-files-that-were-open-or-resident-at-acquisition-time">filescan: files that were open OR resident at acquisition time</h1>
+<p>$VOL windows.filescan -f "$IMG"<br />
+$VOL windows.filescan.FileScan --pid 2100 -f "$IMG"</p>
+<h1 id="dumpfiles-carve-a-file-out-of-memory-by-name">dumpfiles: carve a file out of memory by name</h1>
+<p>$VOL windows.dumpfiles -f "$IMG"<br />
+$VOL windows.dumpfiles --pid 2100 -f "$IMG" --dump-dir ./dumps</p>
+<h1 id="this-is-the-handoff-to-static-analysis-a-dll-that-only-ever">^ this is the handoff to static analysis. A DLL that only ever</h1>
+<h1 id="existed-in-memory-carved-out-is-for-05s-material">existed in memory, carved out, is for-05's material.</h1>
+<h1 id="the-ads-in-memory-question-does-the-process-have-a-mapped-zone">the ADS-in-memory question (does the process have a mapped zone?)</h1>
+<p>$VOL windows.netscan -f "$IMG" --pid 2100</p>
+<pre><code>
+```text
+  THE SIDE EFFECT OF filescan/dumpfiles: they produce files. Those
+  files are in your working directory and they are MALWARE. Do not
+  double-click them, do not open them in a preview pane, and do not
+  leave them where a file manager will render a thumbnail. Write
+  them to a directory with no autoindexing and work on them with
+  the triage script in for-05.
+</code></pre>
+<p>MD<br />
+cat 05-shorthand.sh 2&gt;/dev/null; mv 05-shorthand.sh 05-shorthands.md 2&gt;/dev/null<br />
+```</p>
+<p><strong>Step 4 is the deliverable</strong>: the four ways a process list diverges from reality — DKOM, PEB<br />
+unlinking, hollowing, reflective loading — and for each, exactly which plugin <em>misses</em> it and<br />
+which <em>finds</em> it. Then the punchline: <strong>run <code>pslist</code> and <code>psxview</code> and diff the PID sets. That<br />
+diff is the finding</strong>, and it takes two minutes.</p>
+<p><strong><code>05-shorthands.md</code></strong> includes the warning that matters practically: <code>dumpfiles</code> produces files<br />
+that <em>are</em> malware, and writing them into a directory with a preview pane means the preview pane<br />
+renders them.</p>
+<p><strong>Record:</strong> <code>04-injection-shapes.txt</code> and <code>05-shorthands.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the three process plugins and what each uniquely tells you.</li>
+<li>Why is <code>pstree</code> usually run before <code>pslist</code>?</li>
+<li>Give four process-tree shapes that are wrong, and what makes each wrong.</li>
+<li>What is DKOM, and which plugin finds what <code>pslist</code> misses?</li>
+<li>What is PEB unlinking, and how does <code>malfind</code> flag it?</li>
+<li>What does a process with a huge RWX region and almost no modules indicate?</li>
+<li>What is reflective loading, and why does <code>dlllist</code> not show it?</li>
+<li>Name the three cross-checks and the diff that produces the finding.</li>
+<li>Why should <code>dumpfiles</code> output not go into a normal working directory?</li>
+<li>What does <code>windows.filescan</code> find that the disk does not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Volatility 3</strong> → <strong>Process Injection</strong> → <strong>DLL Injection</strong> → <strong>Disassembly</strong> →<br />
+<strong>Malware Triage</strong>.<br />
+<code>vol-04</code> is the injection and malware-family material.</p>

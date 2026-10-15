@@ -1,0 +1,254 @@
+<h1 id="why-kali-exists-and-what-it-actually-is">Why Kali Exists and What It Actually Is</h1>
+<h2 id="summary">Summary</h2>
+<p>Kali Linux is a <strong>rolling, Debian-derived Linux distribution built by and for people who<br />
+do security testing</strong>. Three words in that sentence matter more than the rest.</p>
+<p><strong>Debian-derived.</strong> Kali is not a new operating system wearing a costume. It is Debian, with a<br />
+different set of packages installed by default and a different name on the disk. Every <code>apt</code>,<br />
+every <code>.deb</code>, every <code>dpkg</code> behaviour you learn in ordinary Debian applies here unchanged.<br />
+Learning Kali is mostly learning Debian with a security-shaped default profile.</p>
+<p><strong>Rolling.</strong> Kali has no point releases. There is no "Kali 2024.1". There is a continuously<br />
+updated APT repository, and what you have installed today is whatever the repository said<br />
+yesterday. This is the single most important operational fact about Kali and it is the source<br />
+of most beginner breakage — see <code>kr-05</code>.</p>
+<p><strong>Built for security testing.</strong> Officially, Kali is a distribution for <em>penetration testing and<br />
+digital forensics</em>. Kali's own documentation is blunt about who it is not for: it is not a general<br />
+purpose desktop or a laptop OS, because it ships with hundreds of tools that some of which are<br />
+unsafe on a network you care about (an <code>nmap</code> run against the wrong subnet, a rogue DHCP client,<br />
+an open SMB client on a coffee-shop network).</p>
+<blockquote>
+<p>Kali is a toolbox on a live distribution, not an operating system designed to be safe on<br />
+untrusted networks. That is why serious operators run tools on Kali and keep their daily<br />
+driver OS separate.</p>
+</blockquote>
+<h2 id="the-three-distributions-you-will-meet">The three distributions you will meet</h2>
+<table>
+<thead>
+<tr>
+<th>Distribution</th>
+<th>Made for</th>
+<th>Use it when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Kali</strong></td>
+<td>Offensive security testing</td>
+<td>You are attacking, in a lab or an engagement</td>
+</tr>
+<tr>
+<td><strong>Parrot</strong></td>
+<td>Offensive security <em>plus</em> desktop usability</td>
+<td>You want a daily driver that also has the tools</td>
+</tr>
+<tr>
+<td><strong>BlackArch</strong></td>
+<td>Arch-based, ~2800 tools</td>
+<td>You already live on Arch and want maximal coverage</td>
+</tr>
+</tbody>
+</table>
+<p>All three ship the same core tools. <strong>Kali's real advantage is not the tools — it is that the<br />
+tool set, the packaging and the documentation are maintained by the people who write the tools<br />
+and the courses.</strong> When a tool needs a specific build flag, Kali's package usually already has it.</p>
+<h2 id="what-is-actually-inside">What is actually inside</h2>
+<p>Kali ships roughly <strong>3000+ tools</strong>, which is terrifying until you learn that they fall into about<br />
+a dozen categories:</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Examples</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Information gathering</td>
+<td><code>nmap</code>, <code>maltego</code>, <code>theharvester</code>, <code>dnsenum</code></td>
+<td>Map the target before touching it</td>
+</tr>
+<tr>
+<td>Vulnerability analysis</td>
+<td><code>nikto</code>, <code>searchsploit</code>, <code>nessus</code></td>
+<td>Find known flaws in what you found</td>
+</tr>
+<tr>
+<td>Web application</td>
+<td><code>burpsuite</code>, <code>sqlmap</code>, <code>ffuf</code>, <code>nikto</code></td>
+<td>Attack HTTP applications</td>
+</tr>
+<tr>
+<td>Password attacks</td>
+<td><code>john</code>, <code>hashcat</code>, <code>hydra</code></td>
+<td>Crack or spray credentials</td>
+</tr>
+<tr>
+<td>Exploitation</td>
+<td><code>metasploit</code>, <code>gdb</code>, <code>pwntools</code>, <code>radare2</code></td>
+<td>Turn a flaw into code execution</td>
+</tr>
+<tr>
+<td>Post-exploitation</td>
+<td><code>mimikatz</code>, <code>impacket</code>, <code>linpeas</code>, <code>bloodhound</code></td>
+<td>Move around after access</td>
+</tr>
+<tr>
+<td>Sniffing/spoofing</td>
+<td><code>wireshark</code>, <code>tcpdump</code>, <code>ettercap</code>, <code>bettercap</code></td>
+<td>Watch and manipulate traffic</td>
+</tr>
+<tr>
+<td>Forensics</td>
+<td><code>volatility</code>, <code>autopsy</code>, <code>foremost</code>, <code>binwalk</code></td>
+<td>Recover and analyse evidence</td>
+</tr>
+<tr>
+<td>Reporting</td>
+<td><code>metasploit</code>, <code>faraday</code>, <code>cutycapt</code></td>
+<td>Write it up</td>
+</tr>
+<tr>
+<td>Credential attacks</td>
+<td><code>hashcat</code>, <code>john</code>, <code>responder</code></td>
+<td>Recover secrets</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The categories are the durable skill.</strong> Tools come and go — <code>set</code> is dead, <code>armitage</code> is gone,<br />
+<code>beef</code> is largely abandoned. The <em>categories</em> have been stable for twenty years. Learn the<br />
+categories first; the tool is a lookup.</p>
+<h2 id="why-this-matters-to-you-specifically">Why this matters to you, specifically</h2>
+<p>You moved to Kali a few days ago. The most common way people fail here is treating Kali like a<br />
+normal desktop and then being confused when:</p>
+<ul>
+<li><code>sudo apt update</code> produces hundreds of lines and takes forever (rolling repo, see <code>kr-05</code>)</li>
+<li>a tool does not work because a library changed underneath it (rolling repo again)</li>
+<li><code>nmap</code> triggered your own network's monitoring (it is noisy; see <code>doc-03</code>)</li>
+<li>they cannot find the tool they read about in a tutorial (it was renamed, or it lives in a<br />
+  repo they have not enabled)</li>
+</ul>
+<p>None of these are you being stupid. They are the predictable consequences of what Kali is.<br />
+Everything in this course is written with that in mind.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Rolling release</strong></td>
+<td>No versioned point releases; the repo is always "current"</td>
+</tr>
+<tr>
+<td><strong>Live distribution</strong></td>
+<td>Runs from removable media without installing to disk</td>
+</tr>
+<tr>
+<td><strong>Offensive Security</strong></td>
+<td>The company that creates and maintains Kali and its training</td>
+</tr>
+<tr>
+<td><strong>PEN-103</strong></td>
+<td>The code for the Kali Linux Revealed course/book</td>
+</tr>
+<tr>
+<td><strong>APT</strong></td>
+<td>Advanced Package Tool — Debian's package manager (<code>apt</code>, <code>apt-get</code>, <code>apt-cache</code>)</td>
+</tr>
+<tr>
+<td><strong><code>.deb</code></strong></td>
+<td>A Debian package archive</td>
+</tr>
+<tr>
+<td><strong>Repository (repo)</strong></td>
+<td>A server APT pulls package lists and packages from</td>
+</tr>
+<tr>
+<td><strong>Default profile</strong></td>
+<td>The set of packages installed when you first boot the ISO/installed image</td>
+</tr>
+<tr>
+<td><strong>Metapackage</strong></td>
+<td>A package that exists only to depend on a group of other packages</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># What version of Kali am I actually running?
+cat /etc/os-release
+
+# What kernel, and what architecture?
+uname -a
+
+# Where did this repo come from? (the answer to most &quot;my install is broken&quot; questions)
+cat /etc/apt/sources.list
+ls /etc/apt/sources.list.d/
+
+# How many packages are installed, and how big is the toolset?
+dpkg -l | wc -l
+dpkg -l | grep -c kali-tools
+
+# Which metapackage groups exist? This IS the tool taxonomy.
+apt-cache search kali-tools | grep '^kali-tools' | head -30
+
+# What tools does a metapackage contain, without installing it?
+apt-cache depends kali-tools-information-gathering
+apt-get install --dry-run kali-tools-web
+
+# Is this thing a Kali package? (searchs names, descriptions and installed files)
+apt-file search &quot;bin/nmap&quot;      # needs: sudo apt install apt-file &amp;&amp; sudo apt-file update
+dpkg -S /usr/bin/nmap
+
+# How much disk am I using on the toolset?
+du -sh /usr/share/nmap /usr/share/wordlists /usr/share/seclists 2&gt;/dev/null
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> prove to yourself that Kali is Debian, understand what your toolset is made of,<br />
+and produce a snapshot of your own installation.</p>
+<p><strong>Scope:</strong> your own machine. No network scanning of anything.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/kr-01 &amp;&amp; cd ~/aegis/labs/kr-01
+
+# 1. Identity
+uname -a | tee identity.txt
+cat /etc/os-release &gt;&gt; identity.txt
+
+# 2. Prove it is Debian underneath
+dpkg --print-architecture &gt;&gt; identity.txt
+apt-cache policy | head -20 &gt;&gt; identity.txt
+
+# 3. Enumerate the toolset categories - this is the taxonomy, printed
+apt-cache search --names-only '^kali-tools-' | cut -d- -f3 | sort -u | tee categories.txt
+wc -l categories.txt
+
+# 4. Count installed tooling
+dpkg -l | grep -c '^ii' &gt;&gt; identity.txt
+
+# 5. Check the size of Kali's shared data (wordlists, nmap scripts, metasploit)
+du -sh /usr/share/wordlists /usr/share/seclists /usr/share/nmap /usr/share/metasploit-framework \
+  2&gt;/dev/null | tee datavol.txt
+</code></pre>
+<p><strong>Expected observations</strong></p>
+<ul>
+<li><code>dpkg --print-architecture</code> returns <code>amd64</code> — you are on Debian's package system</li>
+<li><code>categories.txt</code> lists ~15-20 categories, matching the table above</li>
+<li><code>datavol.txt</code> shows the data directories are large — this is the part of Kali that is<br />
+  genuinely valuable and often overlooked</li>
+</ul>
+<p><strong>Record:</strong> paste the output of <code>categories.txt</code> into your scratchpad. When you reach Tier 3 and<br />
+run <code>searchsploit</code>, you will understand where that data came from.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is Kali's rolling release a common source of breakage for new users?</li>
+<li>Name three categories from the Kali tool taxonomy and give one tool from each.</li>
+<li>Why is running Kali as a daily driver OS on an untrusted network discouraged?</li>
+<li>What is a Debian <em>metapackage</em>, and how would you see what one contains without installing it?</li>
+<li><code>dpkg -S /usr/bin/nmap</code> — what question does that answer, and what does an empty result mean?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p>This lecture is the anchor for the whole curriculum. Follow the concept links from<br />
+<strong>Kali Tool Taxonomy</strong> to see every lecture in the catalogue that touches Kali's structure, and<br />
+<strong>Open vs Closed System</strong> for why a distribution full of closed-source tools still gives you<br />
+everything you need.</p>

@@ -1,0 +1,3934 @@
+{
+ "xp": {
+  "lecture_complete": 100,
+  "lab_complete": 60,
+  "quiz_perfect": 40,
+  "tier_bonus": 500,
+  "ctf_easy": 75,
+  "ctf_medium": 150,
+  "ctf_hard": 300
+ },
+ "ranks": [
+  {
+   "id": "cadet",
+   "name": "CADET",
+   "min_xp": 0,
+   "insignia": "CD"
+  },
+  {
+   "id": "analyst",
+   "name": "ANALYST",
+   "min_xp": 900,
+   "insignia": "AN"
+  },
+  {
+   "id": "operator",
+   "name": "OPERATOR",
+   "min_xp": 2400,
+   "insignia": "OP"
+  },
+  {
+   "id": "specialist",
+   "name": "SPECIALIST",
+   "min_xp": 5200,
+   "insignia": "SP"
+  },
+  {
+   "id": "senior-analyst",
+   "name": "SENIOR ANALYST",
+   "min_xp": 9800,
+   "insignia": "SA"
+  },
+  {
+   "id": "section-chief",
+   "name": "SECTION CHIEF",
+   "min_xp": 17000,
+   "insignia": "SC"
+  },
+  {
+   "id": "director",
+   "name": "DIRECTOR",
+   "min_xp": 30000,
+   "insignia": "DR"
+  }
+ ],
+ "domains": [
+  {
+   "id": "fundamentals",
+   "label": "FUNDAMENTALS"
+  },
+  {
+   "id": "linux",
+   "label": "LINUX"
+  },
+  {
+   "id": "networking",
+   "label": "NETWORKING"
+  },
+  {
+   "id": "systems",
+   "label": "SYSTEMS"
+  },
+  {
+   "id": "web",
+   "label": "WEB"
+  },
+  {
+   "id": "crypto",
+   "label": "CRYPTO"
+  },
+  {
+   "id": "re",
+   "label": "REVERSE ENG"
+  },
+  {
+   "id": "ad",
+   "label": "ACTIVE DIRECTORY"
+  },
+  {
+   "id": "forensics",
+   "label": "FORENSICS"
+  },
+  {
+   "id": "osint",
+   "label": "OSINT"
+  }
+ ],
+ "tiers": [
+  {
+   "id": 0,
+   "code": "T00",
+   "name": "ORIENTATION",
+   "rank": "CADET",
+   "accent": "t0",
+   "summary": "Ground zero for a machine that was unfamiliar a week ago. What a terminal is, how Kali is put together, and why any of this matters to an operator.",
+   "domains": [
+    "fundamentals",
+    "linux"
+   ],
+   "xp_bonus": 500,
+   "unlock": null,
+   "focus": [
+    "Understand what a shell is and what it is actually doing to your machine",
+    "Navigate the filesystem without getting lost",
+    "Recognise which Kali tool categories exist and when to reach for them",
+    "Write the first Python and Bash programs"
+   ]
+  },
+  {
+   "id": 1,
+   "code": "T01",
+   "name": "SHELL & SYSTEMS BASICS",
+   "rank": "ANALYST",
+   "accent": "t1",
+   "summary": "Stop treating the OS as magic. Processes, memory, filesystems, permissions and the Unix philosophy - the substrate every later exploit depends on.",
+   "domains": [
+    "linux",
+    "fundamentals"
+   ],
+   "xp_bonus": 500,
+   "unlock": {
+    "tier": 0,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "Process memory layout and what the kernel actually enforces",
+    "Users, groups, file modes, and privilege boundaries",
+    "Shell scripting for reconnaissance loops",
+    "Package management and tool dependencies on Kali"
+   ]
+  },
+  {
+   "id": 2,
+   "code": "T02",
+   "name": "NETWORK FUNDAMENTALS",
+   "rank": "OPERATOR",
+   "accent": "t2",
+   "summary": "Packets, frames, protocols. Every scan, every callback and every pivot is built from this layer. Cannot be skipped by anyone who wants to do offensive work.",
+   "domains": [
+    "networking"
+   ],
+   "xp_bonus": 500,
+   "unlock": {
+    "tier": 1,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "OSI and TCP/IP mapped to real captures in Wireshark",
+    "Switching, routing, ARP, DNS and DHCP behaviour",
+    "Subnetting, addressing and port state",
+    "Reading traffic off the wire and interpreting it"
+   ]
+  },
+  {
+   "id": 3,
+   "code": "T03",
+   "name": "SYSTEMS SECURITY & EXPLOITATION",
+   "rank": "SPECIALIST",
+   "accent": "t3",
+   "summary": "How untrusted input becomes code execution. Memory corruption, mitigations, privilege separation, and the research that defines modern exploit dev.",
+   "domains": [
+    "systems",
+    "re"
+   ],
+   "xp_bonus": 750,
+   "unlock": {
+    "tier": 2,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "Stack layout, calling conventions and the x86-64 basics",
+    "Buffer overflows, ROP and the mitigations that block them",
+    "Privilege separation, sandboxes, enclaves",
+    "Kernel/user boundary and system calls"
+   ]
+  },
+  {
+   "id": 4,
+   "code": "T04",
+   "name": "WEB SECURITY & CRYPTOGRAPHY",
+   "rank": "SENIOR ANALYST",
+   "accent": "t4",
+   "summary": "The browser security model, the request lifecycle, and the cryptography that quietly underwrites all of it.",
+   "domains": [
+    "web",
+    "crypto"
+   ],
+   "xp_bonus": 750,
+   "unlock": {
+    "tier": 3,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "HTTP request lifecycle, proxies, and where trust gets misplaced",
+    "Injection, XSS, SSRF, deserialisation and access control",
+    "Symmetric vs asymmetric crypto, hashes, and real-world misuse",
+    "TLS and certificates as deployed in practice"
+   ]
+  },
+  {
+   "id": 5,
+   "code": "T05",
+   "name": "ACTIVE DIRECTORY & POST-EXPLOITATION",
+   "rank": "SECTION CHIEF",
+   "accent": "t5",
+   "summary": "The enterprise domain. Kerberos, LDAP, delegation, and the tooling that makes a single credential into an entire forest.",
+   "domains": [
+    "ad",
+    "networking"
+   ],
+   "xp_bonus": 1000,
+   "unlock": {
+    "tier": 4,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "Kerberos ticketing, SPNs, delegation and abuse paths",
+    "LDAP and AD query syntax, BloodHound graph analysis",
+    "Credential harvesting, dumping and relay",
+    "Pivoting, tunnelling and internal network movement"
+   ]
+  },
+  {
+   "id": 6,
+   "code": "T06",
+   "name": "FORENSICS & DEFENSE",
+   "rank": "SECTION CHIEF",
+   "accent": "t6",
+   "summary": "Offence and defence are the same knowledge read in opposite directions. Artifact extraction, timeline analysis, detection engineering.",
+   "domains": [
+    "forensics",
+    "systems"
+   ],
+   "xp_bonus": 1000,
+   "unlock": {
+    "tier": 5,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "Disk, memory and network artifact extraction",
+    "Timeline reconstruction and chain of custody",
+    "YARA and Sigma detection engineering",
+    "Reading logs the way an attacker leaves them"
+   ]
+  },
+  {
+   "id": 7,
+   "code": "T07",
+   "name": "OSINT & RED TEAM OPERATIONS",
+   "rank": "DIRECTOR",
+   "accent": "t7",
+   "summary": "Targets rarely live only on the network. Collection, verification, and the operational discipline that separates a researcher from a nuisance.",
+   "domains": [
+    "osint",
+    "ad"
+   ],
+   "xp_bonus": 1250,
+   "unlock": {
+    "tier": 6,
+    "completion": 0.7,
+    "quiz": 0.6
+   },
+   "focus": [
+    "Passive collection, verification and source reliability",
+    "Social engineering tradecraft within an authorised scope",
+    "Campaign infrastructure, OPSEC and tradecraft",
+    "Legal and ethical boundaries, documented"
+   ]
+  },
+  {
+   "id": 8,
+   "code": "T08",
+   "name": "CAPSTONE ASSESSMENT",
+   "rank": "DIRECTOR",
+   "accent": "t8",
+   "summary": "A full authorised engagement against your own lab range, from scoping to written report. This is the exam.",
+   "domains": [
+    "fundamentals",
+    "linux",
+    "networking",
+    "systems",
+    "web",
+    "crypto",
+    "re",
+    "ad",
+    "forensics",
+    "osint"
+   ],
+   "xp_bonus": 2500,
+   "unlock": {
+    "tier": 7,
+    "completion": 0.75,
+    "quiz": 0.7
+   },
+   "focus": [
+    "Scope, rules of engagement, and written authorisation",
+    "Reconnaissance through to post-exploitation",
+    "Evidence handling and a defensible chain of custody",
+    {
+     "Professional reporting": "findings, risk, remediation"
+    }
+   ]
+  }
+ ],
+ "badges": [
+  {
+   "id": "first-contact",
+   "name": "FIRST CONTACT",
+   "desc": "Complete your first lecture.",
+   "icon": "01",
+   "rule": {
+    "type": "lectures_done",
+    "n": 1
+   },
+   "xp": 100
+  },
+  {
+   "id": "shell-dweller",
+   "name": "SHELL DWELLER",
+   "desc": "Complete 5 lectures in Tier 0 or 1.",
+   "icon": "02",
+   "rule": {
+    "type": "tier_lectures",
+    "tiers": [
+     0,
+     1
+    ],
+    "n": 5
+   },
+   "xp": 150
+  },
+  {
+   "id": "operator-in-training",
+   "name": "OPERATOR IN TRAINING",
+   "desc": "Clear Tier 1.",
+   "icon": "03",
+   "rule": {
+    "type": "tier_cleared",
+    "tier": 1
+   },
+   "xp": 500
+  },
+  {
+   "id": "canary-spotted",
+   "name": "CANARY SPOTTED",
+   "desc": "Finish the buffer overflow lab.",
+   "icon": "04",
+   "rule": {
+    "type": "lab_done",
+    "n": 1,
+    "match": "buffer-overflow"
+   },
+   "xp": 250
+  },
+  {
+   "id": "own-the-wire",
+   "name": "OWN THE WIRE",
+   "desc": "Capture and analyse traffic in 3 labs.",
+   "icon": "05",
+   "rule": {
+    "type": "labs_done",
+    "domain": "networking",
+    "n": 3
+   },
+   "xp": 300
+  },
+  {
+   "id": "root-granted",
+   "name": "ROOT GRANTED",
+   "desc": "Gain root on a lab target.",
+   "icon": "06",
+   "rule": {
+    "type": "flag_captured",
+    "kind": "root"
+   },
+   "xp": 400
+  },
+  {
+   "id": "perfect-recall",
+   "name": "PERFECT RECALL",
+   "desc": "Score 100% on any self-test.",
+   "icon": "07",
+   "rule": {
+    "type": "quiz_perfect",
+    "n": 1
+   },
+   "xp": 120
+  },
+  {
+   "id": "unshakeable",
+   "name": "UNSHAKEABLE",
+   "desc": "Maintain a 7-day active duty streak.",
+   "icon": "08",
+   "rule": {
+    "type": "streak",
+    "n": 7
+   },
+   "xp": 350
+  },
+  {
+   "id": "dedicated",
+   "name": "DEDICATED",
+   "desc": "Maintain a 30-day active duty streak.",
+   "icon": "09",
+   "rule": {
+    "type": "streak",
+    "n": 30
+   },
+   "xp": 1200
+  },
+  {
+   "id": "chain-complete",
+   "name": "CHAIN COMPLETE",
+   "desc": "Complete 10 lectures back to back.",
+   "icon": "10",
+   "rule": {
+    "type": "lectures_done",
+    "n": 10
+   },
+   "xp": 400
+  },
+  {
+   "id": "net-operator",
+   "name": "NET OPERATOR",
+   "desc": "Clear Tier 2 (Networking).",
+   "icon": "11",
+   "rule": {
+    "type": "tier_cleared",
+    "tier": 2
+   },
+   "xp": 600
+  },
+  {
+   "id": "exploit-dev",
+   "name": "EXPLOIT DEV",
+   "desc": "Clear Tier 3 (Systems & Exploitation).",
+   "icon": "12",
+   "rule": {
+    "type": "tier_cleared",
+    "tier": 3
+   },
+   "xp": 900
+  },
+  {
+   "id": "domain-master-networking",
+   "name": "CARRIER PIGEON",
+   "desc": "Reach 70% mastery in Networking.",
+   "icon": "13",
+   "rule": {
+    "type": "domain_mastery",
+    "domain": "networking",
+    "pct": 0.7
+   },
+   "xp": 500
+  },
+  {
+   "id": "domain-master-systems",
+   "name": "ASSEMBLER",
+   "desc": "Reach 70% mastery in Systems.",
+   "icon": "14",
+   "rule": {
+    "type": "domain_mastery",
+    "domain": "systems",
+    "pct": 0.7
+   },
+   "xp": 500
+  },
+  {
+   "id": "ctf-solver",
+   "name": "CTF SOLVER",
+   "desc": "Solve your first CTF challenge.",
+   "icon": "15",
+   "rule": {
+    "type": "ctf_solved",
+    "n": 1
+   },
+   "xp": 200
+  },
+  {
+   "id": "ctf-veteran",
+   "name": "CTF VETERAN",
+   "desc": "Solve 10 CTF challenges.",
+   "icon": "16",
+   "rule": {
+    "type": "ctf_solved",
+    "n": 10
+   },
+   "xp": 800
+  },
+  {
+   "id": "lab-rat",
+   "name": "LAB RAT",
+   "desc": "Complete 15 field labs.",
+   "icon": "17",
+   "rule": {
+    "type": "labs_done",
+    "n": 15
+   },
+   "xp": 450
+  },
+  {
+   "id": "lab-legend",
+   "name": "LAB LEGEND",
+   "desc": "Complete 40 field labs.",
+   "icon": "18",
+   "rule": {
+    "type": "labs_done",
+    "n": 40
+   },
+   "xp": 1500
+  },
+  {
+   "id": "half-way",
+   "name": "HALFWAY TO DIRECTOR",
+   "desc": "Reach 15000 merit points.",
+   "icon": "19",
+   "rule": {
+    "type": "xp_reached",
+    "n": 15000
+   },
+   "xp": 1000
+  },
+  {
+   "id": "director-rank",
+   "name": "DIRECTOR",
+   "desc": "Reach the rank of Director.",
+   "icon": "20",
+   "rule": {
+    "type": "rank_reached",
+    "rank": "director"
+   },
+   "xp": 2500
+  },
+  {
+   "id": "graph-builder",
+   "name": "GRAPH BUILDER",
+   "desc": "Touch 25 distinct concepts.",
+   "icon": "21",
+   "rule": {
+    "type": "concepts_seen",
+    "n": 25
+   },
+   "xp": 400
+  },
+  {
+   "id": "polymath",
+   "name": "POLYMATH",
+   "desc": "Achieve 50% mastery in five domains at once.",
+   "icon": "22",
+   "rule": {
+    "type": "domain_count",
+    "pct": 0.5,
+    "n": 5
+   },
+   "xp": 1500
+  },
+  {
+   "id": "capstone",
+   "name": "CAPSTONE GRADUATE",
+   "desc": "Clear Tier 8.",
+   "icon": "23",
+   "rule": {
+    "type": "tier_cleared",
+    "tier": 8
+   },
+   "xp": 5000
+  }
+ ],
+ "courses": {
+  "ad-doctrine": {
+   "id": "ad-doctrine",
+   "title": "AEGIS Doctrine: Active Directory Attacks",
+   "code": "DOC-600",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 5,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "ad"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Kerberos, LDAP, SPNs, delegation and the practical enumeration-and-exploitation sequence that modern AD assessment follows.",
+   "why": "The enterprise is where real engagements live, and AD is the single most exploited service in the world.",
+   "lectures": [
+    {
+     "id": "ad-01",
+     "title": "Active Directory Fundamentals, Forests, Domains and Trusts",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "active-directory",
+      "forest-takeover",
+      "enumeration"
+     ],
+     "note": "notes/ad-01.md"
+    },
+    {
+     "id": "ad-02",
+     "title": "Kerberos Deep Dive: TGTs, Service Tickets and Delegation",
+     "video": null,
+     "duration": 0,
+     "xp": 180,
+     "concepts": [
+      "kerberos",
+      "spn",
+      "pass-the-ticket",
+      "golden-ticket"
+     ],
+     "note": "notes/ad-02.md"
+    },
+    {
+     "id": "ad-03",
+     "title": "LDAP Enumeration and BloodHound Graph Analysis",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "ldap",
+      "bloodhound",
+      "ad-enumeration",
+      "attack-path"
+     ],
+     "note": "notes/ad-03.md"
+    },
+    {
+     "id": "ad-04",
+     "title": "Kerberoasting, AS-REP Roasting and Pass-the-Hash",
+     "video": null,
+     "duration": 0,
+     "xp": 180,
+     "concepts": [
+      "kerberoasting",
+      "asrep-roasting",
+      "pass-the-hash",
+      "ntlm"
+     ],
+     "note": "notes/ad-04.md"
+    },
+    {
+     "id": "ad-05",
+     "title": "Credential Dumping with Impacket and Mimikatz",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "impacket",
+      "mimikatz",
+      "credential-dumping",
+      "lsass-dump"
+     ],
+     "note": "notes/ad-05.md"
+    },
+    {
+     "id": "ad-06",
+     "title": "Pivoting, Tunnelling and Internal Movement",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "pivoting",
+      "tunneling",
+      "proxychains",
+      "chisel",
+      "lateral-movement"
+     ],
+     "note": "notes/ad-06.md"
+    },
+    {
+     "id": "ad-07",
+     "title": "Windows Privilege Escalation and GPO Abuse",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "privilege-escalation-windows",
+      "gpo-abuse",
+      "psexec",
+      "win-rm"
+     ],
+     "note": "notes/ad-07.md"
+    },
+    {
+     "id": "ad-08",
+     "title": "Detection: Signing, LDAP Policies and Logging",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "smb-signing",
+      "relay",
+      "log-analysis",
+      "sigma"
+     ],
+     "note": "notes/ad-08.md"
+    }
+   ]
+  },
+  "automate-boring": {
+   "id": "automate-boring",
+   "title": "Automate the Boring Stuff with Python",
+   "code": "",
+   "provider": "Al Sweigart",
+   "institution": "Free online book",
+   "tier": 1,
+   "kind": "text",
+   "level": "beginner",
+   "domains": [
+    "fundamentals",
+    "linux"
+   ],
+   "url": "https://automatetheboringstuff.com/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Free book. Shell automation, file manipulation, text processing, spreadsheets and the habit of scripting repetitive work.",
+   "why": "Turns manual effort into scripts. In security this is the difference between one host and three hundred.",
+   "lectures": [
+    {
+     "id": "atb-01",
+     "title": "Python Basics and Flow Control",
+     "video": null,
+     "duration": 0,
+     "xp": 90,
+     "concepts": [
+      "python-fundamentals",
+      "boolean-logic"
+     ],
+     "note": "notes/atb-01.md"
+    },
+    {
+     "id": "atb-02",
+     "title": "Shell Scripting and Command-Line Automation",
+     "video": null,
+     "duration": 0,
+     "xp": 130,
+     "concepts": [
+      "bash-scripting",
+      "automation",
+      "pipe-redirection"
+     ],
+     "note": "notes/atb-02.md"
+    },
+    {
+     "id": "atb-03",
+     "title": "Files, Paths, Search and Text Processing",
+     "video": null,
+     "duration": 0,
+     "xp": 120,
+     "concepts": [
+      "find-command",
+      "text-processing",
+      "regex"
+     ],
+     "note": "notes/atb-03.md"
+    },
+    {
+     "id": "atb-04",
+     "title": "Networking Scripts and Sockets",
+     "video": null,
+     "duration": 0,
+     "xp": 130,
+     "concepts": [
+      "sockets",
+      "socket",
+      "python-scripts"
+     ],
+     "note": "notes/atb-04.md"
+    }
+   ]
+  },
+  "berkeley-cs161": {
+   "id": "berkeley-cs161",
+   "title": "CS 161: Introduction to Computer Security",
+   "code": "CS 161",
+   "provider": "UC Berkeley",
+   "institution": "University of California, Berkeley",
+   "tier": 3,
+   "kind": "video",
+   "level": "advanced",
+   "domains": [
+    "systems",
+    "web",
+    "networking"
+   ],
+   "url": "https://fa24.cs161.org/",
+   "playlist": null,
+   "verification": "verified 2026-10-15: 28 per-lecture playlists found in course site HTML",
+   "blurb": "Berkeley's security course - crypto, memory safety, OS security, network security, web security, and machine learning attacks.",
+   "why": "Rigorously proof-oriented where MIT 6.858 is practical. Together they cover the same ground from both directions.",
+   "lectures": [
+    {
+     "id": "cs161-01",
+     "title": "Security Principles and Threat Modeling",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "threat-model",
+      "cia-triad",
+      "attack-surface"
+     ],
+     "note": "notes/cs161-01.md"
+    },
+    {
+     "id": "cs161-02",
+     "title": "Cryptography I: Introduction, IND-CPA",
+     "video": null,
+     "duration": 60,
+     "xp": 150,
+     "concepts": [
+      "symmetric-encryption",
+      "hash-function",
+      "modes-of-operation"
+     ],
+     "note": "notes/cs161-02.md"
+    },
+    {
+     "id": "cs161-03",
+     "title": "Memory Safety and Buffer Overflows",
+     "video": null,
+     "duration": 60,
+     "xp": 160,
+     "concepts": [
+      "buffer-overflow",
+      "stack-canary",
+      "stack-overflow",
+      "strcpy"
+     ],
+     "note": "notes/cs161-03.md"
+    },
+    {
+     "id": "cs161-04",
+     "title": "Exploitation and Mitigations",
+     "video": null,
+     "duration": 60,
+     "xp": 160,
+     "concepts": [
+      "nx-bit",
+      "pie",
+      "rop",
+      "mitigation-audit",
+      "info-leak"
+     ],
+     "note": "notes/cs161-04.md"
+    },
+    {
+     "id": "cs161-05",
+     "title": "OS Security: Privilege Separation",
+     "video": null,
+     "duration": 55,
+     "xp": 140,
+     "concepts": [
+      "privilege-separation",
+      "syscall",
+      "sandbox"
+     ],
+     "note": "notes/cs161-05.md"
+    },
+    {
+     "id": "cs161-06",
+     "title": "Network Security and Firewalls",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "firewall",
+      "tcp-handshake",
+      "ids-ips"
+     ],
+     "note": "notes/cs161-06.md"
+    },
+    {
+     "id": "cs161-07",
+     "title": "Web Security",
+     "video": null,
+     "duration": 55,
+     "xp": 150,
+     "concepts": [
+      "owasp-top-10",
+      "xss",
+      "sql-injection",
+      "csrf"
+     ],
+     "note": "notes/cs161-07.md"
+    },
+    {
+     "id": "cs161-08",
+     "title": "Denial of Service",
+     "video": null,
+     "duration": 55,
+     "xp": 120,
+     "concepts": [
+      "firewall",
+      "network-security-problems"
+     ],
+     "note": "notes/cs161-08.md"
+    }
+   ],
+   "playlist_note": "CS161 does not publish a single course playlist. fa24.cs161.org links 28 individual per-lecture playlists (PLfBkt1-...), one per lecture and per term, alongside exam-prep and discussion walkthroughs. A single `playlist` field cannot represent that. The old value (https://www.youtube.com/@berkeley-cs161/playlists) was a channel page, and harvesting it yields exam walkthroughs rather than lectures.",
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "RESOLVED, no single playlist exists. fa24.cs161.org was fetched and yields 28 individual per-lecture playlists (PLfBkt1-...), one per lecture and per term, mixed with exam-prep and discussion walkthroughs. The previously recorded value was a channel /playlists page, which scrapes into exactly that mixed bag rather than into lectures. AEGIS's 8 lectures are chapter-level groupings of a term's lectures, so the mapping is 1:many. See data/VIDEO_SOURCES.md for the id inventory."
+  },
+  "bloodhound": {
+   "id": "bloodhound",
+   "title": "BloodHound & Attack Path Analysis",
+   "code": "",
+   "provider": "SpecterOps",
+   "institution": "SpecterOps",
+   "tier": 5,
+   "kind": "text",
+   "level": "advanced",
+   "domains": [
+    "ad"
+   ],
+   "url": "https://bloodhound.specterops.io/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "The standard AD graph analysis platform. Collect data, find shortest paths from your foothold to Domain Admin.",
+   "why": "Converts enumeration from a checklist into graph theory - and shows you the shortest path before you start.",
+   "lectures": [
+    {
+     "id": "bh-01",
+     "title": "Data Collection: SharpHound Enumeration",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "active-directory",
+      "ad-enumeration",
+      "ldap"
+     ],
+     "note": "notes/bh-01.md"
+    },
+    {
+     "id": "bh-02",
+     "title": "Reading the Graph: Sessions, Groups and ACLs",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "bloodhound",
+      "attack-path",
+      "access-control"
+     ],
+     "note": "notes/bh-02.md"
+    },
+    {
+     "id": "bh-03",
+     "title": "From Shortest Path to Execution Plan",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "attack-path",
+      "gpo-abuse",
+      "privilege-escalation-windows"
+     ],
+     "note": "notes/bh-03.md"
+    }
+   ]
+  },
+  "capstone-doctrine": {
+   "id": "capstone-doctrine",
+   "title": "AEGIS Doctrine: Capstone Engagement",
+   "code": "DOC-950",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 8,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "fundamentals",
+    "linux",
+    "networking",
+    "systems",
+    "web",
+    "crypto",
+    "re",
+    "ad",
+    "forensics",
+    "osint"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "The full methodology applied end to end against your own range: scope, recon, access, escalation, movement, evidence, report.",
+   "why": "This is the exam. Run it once properly and you will never feel lost on a real engagement again.",
+   "lectures": [
+    {
+     "id": "cap-01",
+     "title": "Engagement Planning and Authorisation",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "scope",
+      "rules-of-engagement",
+      "threat-model"
+     ],
+     "note": "notes/cap-01.md"
+    },
+    {
+     "id": "cap-02",
+     "title": "Reconnaissance and Attack Surface Mapping",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "recon",
+      "passive-recon",
+      "nmap",
+      "subdomain-enum",
+      "attack-surface"
+     ],
+     "note": "notes/cap-02.md"
+    },
+    {
+     "id": "cap-03",
+     "title": "Initial Access and Exploitation",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "exploit-framework",
+      "buffer-overflow",
+      "owasp-top-10",
+      "metasploit"
+     ],
+     "note": "notes/cap-03.md"
+    },
+    {
+     "id": "cap-04",
+     "title": "Privilege Escalation and Lateral Movement",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "linpeas",
+      "privilege-escalation-windows",
+      "lateral-movement",
+      "pivoting"
+     ],
+     "note": "notes/cap-04.md"
+    },
+    {
+     "id": "cap-05",
+     "title": "Evidence, Timeline and Detection Review",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "timeline-analysis",
+      "chain-of-custody",
+      "yara",
+      "sigma"
+     ],
+     "note": "notes/cap-05.md"
+    },
+    {
+     "id": "cap-06",
+     "title": "Reporting and Retrospective",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "pentest-reporting",
+      "risk-likelihood-impact",
+      "defense-in-depth"
+     ],
+     "note": "notes/cap-06.md"
+    }
+   ]
+  },
+  "crypto-practice-doctrine": {
+   "id": "crypto-practice-doctrine",
+   "title": "AEGIS Doctrine: Practical Crypto Attacks & Password Operations",
+   "code": "DOC-500",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 4,
+   "kind": "doctrine",
+   "level": "intermediate",
+   "domains": [
+    "crypto"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "The attacks that actually appear in engagements and CTFs: weak randomness, ECB reuse, padding oracles, JWT abuse and offline cracking.",
+   "why": "Theory tells you what is possible. This tells you what people actually get burned by.",
+   "lectures": [
+    {
+     "id": "cry-d1",
+     "title": "Weak Randomness and Nonce Reuse in Practice",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "entropy-randomness",
+      "nonce",
+      "weak-rng",
+      "asrep-roasting"
+     ],
+     "note": "notes/cry-d1.md"
+    },
+    {
+     "id": "cry-d2",
+     "title": "Padding Oracles and ECB Fingerprints",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "padding-oracle",
+      "ecb",
+      "oracle-attack",
+      "padding"
+     ],
+     "note": "notes/cry-d2.md"
+    },
+    {
+     "id": "cry-d3",
+     "title": "JWT and Token Attacks by Hand",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "jwt",
+      "token-validation",
+      "session-fixation"
+     ],
+     "note": "notes/cry-d3.md"
+    },
+    {
+     "id": "cry-d4",
+     "title": "Offline Password Attacks: john, hashcat, rules and wordlists",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "john-hashcat",
+      "cracking",
+      "hybrid-attack",
+      "hashid",
+      "password-hashing"
+     ],
+     "note": "notes/cry-d4.md"
+    }
+   ]
+  },
+  "cyberdefenders": {
+   "id": "cyberdefenders",
+   "title": "CyberDefenders Blue Team CTF Labs",
+   "code": "",
+   "provider": "CyberDefenders",
+   "institution": "CyberDefenders",
+   "tier": 6,
+   "kind": "platform",
+   "level": "intermediate",
+   "domains": [
+    "forensics"
+   ],
+   "url": "https://cyberdefenders.com/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Free blue-team CTF challenges built from real disk images, memory dumps and network captures.",
+   "why": "The cheapest realistic IR practice available, and every challenge maps onto a lecture in this tier.",
+   "lectures": [
+    {
+     "id": "cd-01",
+     "title": "Getting Started: Accounts, Triage and the Download Flow",
+     "video": null,
+     "duration": 0,
+     "xp": 130,
+     "concepts": [
+      "forensics-lab",
+      "disk-image",
+      "chain-of-custody"
+     ],
+     "note": "notes/cd-01.md"
+    },
+    {
+     "id": "cd-02",
+     "title": "Disk Forensics Challenges",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "autopsy",
+      "timeline-analysis",
+      "file-carving"
+     ],
+     "note": "notes/cd-02.md"
+    },
+    {
+     "id": "cd-03",
+     "title": "Memory Forensics Challenges",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "volatility",
+      "memory-analysis",
+      "forensics-challenge"
+     ],
+     "note": "notes/cd-03.md"
+    },
+    {
+     "id": "cd-04",
+     "title": "Network Forensics Challenges",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "pcap",
+      "wireshark",
+      "forensics-challenge"
+     ],
+     "note": "notes/cd-04.md"
+    }
+   ]
+  },
+  "davidbombal-ccna-core": {
+   "id": "davidbombal-ccna-core",
+   "title": "CCNA Full Course (Deep Protocol Coverage)",
+   "code": "CCNA",
+   "provider": "David Bombal",
+   "institution": "NetworkChuck / David Bombal (CCNA aligned)",
+   "tier": 2,
+   "kind": "video",
+   "level": "intermediate",
+   "domains": [
+    "networking"
+   ],
+   "url": "https://www.networkcli.com/ccna/",
+   "playlist": "PL0JZB-buuP3mE4WNLLqJG8qyb3YWFnZfG",
+   "verification": "verified",
+   "blurb": "The longer-form CCNA series with far deeper protocol coverage - NAT, OSPF, IPv6, security and automation.",
+   "why": "Use this for the protocol depth the practical course skims over, especially NAT and OSPF behaviour.",
+   "lectures": [
+    {
+     "id": "ccnad-01",
+     "title": "OSI, TCP/IP and Encapsulation in Depth",
+     "video": null,
+     "duration": 60,
+     "xp": 130,
+     "concepts": [
+      "osi-model",
+      "tcp-ip-model",
+      "encapsulation"
+     ],
+     "note": "notes/ccnad-01.md"
+    },
+    {
+     "id": "ccnad-02",
+     "title": "IPv4, IPv6, NAT and Port Forwarding",
+     "video": null,
+     "duration": 65,
+     "xp": 140,
+     "concepts": [
+      "nat",
+      "port-forwarding",
+      "ip-address",
+      "firewall"
+     ],
+     "note": "notes/ccnad-02.md"
+    },
+    {
+     "id": "ccnad-03",
+     "title": "Static and Dynamic Routing, OSPF",
+     "video": null,
+     "duration": 65,
+     "xp": 130,
+     "concepts": [
+      "routing",
+      "firewall",
+      "segmentation"
+     ],
+     "note": "notes/ccnad-03.md"
+    },
+    {
+     "id": "ccnad-04",
+     "title": "Wireless, Security and Network Automation",
+     "video": null,
+     "duration": 60,
+     "xp": 120,
+     "concepts": [
+      "wifi-auditing",
+      "misconfiguration",
+      "firewall"
+     ],
+     "note": "notes/ccnad-04.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "14 playlist entries examined against 4 chapter-level lectures. 1:many. 14 playlist entries against 4 chapter-level lectures, and AEGIS's titles are topic-level ('OSI, TCP/IP and Encapsulation in Depth'), each spanning several of the uploader's videos. No entry covers a lecture's whole title, and no entry is uniquely contained, so nothing qualified.",
+   "video_harvest_playlist": "PL0JZB-buuP3mE4WNLLqJG8qyb3YWFnZfG"
+  },
+  "davidbombal-ccna": {
+   "id": "davidbombal-ccna",
+   "title": "Free CCNA 200-301 Complete Practical Course",
+   "code": "CCNA 200-301",
+   "provider": "David Bombal",
+   "institution": "NetworkChuck / David Bombal (CCNA aligned)",
+   "tier": 2,
+   "kind": "video",
+   "level": "beginner",
+   "domains": [
+    "networking"
+   ],
+   "url": "https://davidbombal.com/free-ccna-200-301-course-complete-practical-ccna-v1-1-2025-course-with-real-equipment/",
+   "playlist": "PLw6kwOJVj3MbMZ8B72ZgUryj8OSETC0ds",
+   "verification": "verified",
+   "blurb": "A full CCNA course on real hardware, from cables and devices up through routing, switching and troubleshooting.",
+   "why": "Networking is the foundation of every offensive skill. This is the most complete free CCNA-grade course available.",
+   "lectures": [
+    {
+     "id": "ccna-01",
+     "title": "Devices, Cables, Hubs, Switches and Bridges",
+     "video": null,
+     "duration": 60,
+     "xp": 130,
+     "concepts": [
+      "ethernet-frame",
+      "switching",
+      "mac-address",
+      "mac-table"
+     ],
+     "note": "notes/ccna-01.md"
+    },
+    {
+     "id": "ccna-02",
+     "title": "MAC Addressing, ARP and the Switching Table",
+     "video": null,
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "mac-address",
+      "arp",
+      "mac-table",
+      "broadcast-domain"
+     ],
+     "note": "notes/ccna-02.md"
+    },
+    {
+     "id": "ccna-03",
+     "title": "IP Addressing, Subnetting and CIDR",
+     "video": null,
+     "duration": 70,
+     "xp": 150,
+     "concepts": [
+      "ip-address",
+      "cidr",
+      "subnetting",
+      "binary-numbering"
+     ],
+     "note": "notes/ccna-03.md"
+    },
+    {
+     "id": "ccna-04",
+     "title": "Routers, the Default Gateway and Routing Tables",
+     "video": null,
+     "duration": 65,
+     "xp": 140,
+     "concepts": [
+      "routing",
+      "hop-by-hop",
+      "ttl",
+      "nat"
+     ],
+     "note": "notes/ccna-04.md"
+    },
+    {
+     "id": "ccna-05",
+     "title": "VLANs, Trunking and Inter-VLAN Routing",
+     "video": null,
+     "duration": 65,
+     "xp": 140,
+     "concepts": [
+      "vlan",
+      "trunking",
+      "double-tagging",
+      "broadcast-domain"
+     ],
+     "note": "notes/ccna-05.md"
+    },
+    {
+     "id": "ccna-06",
+     "title": "TCP, UDP and the Three-Way Handshake",
+     "video": null,
+     "duration": 65,
+     "xp": 140,
+     "concepts": [
+      "tcp-handshake",
+      "tcp-state",
+      "tcp-udp",
+      "port"
+     ],
+     "note": "notes/ccna-06.md"
+    },
+    {
+     "id": "ccna-07",
+     "title": "DNS, DHCP and the Application Layer",
+     "video": null,
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "dns",
+      "dhcp",
+      "http-request",
+      "service-enumeration"
+     ],
+     "note": "notes/ccna-07.md"
+    },
+    {
+     "id": "ccna-08",
+     "title": "OSPF, Routing Protocols and Troubleshooting",
+     "video": null,
+     "duration": 70,
+     "xp": 130,
+     "concepts": [
+      "routing",
+      "traceroute",
+      "hop-by-hop"
+     ],
+     "note": "notes/ccna-08.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "37 playlist entries examined against 8 chapter-level lectures. 1:many. 37 playlist entries against 8 chapter-level lectures. The playlist is 'Free CCNA 200-301 Complete Practical Course' and is cut at finer granularity than AEGIS's chapters. Titles verified as the correct CCNA course - the harvest fails on granularity, not on a wrong playlist.",
+   "video_harvest_playlist": "PLw6kwOJVj3MbMZ8B72ZgUryj8OSETC0ds"
+  },
+  "exploit-dev-doctrine": {
+   "id": "exploit-dev-doctrine",
+   "title": "AEGIS Doctrine: Exploit Development Fundamentals",
+   "code": "DOC-400",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 3,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "systems",
+    "re"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Build the MIT 6.858 buffer-overflow target yourself, debug it in gdb, bypass the canary, and understand every mitigation you read about.",
+   "why": "The single most important hands-on exercise in security. Everything about exploitation becomes concrete once you have done it once.",
+   "lectures": [
+    {
+     "id": "ex-01",
+     "title": "Compiling a Vulnerable Target and Auditing Its Protections",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "checksec",
+      "mitigation-audit",
+      "elf-pe-format",
+      "relro"
+     ],
+     "note": "notes/ex-01.md"
+    },
+    {
+     "id": "ex-02",
+     "title": "Mapping the Stack Frame in gdb",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "gdb",
+      "rbp-rsp",
+      "stack-frame",
+      "calling-convention"
+     ],
+     "note": "notes/ex-02.md"
+    },
+    {
+     "id": "ex-03",
+     "title": "Triggering and Observing a Crash",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "buffer-overflow",
+      "stack-overflow",
+      "dynamic-analysis"
+     ],
+     "note": "notes/ex-03.md"
+    },
+    {
+     "id": "ex-04",
+     "title": "Offset Calculation and Canary Leak",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "info-leak",
+      "stack-canary",
+      "__stack_chk_fail",
+      "aslr"
+     ],
+     "note": "notes/ex-04.md"
+    },
+    {
+     "id": "ex-05",
+     "title": "ROP: Ret2libc and System('/bin/sh')",
+     "video": null,
+     "duration": 0,
+     "xp": 180,
+     "concepts": [
+      "rop",
+      "gadgets",
+      "ret2libc",
+      "got-overwrite"
+     ],
+     "note": "notes/ex-05.md"
+    },
+    {
+     "id": "ex-06",
+     "title": "Bypassing NX, PIE and Full RELRO",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "nx-bit",
+      "pie",
+      "relro",
+      "payload-encoding"
+     ],
+     "note": "notes/ex-06.md"
+    }
+   ]
+  },
+  "forensics-doctrine": {
+   "id": "forensics-doctrine",
+   "title": "AEGIS Doctrine: Digital Forensics & Incident Response",
+   "code": "DOC-700",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 6,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "forensics",
+    "systems"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Disk, memory and network forensics with the Kali toolkit: imaging, carving, timelines, and reading an attacker's traces.",
+   "why": "Offence and defence are one knowledge base read in opposite directions. This tier closes the loop.",
+   "lectures": [
+    {
+     "id": "for-01",
+     "title": "Evidence Handling, Imaging and Chain of Custody",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "disk-image",
+      "chain-of-custody",
+      "integrity-hash",
+      "rules-of-engagement"
+     ],
+     "note": "notes/for-01.md"
+    },
+    {
+     "id": "for-02",
+     "title": "Timeline Analysis: Tying Files, Logs and Registry Together",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "timeline-analysis",
+      "timestamps",
+      "log-analysis",
+      "autopsy"
+     ],
+     "note": "notes/for-02.md"
+    },
+    {
+     "id": "for-03",
+     "title": "Memory Forensics with Volatility 3",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "volatility",
+      "memory-analysis",
+      "process-injection-artifact",
+      "/proc-fs"
+     ],
+     "note": "notes/for-03.md"
+    },
+    {
+     "id": "for-04",
+     "title": "File Carving and Hidden Data",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "file-carving",
+      "file-signature",
+      "foremost",
+      "binwalk",
+      "steganography"
+     ],
+     "note": "notes/for-04.md"
+    },
+    {
+     "id": "for-05",
+     "title": "Malware Triage: Static Before Dynamic",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "malware-triage",
+      "yara",
+      "strings",
+      "anti-analysis"
+     ],
+     "note": "notes/for-05.md"
+    },
+    {
+     "id": "for-06",
+     "title": "Detection Engineering with YARA and Sigma",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "yara",
+      "sigma",
+      "log-analysis",
+      "ids-ips"
+     ],
+     "note": "notes/for-06.md"
+    },
+    {
+     "id": "for-07",
+     "title": "Network Forensics from PCAP",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "pcap",
+      "forensics-challenge",
+      "wireshark",
+      "log-analysis"
+     ],
+     "note": "notes/for-07.md"
+    }
+   ]
+  },
+  "impacket": {
+   "id": "impacket",
+   "title": "Impacket Suite",
+   "code": "",
+   "provider": "Fortra",
+   "institution": "Fortra (formerly Secure Authentication)",
+   "tier": 5,
+   "kind": "text",
+   "level": "advanced",
+   "domains": [
+    "ad",
+    "networking"
+   ],
+   "url": "https://github.com/fortra/impacket",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Python implementations of dozens of Windows protocols, shipped as a Kali package. The operator's primary Windows toolkit.",
+   "why": "Learn to drive impacket and you can speak Windows protocols directly rather than through a GUI.",
+   "lectures": [
+    {
+     "id": "imp-01",
+     "title": "secretsdump: Enumerating Shares and Dumping Hashes",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "impacket",
+      "smb",
+      "enum4linux",
+      "credential-dumping"
+     ],
+     "note": "notes/imp-01.md"
+    },
+    {
+     "id": "imp-02",
+     "title": "psexec, wmiexec and smbexec for Remote Execution",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "psexec",
+      "win-rm",
+      "lateral-movement",
+      "impacket"
+     ],
+     "note": "notes/imp-02.md"
+    },
+    {
+     "id": "imp-03",
+     "title": "ntlmrelay, Responder and Relay Attacks",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "relay",
+      "ntlm",
+      "smb-signing",
+      "impacket"
+     ],
+     "note": "notes/imp-03.md"
+    },
+    {
+     "id": "imp-04",
+     "title": "GetUserSPNs, GetNPUsers and Ticket Operations",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "kerberoasting",
+      "asrep-roasting",
+      "kerberos",
+      "pass-the-ticket"
+     ],
+     "note": "notes/imp-04.md"
+    }
+   ]
+  },
+  "kali-doctrine-101": {
+   "id": "kali-doctrine-101",
+   "title": "AEGIS Doctrine: Kali Tool Taxonomy & First Contacts",
+   "code": "DOC-100",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 0,
+   "kind": "doctrine",
+   "level": "absolute-beginner",
+   "domains": [
+    "fundamentals",
+    "linux"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "How Kali is organised, what the tool categories mean, and a first recon contact against your own machine - safely, legally, repeatably.",
+   "why": "Written for day one. Before any course, learn to read Kali as a structured toolbox rather than a pile of 3000 executables.",
+   "lectures": [
+    {
+     "id": "doc-01",
+     "title": "How Kali Is Organised: Recon, Scanning, Exploitation, Forensics",
+     "video": null,
+     "duration": 0,
+     "xp": 100,
+     "concepts": [
+      "kali-tool-taxonomy",
+      "kali-layout",
+      "nmap",
+      "metasploit"
+     ],
+     "note": "notes/doc-01.md"
+    },
+    {
+     "id": "doc-02",
+     "title": "Mandatory Hygiene: Isolated Lab, Snapshots, and Scope",
+     "video": null,
+     "duration": 0,
+     "xp": 120,
+     "concepts": [
+      "rules-of-engagement",
+      "scope",
+      "exploitation-ethics"
+     ],
+     "note": "notes/doc-02.md"
+    },
+    {
+     "id": "doc-03",
+     "title": "First Contact: Scanning Your Own Loopback Interface",
+     "video": null,
+     "duration": 0,
+     "xp": 130,
+     "concepts": [
+      "nmap",
+      "port-scan",
+      "service-fingerprint",
+      "network-discovery"
+     ],
+     "note": "notes/doc-03.md"
+    },
+    {
+     "id": "doc-04",
+     "title": "Reading a Tool's Documentation Like an Operator",
+     "video": null,
+     "duration": 0,
+     "xp": 90,
+     "concepts": [
+      "searchsploit",
+      "vulnerability-scanner",
+      "service-fingerprint"
+     ],
+     "note": "notes/doc-04.md"
+    }
+   ]
+  },
+  "kali-revealed": {
+   "id": "kali-revealed",
+   "title": "Kali Linux Revealed",
+   "code": "",
+   "provider": "Offensive Security",
+   "institution": "Offensive Security, Inc.",
+   "tier": 0,
+   "kind": "text",
+   "level": "absolute-beginner",
+   "domains": [
+    "fundamentals",
+    "linux"
+   ],
+   "url": "https://www.offsec.com/kali-training/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "The official free book. Everything specific to Kali itself, from installation and hardware requirements to understanding what the tool collection actually is.",
+   "why": "Read this first. It answers the question every new Kali user has: what exactly did I just install, and why does it look nothing like my old desktop?",
+   "lectures": [
+    {
+     "id": "kr-01",
+     "title": "Why Kali Exists and What It Is",
+     "video": null,
+     "duration": 0,
+     "xp": 80,
+     "concepts": [
+      "kali-tool-taxonomy",
+      "kali-layout",
+      "open-closed"
+     ],
+     "note": "notes/kr-01.md"
+    },
+    {
+     "id": "kr-02",
+     "title": "Installing Kali: Live, Virtual Machine, or Dual Boot",
+     "video": null,
+     "duration": 0,
+     "xp": 100,
+     "concepts": [
+      "virtualization",
+      "filesystem-tree"
+     ],
+     "note": "notes/kr-02.md"
+    },
+    {
+     "id": "kr-03",
+     "title": "Your First Session: Terminal, User, and HOME",
+     "video": null,
+     "duration": 0,
+     "xp": 100,
+     "concepts": [
+      "shell",
+      "terminal-tty",
+      "working-directory",
+      "uid-gid-root"
+     ],
+     "note": "notes/kr-03.md"
+    },
+    {
+     "id": "kr-04",
+     "title": "The Kali Directory Layout",
+     "video": null,
+     "duration": 0,
+     "xp": 100,
+     "concepts": [
+      "kali-layout",
+      "filesystem-tree",
+      "wordlists"
+     ],
+     "note": "notes/kr-04.md"
+    },
+    {
+     "id": "kr-05",
+     "title": "Keeping Kali Current Without Breaking It",
+     "video": null,
+     "duration": 0,
+     "xp": 100,
+     "concepts": [
+      "package-manager",
+      "dependency-conflict"
+     ],
+     "note": "notes/kr-05.md"
+    },
+    {
+     "id": "kr-06",
+     "title": "Building an Isolated Lab Range",
+     "video": null,
+     "duration": 0,
+     "xp": 120,
+     "concepts": [
+      "rules-of-engagement",
+      "scope",
+      "virtualization"
+     ],
+     "note": "notes/kr-06.md"
+    }
+   ]
+  },
+  "lab-range-doctrine": {
+   "id": "lab-range-doctrine",
+   "title": "AEGIS Doctrine: Building Your Authorised Lab Range",
+   "code": "DOC-900",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 8,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "fundamentals",
+    "networking"
+   ],
+   "url": "https://sourceforge.net/projects/metasploitable/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "How to stand up a legal practice range on your own hardware: intentionally vulnerable hosts, isolated networking, and snapshots.",
+   "why": "Every exercise in AEGIS is written against a range you own. This is how you build one.",
+   "lectures": [
+    {
+     "id": "lab-01",
+     "title": "Virtualisation, Snapshots and Network Isolation",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "virtualization",
+      "rules-of-engagement",
+      "namespace-container"
+     ],
+     "note": "notes/lab-01.md"
+    },
+    {
+     "id": "lab-02",
+     "title": "Deploying Metasploitable and Other Intentionally Vulnerable Hosts",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "metasploitable",
+      "metasploit",
+      "exploitation-ethics"
+     ],
+     "note": "notes/lab-02.md"
+    },
+    {
+     "id": "lab-03",
+     "title": "Building a Domain Lab for AD Practice",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "active-directory",
+      "ad-enumeration",
+      "bloodhound"
+     ],
+     "note": "notes/lab-03.md"
+    },
+    {
+     "id": "lab-04",
+     "title": "Capture the Traffic, Break the Machine, Document It",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "pcap",
+      "chain-of-custody",
+      "pentest-reporting",
+      "timeline-analysis"
+     ],
+     "note": "notes/lab-04.md"
+    }
+   ],
+   "doctrine_url_ok": true,
+   "doctrine_url_note": "Deliberate reference to metasploitable. The intentionally-vulnerable target the doctrine teaches the reader to download and isolate. It is the lab's subject matter, not the course's home."
+  },
+  "linux-privesc-doctrine": {
+   "id": "linux-privesc-doctrine",
+   "title": "AEGIS Doctrine: Linux Enumeration & Privilege Escalation",
+   "code": "DOC-210",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 1,
+   "kind": "doctrine",
+   "level": "intermediate",
+   "domains": [
+    "linux",
+    "systems"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "The enumeration checklist, applied live against your own Kali and a deliberately misconfigured local lab VM.",
+   "why": "The single most transferable offensive habit: read the machine carefully before touching anything. 80% of escalation is enumeration.",
+   "lectures": [
+    {
+     "id": "pr-01",
+     "title": "Enumeration with linpeas and Manual Verification",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "linpeas",
+      "enumeration",
+      "/proc-fs",
+      "strace"
+     ],
+     "note": "notes/pr-01.md"
+    },
+    {
+     "id": "pr-02",
+     "title": "File Permissions, SUID and Writable Service Abuse",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "file-permissions",
+      "suid-binaries",
+      "suid-setgid",
+      "systemd"
+     ],
+     "note": "notes/pr-02.md"
+    },
+    {
+     "id": "pr-03",
+     "title": "Cron, systemd and PATH Hijacking",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "cron",
+      "systemd",
+      "race-condition",
+      "privilege-escalation-linux"
+     ],
+     "note": "notes/pr-03.md"
+    },
+    {
+     "id": "pr-04",
+     "title": "Credentials on Disk: Config Files, History, SSH Keys",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "credential-exposure",
+      "ssh-keys",
+      "environment-variable",
+      "package-manager"
+     ],
+     "note": "notes/pr-04.md"
+    },
+    {
+     "id": "pr-05",
+     "title": "Kernel Exploits and Knowing When Not To",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "kernel-exploit",
+      "dirty-pipe",
+      "searchsploit",
+      "vulnerability-risk-exploit"
+     ],
+     "note": "notes/pr-05.md"
+    }
+   ]
+  },
+  "liveoverflow-x86": {
+   "id": "liveoverflow-x86",
+   "title": "x86-64 Assembly and Reverse Engineering",
+   "code": "",
+   "provider": "LiveOverflow",
+   "institution": "LiveOverflow",
+   "tier": 3,
+   "kind": "video",
+   "level": "advanced",
+   "domains": [
+    "re",
+    "systems"
+   ],
+   "url": "https://www.youtube.com/@LiveOverflow",
+   "playlist": "https://www.youtube.com/playlist?list=PLhixgUqwRTjxglIswKp9mpkfPNfHkzyeN",
+   "verification": "unverified",
+   "blurb": "The clearest free assembly and reverse-engineering series on the internet, from CPU architecture up to real exploit analysis.",
+   "why": "Assembly is the actual language exploitation happens in. This is the gap between 'I ran nmap' and 'I understand why the shell connected'.",
+   "lectures": [
+    {
+     "id": "lo-01",
+     "title": "Binary, Hex and the CPU Fetch-Execute Cycle",
+     "video": null,
+     "duration": 50,
+     "xp": 130,
+     "concepts": [
+      "binary-numbering",
+      "bit-byte",
+      "elf-pe-format"
+     ],
+     "note": "notes/lo-01.md"
+    },
+    {
+     "id": "lo-02",
+     "title": "Memory, the Stack and Calling Conventions",
+     "video": null,
+     "duration": 55,
+     "xp": 150,
+     "concepts": [
+      "stack-frame",
+      "calling-convention",
+      "rbp-rsp"
+     ],
+     "note": "notes/lo-02.md"
+    },
+    {
+     "id": "lo-03",
+     "title": "Instructions, Registers and Flags",
+     "video": null,
+     "duration": 55,
+     "xp": 140,
+     "concepts": [
+      "register-model",
+      "x86-asm",
+      "disassembly"
+     ],
+     "note": "notes/lo-03.md"
+    },
+    {
+     "id": "lo-04",
+     "title": "Compilers, Linking and the ELF Format",
+     "video": null,
+     "duration": 50,
+     "xp": 130,
+     "concepts": [
+      "elf-pe-format",
+      "static-analysis",
+      "lazy-binding"
+     ],
+     "note": "notes/lo-04.md"
+    },
+    {
+     "id": "lo-05",
+     "title": "Debugging with gdb and Reading Disassembly",
+     "video": null,
+     "duration": 60,
+     "xp": 150,
+     "concepts": [
+      "gdb",
+      "disassembly",
+      "breakpoints",
+      "dynamic-analysis"
+     ],
+     "note": "notes/lo-05.md"
+    }
+   ],
+   "playlist_note": "RESOLVED 2026-10-15. The recorded url was the channel handle; LiveOverflow organises its x86 material into topic playlists, and the right one is 'Binary Exploitation / Memory Corruption by LiveOverflow' (PLhixgUqwRTjxglIswKp9mpkfPNfHkzyeN, 59 entries, enumerated from the channel's playlist listing). It is a topic collection, not a linear course: entries are individually titled 'bin 0xNN' and the 'bin' numbers run out of order (0x08, 0x0C, 0x2B, 0x10, 0x2C), so position carries no meaning.",
+   "video_harvest_done": true,
+   "video_harvest_note": "1:many. 59 playlist entries against 5 chapter-level lectures. No entry's title covers a whole lecture, so nothing qualified for a single `video` id. The mapping is nonetheless identifiable, and is recorded here so a future `sources:` pass can use it without re-deriving it:\n  lo-01 Binary, Hex and the CPU Fetch-Execute Cycle\n         mT1V7IL2FHY  The deal with numbers: hexadecimal, binary and decimals (bin 0x08)\n         6jSKldt7Eqs  How a CPU works and Introduction to Assembler (bin 0x04)\n  lo-02 Memory, the Stack and Calling Conventions\n         Y-4WHf0of6Y  Smashing the Stack for Fun and Profit (setuid, ssh)\n         HSlhY4Uy8SA  First Exploit! Buffer Overflow with Shellcode (bin 0x0E)\n  lo-03 Instructions, Registers and Flags\n         6jSKldt7Eqs  How a CPU works and Introduction to Assembler (bin 0x04)\n         navuBR4aJSs  Introduction to Linux - Installation and the Terminal (bin 0x01)\n  lo-04 Compilers, Linking and the ELF Format\n         OZvc-c1OLnM  Finding a Parser Differential in loading ELF\n         vXWHmucgZW0  Reverse engineering C programs (64bit vs 32bit) (bin 0x10)\n         pphfcaGnWSA  Cannot access memory at address // Debugging PIE Binaries\n  lo-05 Debugging with gdb and Reading Disassembly\n         3NTXFUxcKPc  Simple Tools and Techniques for Reversing a binary (bin 0x06)\n         re4teYmSoXA  Exploit Fails? Debug Your Shellcode (bin 0x2B)\nNote the overlap: 6jSKldt7Eqs genuinely serves both lo-01 and lo-03, which is precisely the shape a single-id field cannot represent. Picking one video per lecture would understate the source and imply a correspondence that is not there.",
+   "video_harvest_ran": "2026-10-15"
+  },
+  "mit-60001": {
+   "id": "mit-60001",
+   "title": "Introduction to Computer Science and Programming in Python",
+   "code": "6.0001",
+   "provider": "MIT OpenCourseWare",
+   "institution": "Massachusetts Institute of Technology",
+   "tier": 0,
+   "kind": "video",
+   "level": "absolute-beginner",
+   "domains": [
+    "fundamentals"
+   ],
+   "url": "https://ocw.mit.edu/courses/6-0001-introduction-to-computer-science-and-programming-in-python-fall-2016/",
+   "playlist": null,
+   "verification": "verified 2026-10-15: 0 YouTube ids in course page source",
+   "blurb": "The standard first programming course. Variables, conditionals, loops, functions and the mental model of writing code at all.",
+   "why": "Needed for scripting exploits, parsing tool output and writing your own recon. Study the first ~10 lectures; the OOP half is optional for now.",
+   "lectures": [
+    {
+     "id": "py-01",
+     "title": "Branching, Conditionals, Iteration",
+     "video": null,
+     "duration": 55,
+     "xp": 90,
+     "concepts": [
+      "python-fundamentals",
+      "boolean-logic"
+     ],
+     "note": "notes/py-01.md"
+    },
+    {
+     "id": "py-02",
+     "title": "Functions, Decomposition, and Scope",
+     "video": null,
+     "duration": 55,
+     "xp": 90,
+     "concepts": [
+      "python-fundamentals"
+     ],
+     "note": "notes/py-02.md"
+    },
+    {
+     "id": "py-03",
+     "title": "Strings, Files and Reading Data",
+     "video": null,
+     "duration": 55,
+     "xp": 100,
+     "concepts": [
+      "python-scripts",
+      "text-processing"
+     ],
+     "note": "notes/py-03.md"
+    },
+    {
+     "id": "py-04",
+     "title": "Lists, Dictionaries and Tuples",
+     "video": null,
+     "duration": 55,
+     "xp": 100,
+     "concepts": [
+      "python-scripts",
+      "jq"
+     ],
+     "note": "notes/py-04.md"
+    },
+    {
+     "id": "py-05",
+     "title": "Exceptions, and Why Error Messages Are Documentation",
+     "video": null,
+     "duration": 55,
+     "xp": 90,
+     "concepts": [
+      "python-fundamentals",
+      "dynamic-analysis"
+     ],
+     "note": "notes/py-05.md"
+    },
+    {
+     "id": "py-06",
+     "title": "Sockets: Talking to Ports Directly",
+     "video": null,
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "sockets",
+      "socket",
+      "banner-grabbing",
+      "python-scripts"
+     ],
+     "note": "notes/py-06.md"
+    }
+   ],
+   "playlist_note": "MIT OpenCourseWare hosts the 6.0001 videos on ocw.mit.edu, not on YouTube. The course page links only youtube.com/mitocw (the channel). There is no per-lecture YouTube id to harvest; the videos are addressed by OCW resource path instead. `video` is a YouTube id field by design and is left null.",
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "RESOLVED, no YouTube id can exist. The OCW course page was fetched and contains zero YouTube ids - it links only the MIT OCW channel. 6.0001's videos are hosted on ocw.mit.edu and addressed by OCW resource path, so a YouTube-id field is the wrong shape for this course entirely."
+  },
+  "mit-6858": {
+   "id": "mit-6858",
+   "title": "Computer System Security",
+   "code": "6.858",
+   "provider": "MIT CSAIL",
+   "institution": "Massachusetts Institute of Technology",
+   "tier": 3,
+   "kind": "video",
+   "level": "advanced",
+   "domains": [
+    "systems",
+    "re"
+   ],
+   "url": "https://css.csail.mit.edu/6.858/2020/",
+   "playlist": "PLA6Ht2dJt3SKN3z4S6nOvuJtesDXbly7S",
+   "verification": "verified",
+   "blurb": "Threat models, buffer overflows, privilege separation, sandboxes, enclaves, symbolic execution, browser and network security, timing attacks.",
+   "why": "The definitive systems-security course. Lecture 4 alone justifies the tier, and the lab is the canonical buffer-overflow exercise in the field.",
+   "lectures": [
+    {
+     "id": "mit858-01",
+     "title": "Introduction and Threat Models",
+     "video": "x6QsaB2aSmU",
+     "duration": 62,
+     "xp": 140,
+     "concepts": [
+      "threat-model",
+      "buffer-overflow",
+      "attack-surface"
+     ],
+     "note": "notes/mit858-01.md"
+    },
+    {
+     "id": "mit858-02",
+     "title": "Security Architecture",
+     "video": "NOY01nuR5Tg",
+     "duration": 62,
+     "xp": 130,
+     "concepts": [
+      "defense-in-depth",
+      "privilege-separation",
+      "least-privilege"
+     ],
+     "note": "notes/mit858-02.md"
+    },
+    {
+     "id": "mit858-03",
+     "title": "User Authentication",
+     "video": "hOydIL0Lx5k",
+     "duration": 62,
+     "xp": 130,
+     "concepts": [
+      "password-hashing",
+      "credential-exposure",
+      "asymmetric-encryption"
+     ],
+     "note": "notes/mit858-03.md"
+    },
+    {
+     "id": "mit858-04",
+     "title": "Buffer Overflow Defences",
+     "video": "rCsYWLRIq64",
+     "duration": 62,
+     "xp": 160,
+     "concepts": [
+      "buffer-overflow",
+      "stack-canary",
+      "nx-bit",
+      "aslr",
+      "rop"
+     ],
+     "note": "notes/mit858-04.md"
+    },
+    {
+     "id": "mit858-05",
+     "title": "Privilege Separation",
+     "video": "f-jmnDYoKRA",
+     "duration": 62,
+     "xp": 140,
+     "concepts": [
+      "privilege-separation",
+      "least-privilege",
+      "attack-surface"
+     ],
+     "note": "notes/mit858-05.md"
+    },
+    {
+     "id": "mit858-06",
+     "title": "Software Fault Isolation",
+     "video": "0wTRMkwxr2s",
+     "duration": 62,
+     "xp": 140,
+     "concepts": [
+      "sandbox",
+      "seccomp",
+      "namespace-container",
+      "capabilities"
+     ],
+     "note": "notes/mit858-06.md"
+    },
+    {
+     "id": "mit858-07",
+     "title": "Enclaves",
+     "video": "shTEOoySk1I",
+     "duration": 62,
+     "xp": 140,
+     "concepts": [
+      "enclave",
+      "enclave-attack",
+      "privilege-separation"
+     ],
+     "note": "notes/mit858-07.md"
+    },
+    {
+     "id": "mit858-10",
+     "title": "Symbolic Execution",
+     "video": "-t85LW_nwck",
+     "duration": 62,
+     "xp": 150,
+     "concepts": [
+      "angr",
+      "fuzzing",
+      "protocol-analysis"
+     ],
+     "note": "notes/mit858-10.md"
+    },
+    {
+     "id": "mit858-11",
+     "title": "Web Security Model",
+     "video": "L7x2Fi9O56M",
+     "duration": 62,
+     "xp": 140,
+     "concepts": [
+      "browser-model",
+      "same-origin-policy",
+      "owasp-top-10"
+     ],
+     "note": "notes/mit858-11.md"
+    },
+    {
+     "id": "mit858-12",
+     "title": "Network Security",
+     "video": "2SEF3LgFZ-4",
+     "duration": 62,
+     "xp": 130,
+     "concepts": [
+      "firewall",
+      "ids-ips",
+      "network-security-problems"
+     ],
+     "note": "notes/mit858-12.md"
+    },
+    {
+     "id": "mit858-13",
+     "title": "Secure Channels",
+     "video": "QgaSDpj0b1o",
+     "duration": 62,
+     "xp": 150,
+     "concepts": [
+      "key-exchange",
+      "asymmetric-encryption",
+      "man-in-the-middle-crypto"
+     ],
+     "note": "notes/mit858-13.md"
+    },
+    {
+     "id": "mit858-14",
+     "title": "Certificates",
+     "video": "X9ksxGfVxqk",
+     "duration": 62,
+     "xp": 140,
+     "concepts": [
+      "certificate",
+      "pki",
+      "tls-handshake"
+     ],
+     "note": "notes/mit858-14.md"
+    },
+    {
+     "id": "mit858-18",
+     "title": "CPU Timing Attacks",
+     "video": "505cQLxqi9M",
+     "duration": 62,
+     "xp": 150,
+     "concepts": [
+      "cpu-timing-attack",
+      "side-channel",
+      "speculation",
+      "constant-time"
+     ],
+     "note": "notes/mit858-18.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "COMPLETE, 13/13. 23 playlist entries; the 12 harvested ids were selected by lecture-number suffix AND confirmed topic agreement. mit858-01 and mit858-18 were already mapped beforehand. Every id re-fetched from YouTube and re-scored: 13/13 correct.",
+   "video_harvest_playlist": "PLA6Ht2dJt3SKN3z4S6nOv"
+  },
+  "mit-6s081": {
+   "id": "mit-6s081",
+   "title": "Operating System Engineering",
+   "code": "6.S081",
+   "provider": "MIT PDOS",
+   "institution": "Massachusetts Institute of Technology",
+   "tier": 1,
+   "kind": "video",
+   "level": "intermediate",
+   "domains": [
+    "linux",
+    "systems"
+   ],
+   "url": "https://pdos.csail.mit.edu/6.S081/2020/",
+   "playlist": "PLTsf9UeqkReZHXWY9yJvTwLJWYYPcKEqK",
+   "verification": "verified",
+   "blurb": "Build a real operating system in xv6. Processes, system calls, virtual memory, filesystems and concurrency - taught by making them.",
+   "why": "This is where the OS stops being magic. Every later tier assumes you understand what a system call is and why isolation exists.",
+   "lectures": [
+    {
+     "id": "os-01",
+     "title": "Introduction and Examples",
+     "video": "J3LCzufEYt0",
+     "duration": 55,
+     "xp": 110,
+     "concepts": [
+      "kernel-userspace",
+      "open-closed"
+     ],
+     "note": "notes/os-01.md"
+    },
+    {
+     "id": "os-02",
+     "title": "C and GDB",
+     "video": null,
+     "duration": 55,
+     "xp": 120,
+     "concepts": [
+      "gdb",
+      "c-fundamentals",
+      "dynamic-analysis"
+     ],
+     "note": "notes/os-02.md"
+    },
+    {
+     "id": "os-03",
+     "title": "OS Organization and System Calls",
+     "video": "bKfeeIRWrbQ",
+     "duration": 60,
+     "xp": 130,
+     "concepts": [
+      "syscall",
+      "kernel-userspace",
+      "syscall-table"
+     ],
+     "note": "notes/os-03.md"
+    },
+    {
+     "id": "os-04",
+     "title": "Calling Convention and Stack Frames",
+     "video": "_lsMqF9nJLo",
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "calling-convention",
+      "stack-frame",
+      "rbp-rsp"
+     ],
+     "note": "notes/os-04.md"
+    },
+    {
+     "id": "os-05",
+     "title": "Isolation Mechanisms",
+     "video": null,
+     "duration": 60,
+     "xp": 130,
+     "concepts": [
+      "privilege-separation",
+      "virtual-memory",
+      "sandbox"
+     ],
+     "note": "notes/os-05.md"
+    },
+    {
+     "id": "os-06",
+     "title": "Virtual Memory and Page Tables",
+     "video": "NUf1ST0Yrr0",
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "virtual-memory",
+      "aslr",
+      "page-fault"
+     ],
+     "note": "notes/os-06.md"
+    },
+    {
+     "id": "os-07",
+     "title": "File Systems",
+     "video": "-PXQ7rX9LKA",
+     "duration": 60,
+     "xp": 130,
+     "concepts": [
+      "filesystem-tree",
+      "inode",
+      "mount"
+     ],
+     "note": "notes/os-07.md"
+    },
+    {
+     "id": "os-08",
+     "title": "Concurrency and Threads",
+     "video": null,
+     "duration": 60,
+     "xp": 130,
+     "concepts": [
+      "process-vs-thread",
+      "race-condition"
+     ],
+     "note": "notes/os-08.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "PARTIAL, 5/8, and the shortfall is structural rather than a gap. The playlist is the Fall 2020 edition, a re-cut of the course the notes were written against: in the playlist Lecture 4 is Page Tables and Lecture 5 is Calling Convention, whereas the catalogue's os-04/os-06 have those two the other way round. Those are recorded as explicit NUMBER_MAP overrides rather than left to fuzzy matching. os-02 ('C and GDB') has no counterpart - this edition has no Lecture 2, the numbering jumps 1 -> 3. os-05 ('Isolation Mechanisms') and os-08 ('Concurrency and Threads') were refused: Lecture 6 is 'Isolation & System Call Entry/Exit' and Lecture 10 is 'Multiprocessors and Locks', neither of which states the lecture's topic, and both have plausible alternative lectures nearby.",
+   "video_harvest_playlist": "PLTsf9UeqkReZHXWY9yJvTwLJWYYPcKEqK"
+  },
+  "mit-missing-semester": {
+   "id": "mit-missing-semester",
+   "title": "The Missing Semester of Your CS Education",
+   "code": "",
+   "provider": "MIT CSAIL",
+   "institution": "Massachusetts Institute of Technology",
+   "tier": 0,
+   "kind": "video",
+   "level": "beginner",
+   "domains": [
+    "linux",
+    "fundamentals"
+   ],
+   "url": "https://missing.csail.mit.edu/",
+   "playlist": "PLyzOVJj3bHQuloKGG59rS43e29ro7I57J",
+   "verification": "verified",
+   "blurb": "Shell, scripting, editor, version control, data wrangling. The course every CS degree assumes you already had, and almost nobody does.",
+   "why": "This is the single highest-value course in the entire catalog for someone who moved to Linux yesterday. Lectures 1-2 alone will double your terminal fluency.",
+   "lectures": [
+    {
+     "id": "ms-01",
+     "title": "Course Overview & The Shell",
+     "video": "Z56Jmr9Z34Q",
+     "duration": 60,
+     "xp": 120,
+     "concepts": [
+      "shell",
+      "terminal-tty",
+      "working-directory"
+     ],
+     "note": "notes/ms-01.md"
+    },
+    {
+     "id": "ms-02",
+     "title": "Shell Tools & Scripting",
+     "video": "kgII-YWo3Zw",
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "pipe-redirection",
+      "text-processing",
+      "bash-scripting",
+      "file-descriptor"
+     ],
+     "note": "notes/ms-02.md"
+    },
+    {
+     "id": "ms-03",
+     "title": "The Command Line Environment",
+     "video": "e8BO_dYxk5c",
+     "duration": 55,
+     "xp": 120,
+     "concepts": [
+      "environment-variable",
+      "shell",
+      "automation-pipelines"
+     ],
+     "note": "notes/ms-03.md"
+    },
+    {
+     "id": "ms-04",
+     "title": "Version Control (Git)",
+     "video": "2sjqTHE0zok",
+     "duration": 60,
+     "xp": 110,
+     "concepts": [
+      "automation",
+      "kali-layout"
+     ],
+     "note": "notes/ms-04.md"
+    },
+    {
+     "id": "ms-05",
+     "title": "Debugging and Profiling",
+     "video": "l812pUnKxME",
+     "duration": 55,
+     "xp": 120,
+     "concepts": [
+      "gdb",
+      "strace",
+      "dynamic-analysis"
+     ],
+     "note": "notes/ms-05.md"
+    },
+    {
+     "id": "ms-06",
+     "title": "Metaprogramming and Build Systems",
+     "video": "_Ms1Z4xfqv4",
+     "duration": 50,
+     "xp": 100,
+     "concepts": [
+      "automation",
+      "package-manager"
+     ],
+     "note": "notes/ms-06.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "COMPLETE, 6/6. 11 playlist entries; the 2020 IAP playlist interleaves Editors (Lec 3) and Data Wrangling (Lec 4) as standalone lectures, which this catalogue folds into other chapters. That offset is a recorded NUMBER_MAP override, not a fuzzy guess - ms-03 maps to Lecture 5, not Lecture 3. All 6 re-fetched and re-scored: 6/6 correct.",
+   "video_harvest_playlist": "PLyzOVJj3bHQuloKGG59rS43e29ro7I57J"
+  },
+  "neso-networks": {
+   "id": "neso-networks",
+   "title": "Computer Networks",
+   "code": "",
+   "provider": "Neso Academy",
+   "institution": "Neso Academy (NPTEL-aligned)",
+   "tier": 2,
+   "kind": "video",
+   "level": "intermediate",
+   "domains": [
+    "networking"
+   ],
+   "url": "https://www.nesoacademy.org/ec/03-computer-networks",
+   "playlist": "PLBlnK6fEyqRgneraVKkEXrwyLVx2vJUvt",
+   "verification": "verified",
+   "blurb": "144 lectures walking the stack bottom-up: physical, data link, network, transport and application layers.",
+   "why": "Rigorous protocol theory with worked numeric examples. Where the CCNA courses are practical, this builds the model you reason from.",
+   "lectures": [
+    {
+     "id": "neso-n-1",
+     "title": "Network Models, OSI and TCP/IP Stacks",
+     "video": null,
+     "duration": 50,
+     "xp": 120,
+     "concepts": [
+      "osi-model",
+      "tcp-ip-model",
+      "encapsulation"
+     ],
+     "note": "notes/neso-n-1.md"
+    },
+    {
+     "id": "neso-n-2",
+     "title": "Data Link Layer: Framing, MAC, Error Control",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "ethernet-frame",
+      "mac-address",
+      "switching"
+     ],
+     "note": "notes/neso-n-2.md"
+    },
+    {
+     "id": "neso-n-3",
+     "title": "MAC Protocols, CSMA/CD and Switching",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "switching",
+      "mac-table",
+      "broadcast-domain"
+     ],
+     "note": "notes/neso-n-3.md"
+    },
+    {
+     "id": "neso-n-4",
+     "title": "Network Layer: IP, Subnetting, Routing",
+     "video": null,
+     "duration": 55,
+     "xp": 140,
+     "concepts": [
+      "ip-address",
+      "subnetting",
+      "cidr",
+      "routing"
+     ],
+     "note": "notes/neso-n-4.md"
+    },
+    {
+     "id": "neso-n-5",
+     "title": "Transport Layer: TCP and UDP",
+     "video": null,
+     "duration": 55,
+     "xp": 140,
+     "concepts": [
+      "tcp-handshake",
+      "tcp-state",
+      "tcp-udp",
+      "port"
+     ],
+     "note": "notes/neso-n-5.md"
+    },
+    {
+     "id": "neso-n-6",
+     "title": "Application Layer: DNS, DHCP, HTTP, SMTP",
+     "video": null,
+     "duration": 55,
+     "xp": 140,
+     "concepts": [
+      "dns",
+      "dhcp",
+      "http-request",
+      "smtp"
+     ],
+     "note": "notes/neso-n-6.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "33 playlist entries examined against 6 chapter-level lectures. 1:many. 33 playlist entries against 6 chapter-level lectures; Neso splits subtopics (e.g. each scheduling algorithm is its own video) that AEGIS deliberately folds into one chapter of notes.",
+   "video_harvest_playlist": "PLBlnK6fEyqRgneraVKkEXrwyLVx2vJUvt"
+  },
+  "neso-os": {
+   "id": "neso-os",
+   "title": "Introduction to Operating Systems",
+   "code": "",
+   "provider": "Neso Academy",
+   "institution": "Neso Academy (NPTEL-aligned)",
+   "tier": 1,
+   "kind": "video",
+   "level": "intermediate",
+   "domains": [
+    "linux",
+    "systems"
+   ],
+   "url": "https://www.nesoacademy.org/cs/03-operating-system",
+   "playlist": "PLBlnK6fEyqRiVhbXDGLXDk_OQAeuVcp2O",
+   "verification": "verified",
+   "blurb": "77 short lectures covering storage structure, I/O, processes, scheduling, synchronisation and deadlocks at exam-standard depth.",
+   "why": "Pairs with 6.S081. Where xv6 shows you how, Neso shows you the vocabulary and the taxonomy you will meet in documentation.",
+   "lectures": [
+    {
+     "id": "neso-os-1",
+     "title": "Basics of OS: Computer System Operation & Storage Structure",
+     "video": "VjPgYcQqqN0",
+     "duration": 50,
+     "xp": 120,
+     "concepts": [
+      "kernel-userspace",
+      "filesystem-tree",
+      "virtual-memory"
+     ],
+     "note": "notes/neso-os-1.md"
+    },
+    {
+     "id": "neso-os-2",
+     "title": "I/O Structure and System Calls",
+     "video": "lhToWeuWWfw",
+     "duration": 50,
+     "xp": 120,
+     "concepts": [
+      "syscall",
+      "file-descriptor",
+      "mount"
+     ],
+     "note": "notes/neso-os-2.md"
+    },
+    {
+     "id": "neso-os-3",
+     "title": "Processes, Threads and Process Control",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "process-vs-thread",
+      "syscall",
+      "service-enumeration"
+     ],
+     "note": "notes/neso-os-3.md"
+    },
+    {
+     "id": "neso-os-4",
+     "title": "Scheduling and Synchronisation",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "process-vs-thread",
+      "race-condition"
+     ],
+     "note": "notes/neso-os-4.md"
+    },
+    {
+     "id": "neso-os-5",
+     "title": "Deadlocks and Classical Problems",
+     "video": "7bnpFpYZtVk",
+     "duration": 50,
+     "xp": 120,
+     "concepts": [
+      "race-condition",
+      "concurrency"
+     ],
+     "note": "notes/neso-os-5.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "PARTIAL, 3/5, and again the shortfall is granularity. The playlist is a 77-entry topic collection, not a linear course: Neso splits subtopics into separate videos (each scheduling algorithm is its own upload) where this catalogue deliberately folds them into one chapter of notes. neso-os-3 and neso-os-4 were refused because no single entry's title covers the whole chapter.",
+   "video_harvest_playlist": "PLBlnK6fEyqRiVhbXDGLXDk_OQAeuVcp2O"
+  },
+  "osint-doctrine": {
+   "id": "osint-doctrine",
+   "title": "AEGIS Doctrine: OSINT & Operational Tradecraft",
+   "code": "DOC-800",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 7,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "osint"
+   ],
+   "url": "https://osintframework.com/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Passive intelligence collection, verification discipline, and the ethical line between research and social engineering.",
+   "why": "Recon determines engagement quality, and the legal/ethical boundary is what separates a professional from a nuisance.",
+   "lectures": [
+    {
+     "id": "osi-01",
+     "title": "OSINT Methodology and the Framework as a Checklist",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "osint",
+      "osint-framework",
+      "passive-recon"
+     ],
+     "note": "notes/osi-01.md"
+    },
+    {
+     "id": "osi-02",
+     "title": "Passive Infrastructure Discovery and Subdomain Enumeration",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "subdomain-enum",
+      "certificate-transparency",
+      "subfinder",
+      "dns-recon"
+     ],
+     "note": "notes/osi-02.md"
+    },
+    {
+     "id": "osi-03",
+     "title": "Metadata, Documents and Verification Discipline",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "metadata-analysis",
+      "source-reliability",
+      "exposure-validation",
+      "exiftool"
+     ],
+     "note": "notes/osi-03.md"
+    },
+    {
+     "id": "osi-04",
+     "title": "Phishing Analysis and Awareness (Defensive)",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "phishing",
+      "email-header-analysis",
+      "spoofing",
+      "vishing"
+     ],
+     "note": "notes/osi-04.md"
+    },
+    {
+     "id": "osi-05",
+     "title": "Social Engineering: Scope, Consent and Rules",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "social-engineering",
+      "pretexting",
+      "rules-of-engagement",
+      "scope"
+     ],
+     "note": "notes/osi-05.md"
+    }
+   ],
+   "doctrine_url_ok": true,
+   "doctrine_url_note": "Deliberate reference to osint framework. The reference toolset the doctrine teaches the reader to select from. It is the doctrine's working reference, not the course's home."
+  },
+  "overthewire-bandit": {
+   "id": "overthewire-bandit",
+   "title": "OverTheWire: Bandit",
+   "code": "",
+   "provider": "OverTheWire",
+   "institution": "OverTheWire",
+   "tier": 0,
+   "kind": "platform",
+   "level": "absolute-beginner",
+   "domains": [
+    "linux"
+   ],
+   "url": "https://overthewire.org/wargames/bandit/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "A zero-setup, text-based gauntlet of 60 security and Linux levels. No account, no VM, nothing to install - just SSH and your brain.",
+   "why": "Do this alongside Tier 0. It forces you to use grep, find, ssh, base64, pipes and permissions until they stop being scary.",
+   "lectures": [
+    {
+     "id": "otw-00",
+     "title": "Bandit Levels 0-10: SSH, ls, find, cat, base64",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "shell",
+      "overthewire",
+      "linux-ctf",
+      "encoding-vs-encryption"
+     ],
+     "note": "notes/otw-00.md"
+    },
+    {
+     "id": "otw-01",
+     "title": "Bandit Levels 11-20: git, more encoding, pipes",
+     "video": null,
+     "duration": 0,
+     "xp": 200,
+     "concepts": [
+      "pipe-redirection",
+      "text-processing",
+      "overthewire"
+     ],
+     "note": "notes/otw-01.md"
+    },
+    {
+     "id": "otw-02",
+     "title": "Bandit Levels 21-29: su, cron, setuid, pipes and redirects",
+     "video": null,
+     "duration": 0,
+     "xp": 250,
+     "concepts": [
+      "suid-setgid",
+      "cron",
+      "file-permissions",
+      "overthewire"
+     ],
+     "note": "notes/otw-02.md"
+    },
+    {
+     "id": "otw-03",
+     "title": "Bandit Levels 30-39: SSH keys, perl, archives, more",
+     "video": null,
+     "duration": 0,
+     "xp": 250,
+     "concepts": [
+      "ssh-keys",
+      "package-manager",
+      "overthewire"
+     ],
+     "note": "notes/otw-03.md"
+    }
+   ]
+  },
+  "packet-analysis-doctrine": {
+   "id": "packet-analysis-doctrine",
+   "title": "AEGIS Doctrine: Packet Analysis with Wireshark & tshark",
+   "code": "DOC-300",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 2,
+   "kind": "doctrine",
+   "level": "intermediate",
+   "domains": [
+    "networking",
+    "forensics"
+   ],
+   "url": null,
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Capture on loopback, dissect by hand, then automate with tshark. Reading the wire is the single highest-leverage networking skill.",
+   "why": "Every attack leaves traffic. An operator who can read a pcap sees the attack; everyone else guesses.",
+   "lectures": [
+    {
+     "id": "pkt-01",
+     "title": "Capturing on Loopback with tcpdump and BPF Filters",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "tcpdump",
+      "pcap",
+      "packet-filter"
+     ],
+     "note": "notes/pkt-01.md"
+    },
+    {
+     "id": "pkt-02",
+     "title": "Wireshark Display Filters and Protocol Dissection",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "wireshark",
+      "packet-filter",
+      "protocol-analysis"
+     ],
+     "note": "notes/pkt-02.md"
+    },
+    {
+     "id": "pkt-03",
+     "title": "ARP, DNS and DHCP in the Wild",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "arp",
+      "dns",
+      "dhcp",
+      "protocol-analysis"
+     ],
+     "note": "notes/pkt-03.md"
+    },
+    {
+     "id": "pkt-04",
+     "title": "TCP Handshakes, Retransmits and Anomalies",
+     "video": null,
+     "duration": 0,
+     "xp": 130,
+     "concepts": [
+      "tcp-handshake",
+      "tcp-state",
+      "wireshark"
+     ],
+     "note": "notes/pkt-04.md"
+    },
+    {
+     "id": "pkt-05",
+     "title": "Automating Analysis with tshark and jq",
+     "video": null,
+     "duration": 0,
+     "xp": 130,
+     "concepts": [
+      "tshark",
+      "jq",
+      "automation-pipelines"
+     ],
+     "note": "notes/pkt-05.md"
+    },
+    {
+     "id": "pkt-06",
+     "title": "DNS Exfiltration and Tunneling Detection",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "dns-recon",
+      "tunneling-evasion",
+      "ids-ips",
+      "log-analysis"
+     ],
+     "note": "notes/pkt-06.md"
+    }
+   ]
+  },
+  "portswigger-academy": {
+   "id": "portswigger-academy",
+   "title": "Web Security Academy",
+   "code": "",
+   "provider": "PortSwigger",
+   "institution": "PortSwigger",
+   "tier": 4,
+   "kind": "platform",
+   "level": "intermediate",
+   "domains": [
+    "web"
+   ],
+   "url": "https://portswigger.net/web-security",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Free, structured web security training with hundreds of deliberately vulnerable labs, an apprentice to expert path, and written theory that actually explains the bug.",
+   "why": "The best web security resource that exists, free. Work every lab by hand before reaching for a scanner.",
+   "lectures": [
+    {
+     "id": "ps-01",
+     "title": "The HTTP Request Lifecycle and How the Web Works",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "http-request",
+      "http-response",
+      "url-parsing",
+      "proxy"
+     ],
+     "note": "notes/ps-01.md"
+    },
+    {
+     "id": "ps-02",
+     "title": "SQL Injection and Blind SQLi",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "sql-injection",
+      "sqli-second-order",
+      "prepared-statements",
+      "database-enumeration"
+     ],
+     "note": "notes/ps-02.md"
+    },
+    {
+     "id": "ps-03",
+     "title": "Cross-Site Scripting and DOM XSS",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "xss",
+      "html-injection",
+      "sanitization",
+      "csp"
+     ],
+     "note": "notes/ps-03.md"
+    },
+    {
+     "id": "ps-04",
+     "title": "Access Control, IDOR and Privilege Escalation",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "idor",
+      "access-control",
+      "authentication-bypass",
+      "authorization"
+     ],
+     "note": "notes/ps-04.md"
+    },
+    {
+     "id": "ps-05",
+     "title": "SSRF, XXE and Deserialisation",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "ssrf",
+      "xxe",
+      "deserialization",
+      "cloud-metadata"
+     ],
+     "note": "notes/ps-05.md"
+    },
+    {
+     "id": "ps-06",
+     "title": "Path Traversal, LFI and File Upload",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "path-traversal",
+      "lfi",
+      "file-upload"
+     ],
+     "note": "notes/ps-06.md"
+    },
+    {
+     "id": "ps-07",
+     "title": "JWT Attacks and Session Management",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "jwt",
+      "token-validation",
+      "cookie-session",
+      "session-fixation"
+     ],
+     "note": "notes/ps-07.md"
+    },
+    {
+     "id": "ps-08",
+     "title": "Request Smuggling and Cache Poisoning",
+     "video": null,
+     "duration": 0,
+     "xp": 170,
+     "concepts": [
+      "request-smuggling",
+      "parser-differential",
+      "load-balancer",
+      "header-injection"
+     ],
+     "note": "notes/ps-08.md"
+    },
+    {
+     "id": "ps-09",
+     "title": "Business Logic and Race Conditions",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "race-condition",
+      "owasp-top-10",
+      "logic-bug"
+     ],
+     "note": "notes/ps-09.md"
+    }
+   ]
+  },
+  "portswigger-walkthroughs": {
+   "id": "portswigger-walkthroughs",
+   "title": "Web Security Academy - Full Walkthrough Playlist",
+   "code": "",
+   "provider": "Community walkthroughs",
+   "institution": "Various (linked from PortSwigger)",
+   "tier": 4,
+   "kind": "video",
+   "level": "intermediate",
+   "domains": [
+    "web"
+   ],
+   "url": "https://portswigger.net/web-security/video-guidelines",
+   "playlist": "PLtZSO0mhEgPxLb01jsVKhppOHtz9ZWMdS",
+   "verification": "verified",
+   "blurb": "Recorded walkthroughs of every lab in the PortSwigger apprentice track, useful for comparing your own method against someone else's.",
+   "why": "Watch a walkthrough only after attempting the lab yourself - otherwise you are learning to copy, not to find.",
+   "lectures": [
+    {
+     "id": "psw-01",
+     "title": "Apprentice Track Walkthroughs: Core Vulnerability Classes",
+     "video": null,
+     "duration": 0,
+     "xp": 120,
+     "concepts": [
+      "owasp-top-10",
+      "xss",
+      "sql-injection",
+      "path-traversal"
+     ],
+     "note": "notes/psw-01.md"
+    },
+    {
+     "id": "psw-02",
+     "title": "Apprentice Track Walkthroughs: Access Control and Business Logic",
+     "video": null,
+     "duration": 0,
+     "xp": 120,
+     "concepts": [
+      "idor",
+      "access-control",
+      "logic-bug"
+     ],
+     "note": "notes/psw-02.md"
+    }
+   ],
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "16 playlist entries examined against 2 chapter-level lectures. 1:many by design. The two catalogue lectures are the Apprentice and Practitioner TRACKS, each spanning many lab walkthrough videos. The 16 playlist entries are individual labs (path traversal, SQLi login bypass, SSRF, ...), none of which equals a track."
+  },
+  "reporting-doctrine": {
+   "id": "reporting-doctrine",
+   "title": "AEGIS Doctrine: Professional Pentest Reporting",
+   "code": "DOC-850",
+   "provider": "AEGIS",
+   "institution": "Self-authored",
+   "tier": 7,
+   "kind": "doctrine",
+   "level": "advanced",
+   "domains": [
+    "fundamentals"
+   ],
+   "url": "https://csrc.nist.gov/pubs/sp/800/115/final",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "Turning technical findings into a deliverable a non-technical client will act on: risk, evidence, reproduction steps and remediation.",
+   "why": "The report is the product. A finding nobody can act on changed nothing.",
+   "lectures": [
+    {
+     "id": "rep-01",
+     "title": "Engagement Structure: Scoping, Rules of Engagement, Reporting",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "scope",
+      "rules-of-engagement",
+      "pentest-reporting"
+     ],
+     "note": "notes/rep-01.md"
+    },
+    {
+     "id": "rep-02",
+     "title": "Writing Reproducible Findings and Evidence",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "pentest-reporting",
+      "chain-of-custody",
+      "integrity-hash"
+     ],
+     "note": "notes/rep-02.md"
+    },
+    {
+     "id": "rep-03",
+     "title": "Risk Rating, Business Impact and Prioritisation",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "risk-likelihood-impact",
+      "vulnerability-risk-exploit",
+      "cia-triad"
+     ],
+     "note": "notes/rep-03.md"
+    },
+    {
+     "id": "rep-04",
+     "title": "Remediation Guidance and Executive Summary",
+     "video": null,
+     "duration": 0,
+     "xp": 140,
+     "concepts": [
+      "pentest-reporting",
+      "defense-in-depth",
+      "least-privilege"
+     ],
+     "note": "notes/rep-04.md"
+    }
+   ],
+   "doctrine_url_ok": true,
+   "doctrine_url_note": "Deliberate reference to nist sp 800-115. The reporting standard the doctrine's report structure is built on. It is the doctrine's normative reference, not the course's home."
+  },
+  "stanford-cs255": {
+   "id": "stanford-cs255",
+   "title": "Online Cryptography Course",
+   "code": "CS255",
+   "provider": "Stanford University",
+   "institution": "Stanford University (Dan Boneh)",
+   "tier": 4,
+   "kind": "video",
+   "level": "advanced",
+   "domains": [
+    "crypto"
+   ],
+   "url": "https://crypto.stanford.edu/~dabo/courses/OnlineCrypto/",
+   "playlist": null,
+   "verification": "verified 2026-10-15: 66 Coursera lecture links in course index",
+   "blurb": "Dan Boneh's free online cryptography course with full lecture slides and a free textbook (Boneh-Shoup) to accompany it.",
+   "why": "Cryptography taught by one of the field's leading researchers. This is the theoretical ground under every hash and cipher you will ever use.",
+   "lectures": [
+    {
+     "id": "cry-01",
+     "title": "Course Overview and Stream Ciphers",
+     "video": null,
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "symmetric-encryption",
+      "cipher",
+      "encoding-vs-encryption"
+     ],
+     "note": "notes/cry-01.md"
+    },
+    {
+     "id": "cry-02",
+     "title": "Block Ciphers, Modes of Operation and Security Notions",
+     "video": null,
+     "duration": 60,
+     "xp": 160,
+     "concepts": [
+      "aes",
+      "modes-of-operation",
+      "ecb",
+      "symmetric-encryption"
+     ],
+     "note": "notes/cry-02.md"
+    },
+    {
+     "id": "cry-03",
+     "title": "Collision Resistance and Hash Functions",
+     "video": null,
+     "duration": 60,
+     "xp": 150,
+     "concepts": [
+      "hash-function",
+      "collision-attack",
+      "deprecated-hashes"
+     ],
+     "note": "notes/cry-03.md"
+    },
+    {
+     "id": "cry-04",
+     "title": "RSA and Padding Attacks",
+     "video": null,
+     "duration": 65,
+     "xp": 160,
+     "concepts": [
+      "rsa",
+      "asymmetric-encryption",
+      "padding-oracle"
+     ],
+     "note": "notes/cry-04.md"
+    },
+    {
+     "id": "cry-05",
+     "title": "Public Key Encryption and Key Exchange",
+     "video": null,
+     "duration": 65,
+     "xp": 160,
+     "concepts": [
+      "asymmetric-encryption",
+      "key-exchange",
+      "elliptic-curve"
+     ],
+     "note": "notes/cry-05.md"
+    },
+    {
+     "id": "cry-06",
+     "title": "Digital Signatures and Randomness",
+     "video": null,
+     "duration": 60,
+     "xp": 150,
+     "concepts": [
+      "digital-signature",
+      "signing",
+      "entropy-randomness",
+      "nonce"
+     ],
+     "note": "notes/cry-06.md"
+    },
+    {
+     "id": "cry-07",
+     "title": "TLS and Secure Channels",
+     "video": null,
+     "duration": 65,
+     "xp": 160,
+     "concepts": [
+      "tls",
+      "tls-handshake",
+      "pki",
+      "certificate"
+     ],
+     "note": "notes/cry-07.md"
+    }
+   ],
+   "playlist_note": "The CS255 videos are hosted on Coursera, not YouTube. The course index links 66 individual Coursera lecture URLs (https://www.coursera.org/learn/crypto/lecture/<id>/<slug>), against AEGIS's 7 chapter-level lectures. A 1:many mapping cannot be represented by a single `video` id. See data/VIDEO_SOURCES.md for the full slug inventory.",
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "RESOLVED, wrong host. The course index was fetched: CS255's videos are on Coursera, not YouTube - 66 individual lecture URLs of the form https://www.coursera.org/learn/crypto/lecture/<id>/<slug>. AEGIS's 7 lectures are chapter-level groupings of those 66 (e.g. cry-02 covers block ciphers, AES, DES, and four modes-of-operation lectures). The groupings are tabulated in data/VIDEO_SOURCES.md."
+  },
+  "tcm-peh": {
+   "id": "tcm-peh",
+   "title": "Practical Ethical Hacking",
+   "code": "",
+   "provider": "TCM Security Academy",
+   "institution": "TCM Security",
+   "tier": 3,
+   "kind": "video",
+   "level": "intermediate",
+   "domains": [
+    "fundamentals",
+    "networking",
+    "systems"
+   ],
+   "url": "https://tcm-sec.com/free-cybersecurity-courses-where-to-begin/",
+   "playlist": "https://www.youtube.com/playlist?list=PLLKT__MCUeixqHJ1TRqrHsEd6_EdEvo47",
+   "verification": "verified 2026-10-15: playlist id extracted from tcm-sec.com page source",
+   "blurb": "The most popular free practical hacking course. Kali-driven, scoping-first, and built around a deliberate methodology rather than tool bingo.",
+   "why": "Puts structure around everything else in this catalog. The methodology and scoping discipline matter more than any single tool.",
+   "lectures": [
+    {
+     "id": "tcm-01",
+     "title": "Course Overview, Engagement Process and Rules of Engagement",
+     "video": null,
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "rules-of-engagement",
+      "scope",
+      "pentest-reporting"
+     ],
+     "note": "notes/tcm-01.md"
+    },
+    {
+     "id": "tcm-02",
+     "title": "Passive Reconnaissance and OSINT Collection",
+     "video": null,
+     "duration": 60,
+     "xp": 140,
+     "concepts": [
+      "osint",
+      "passive-recon",
+      "recon",
+      "subdomain-enum"
+     ],
+     "note": "notes/tcm-02.md"
+    },
+    {
+     "id": "tcm-03",
+     "title": "Active Reconnaissance and Network Scanning",
+     "video": null,
+     "duration": 65,
+     "xp": 150,
+     "concepts": [
+      "nmap",
+      "port-scan",
+      "service-fingerprint",
+      "network-discovery"
+     ],
+     "note": "notes/tcm-03.md"
+    },
+    {
+     "id": "tcm-04",
+     "title": "Initial Access and Exploitation Basics",
+     "video": null,
+     "duration": 65,
+     "xp": 160,
+     "concepts": [
+      "metasploit",
+      "exploit-framework",
+      "meterpreter",
+      "exploitation-ethics"
+     ],
+     "note": "notes/tcm-04.md"
+    },
+    {
+     "id": "tcm-05",
+     "title": "Post-Exploitation and Privilege Escalation",
+     "video": null,
+     "duration": 65,
+     "xp": 150,
+     "concepts": [
+      "linpeas",
+      "privilege-escalation-linux",
+      "reverse-shell"
+     ],
+     "note": "notes/tcm-05.md"
+    },
+    {
+     "id": "tcm-06",
+     "title": "Pivoting and Internal Network Movement",
+     "video": null,
+     "duration": 65,
+     "xp": 160,
+     "concepts": [
+      "pivoting",
+      "tunneling",
+      "proxychains",
+      "chisel"
+     ],
+     "note": "notes/tcm-06.md"
+    },
+    {
+     "id": "tcm-07",
+     "title": "Report Writing",
+     "video": null,
+     "duration": 55,
+     "xp": 130,
+     "concepts": [
+      "pentest-reporting",
+      "risk-likelihood-impact"
+     ],
+     "note": "notes/tcm-07.md"
+    }
+   ],
+   "playlist_note": "The playlist linked from TCM's own course page. It is a general 'free cybersecurity courses' collection; the Practical Ethical Hacking course is one entry in it ('Ethical Hacking in 12 Hours - Full Course'), delivered as a single monolithic video. AEGIS's 7 lectures are a chapter-level breakdown of that video, so no per-lecture video id exists.",
+   "video_harvest_done": true,
+   "video_harvest_ran": "2026-10-15",
+   "video_harvest_note": "22 playlist entries examined against 7 chapter-level lectures. Wrong granularity entirely. Practical Ethical Hacking ships as ONE monolithic 12-hour video ('Ethical Hacking in 12 Hours - Full Course', fNzpcB7ODxQ), which is a single entry in a general 22-video 'free cybersecurity courses' collection. AEGIS's 7 lectures are a chapter-level breakdown of that one video, so the correct reference is one video plus per-lecture TIMESTAMPS - not 7 ids.",
+   "video_harvest_playlist": "PLLKT__MCUeixqHJ1TRqrHsEd6_EdEvo47"
+  },
+  "volatility": {
+   "id": "volatility",
+   "title": "Volatility 3 Documentation",
+   "code": "",
+   "provider": "Volatility Foundation",
+   "institution": "Volatility Foundation",
+   "tier": 6,
+   "kind": "text",
+   "level": "advanced",
+   "domains": [
+    "forensics",
+    "systems"
+   ],
+   "url": "https://volatility3.readthedocs.io/",
+   "playlist": null,
+   "verification": "verified",
+   "blurb": "The open source memory forensics framework. Its plugin list is effectively a map of what you can learn from RAM.",
+   "why": "Installs cleanly on Kali with pipx/voltility3, and each plugin teaches a kernel concept.",
+   "lectures": [
+    {
+     "id": "vol-01",
+     "title": "Installing Volatility 3 on Kali",
+     "video": null,
+     "duration": 0,
+     "xp": 120,
+     "concepts": [
+      "pipx",
+      "venv-isolation",
+      "package-manager"
+     ],
+     "note": "notes/vol-01.md"
+    },
+    {
+     "id": "vol-02",
+     "title": "Process and DLL Listing Plugins",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "memory-analysis",
+      "/proc-fs",
+      "volatility"
+     ],
+     "note": "notes/vol-02.md"
+    },
+    {
+     "id": "vol-03",
+     "title": "Network and Credential Plugins",
+     "video": null,
+     "duration": 0,
+     "xp": 150,
+     "concepts": [
+      "memory-analysis",
+      "credential-exposure",
+      "volatility"
+     ],
+     "note": "notes/vol-03.md"
+    },
+    {
+     "id": "vol-04",
+     "title": "Injection and Malicious Plugin Families",
+     "video": null,
+     "duration": 0,
+     "xp": 160,
+     "concepts": [
+      "process-injection-artifact",
+      "malware-triage",
+      "anti-analysis"
+     ],
+     "note": "notes/vol-04.md"
+    }
+   ]
+  }
+ },
+ "notesRendered": [
+  "ad-01",
+  "ad-02",
+  "ad-03",
+  "ad-04",
+  "ad-05",
+  "ad-06",
+  "ad-07",
+  "ad-08",
+  "atb-01",
+  "atb-02",
+  "atb-03",
+  "atb-04",
+  "bh-01",
+  "bh-02",
+  "bh-03",
+  "cap-01",
+  "cap-02",
+  "cap-03",
+  "cap-04",
+  "cap-05",
+  "cap-06",
+  "ccna-01",
+  "ccna-02",
+  "ccna-03",
+  "ccna-04",
+  "ccna-05",
+  "ccna-06",
+  "ccna-07",
+  "ccna-08",
+  "ccnad-01",
+  "ccnad-02",
+  "ccnad-03",
+  "ccnad-04",
+  "cd-01",
+  "cd-02",
+  "cd-03",
+  "cd-04",
+  "cry-01",
+  "cry-02",
+  "cry-03",
+  "cry-04",
+  "cry-05",
+  "cry-06",
+  "cry-07",
+  "cry-d1",
+  "cry-d2",
+  "cry-d3",
+  "cry-d4",
+  "cs161-01",
+  "cs161-02",
+  "cs161-03",
+  "cs161-04",
+  "cs161-05",
+  "cs161-06",
+  "cs161-07",
+  "cs161-08",
+  "doc-01",
+  "doc-02",
+  "doc-03",
+  "doc-04",
+  "ex-01",
+  "ex-02",
+  "ex-03",
+  "ex-04",
+  "ex-05",
+  "ex-06",
+  "for-01",
+  "for-02",
+  "for-03",
+  "for-04",
+  "for-05",
+  "for-06",
+  "for-07",
+  "imp-01",
+  "imp-02",
+  "imp-03",
+  "imp-04",
+  "kr-01",
+  "kr-02",
+  "kr-03",
+  "kr-04",
+  "kr-05",
+  "kr-06",
+  "lab-01",
+  "lab-02",
+  "lab-03",
+  "lab-04",
+  "lo-01",
+  "lo-02",
+  "lo-03",
+  "lo-04",
+  "lo-05",
+  "mit858-01",
+  "mit858-02",
+  "mit858-03",
+  "mit858-04",
+  "mit858-05",
+  "mit858-06",
+  "mit858-07",
+  "mit858-10",
+  "mit858-11",
+  "mit858-12",
+  "mit858-13",
+  "mit858-14",
+  "mit858-18",
+  "ms-01",
+  "ms-02",
+  "ms-03",
+  "ms-04",
+  "ms-05",
+  "ms-06",
+  "neso-n-1",
+  "neso-n-2",
+  "neso-n-3",
+  "neso-n-4",
+  "neso-n-5",
+  "neso-n-6",
+  "neso-os-1",
+  "neso-os-2",
+  "neso-os-3",
+  "neso-os-4",
+  "neso-os-5",
+  "os-01",
+  "os-02",
+  "os-03",
+  "os-04",
+  "os-05",
+  "os-06",
+  "os-07",
+  "os-08",
+  "osi-01",
+  "osi-02",
+  "osi-03",
+  "osi-04",
+  "osi-05",
+  "otw-00",
+  "otw-01",
+  "otw-02",
+  "otw-03",
+  "pkt-01",
+  "pkt-02",
+  "pkt-03",
+  "pkt-04",
+  "pkt-05",
+  "pkt-06",
+  "pr-01",
+  "pr-02",
+  "pr-03",
+  "pr-04",
+  "pr-05",
+  "ps-01",
+  "ps-02",
+  "ps-03",
+  "ps-04",
+  "ps-05",
+  "ps-06",
+  "ps-07",
+  "ps-08",
+  "ps-09",
+  "psw-01",
+  "psw-02",
+  "py-01",
+  "py-02",
+  "py-03",
+  "py-04",
+  "py-05",
+  "py-06",
+  "rep-01",
+  "rep-02",
+  "rep-03",
+  "rep-04",
+  "tcm-01",
+  "tcm-02",
+  "tcm-03",
+  "tcm-04",
+  "tcm-05",
+  "tcm-06",
+  "tcm-07",
+  "vol-01",
+  "vol-02",
+  "vol-03",
+  "vol-04"
+ ],
+ "notesMissing": []
+}

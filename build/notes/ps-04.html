@@ -1,0 +1,411 @@
+<h1 id="access-control-idor-and-privilege-escalation">Access Control, IDOR and Privilege Escalation</h1>
+<h2 id="summary">Summary</h2>
+<p>This is the topic PortSwigger puts early and OWASP puts at number one in real bug bounty,<br />
+because it requires <strong>no exploit technique at all</strong>. You change a number in a request. That is<br />
+the whole attack.</p>
+<p>CS161's web note called IDOR "the most common high-severity finding". This lecture is where<br />
+that claim becomes mechanical: the vulnerability is a missing check, and the check is<br />
+missing because authorisation was never separated from authentication.</p>
+<h2 id="the-two-questions-and-how-code-confuses-them">The two questions, and how code confuses them</h2>
+<pre><code class="language-text">  AUTHENTICATION  who are you?        -&gt; &quot;prove it&quot;
+  AUTHORISATION    may you do this     -&gt; &quot;to THIS object?&quot;
+                   to THIS object,
+                   right now?
+
+  CONFUSION: the app checks that you are logged in (authentication)
+             and assumes that therefore you may see it (authorisation).
+
+  THE TEST: is the check about WHO, or about WHAT?
+            If it never mentions the object, it is an access control bug.
+</code></pre>
+<h2 id="vertical-vs-horizontal-escalation">Vertical vs horizontal escalation</h2>
+<pre><code class="language-text">  VERTICAL   user -&gt; admin
+             higher privilege in the same role hierarchy
+             often via a mass-assignment bug (see below)
+
+  HORIZONTAL user A -&gt; user B
+             same privilege, different user's data
+             almost always via a parameter change (IDOR)
+             higher volume, and usually higher impact because it is
+             a bulk data exposure rather than a single account
+</code></pre>
+<h2 id="the-complete-taxonomy-of-access-control-failures">The complete taxonomy of access control failures</h2>
+<pre><code class="language-text">  1. IDOR / BROKEN OBJECT REFERENCE
+     GET /api/invoice?id=1234   -&gt;  id=1235
+     the object identifier is client-supplied and unchecked
+
+  2. MISSING FUNCTION LEVEL ACCESS CONTROL
+     /admin exists for everyone, or the check is client-side only
+     (a hidden link is not an access control)
+
+  3. MISSING SERVER-SIDE VALIDATION
+     a hidden field, a disabled button, a JS check - all bypassable
+
+  4. FORCE BROWSING / PRIVILEGE ESCALATION
+     guess /admin, /internal, /actuator, /.git, /backup
+
+  5. VERTICAL ESCALATION VIA MASS ASSIGNMENT
+     the app binds every JSON field to a user object:
+       {&quot;email&quot;:&quot;...&quot;, &quot;admin&quot;:true}   -&gt; you are admin now
+     fix: an allowlist of bindable fields (DTO / strong parameters)
+
+  6. PARAMETER MANIPULATION
+     ?role=admin  ?isAdmin=1  ?userId=1  ?account_id=1
+
+  7. INSECURE DIRECT OBJECT REFERENCES IN FILE PATHS
+     /download?file=../../etc/passwd   -&gt; overlaps with ps-06
+</code></pre>
+<h2 id="mass-assignment-the-one-people-miss">Mass assignment, the one people miss</h2>
+<pre><code class="language-php">// VULNERABLE: bind everything the client sent
+$user = new User();
+$user-&gt;fill($_POST);          // is_admin, role, id, balance - all of it
+
+// SAFE: bind only what is allowed
+$user-&gt;is_admin = false;               // explicit
+// or, in Rails: user_params.require(:name, :email)
+// or in Laravel: $fillable / $guarded
+// or in Spring: @ModelAttribute with an explicit DTO
+</code></pre>
+<pre><code class="language-json">POST /profile
+{&quot;name&quot;:&quot;bob&quot;,&quot;email&quot;:&quot;b@x.com&quot;,&quot;is_admin&quot;:true,&quot;balance&quot;:99999}
+</code></pre>
+<p>The fix is always an <strong>allowlist of bindable fields</strong>, never a<br />
+denylist of dangerous ones. Denylists miss every field the developers<br />
+did not think of.</p>
+<h2 id="authentication-bypass-the-other-half">Authentication bypass, the other half</h2>
+<pre><code class="language-text">  WEAK CREDENTIALS
+    default credentials (admin/admin) - still the single most common finding
+    credential stuffing from breach corpora (see cry-d1)
+    password == username == email
+
+  IMPLEMENTATION FLAWS
+    type juggling:   PHP  &quot;0e12345&quot; == &quot;0e67890&quot;  is TRUE
+                     JSON {&quot;admin&quot;:true}  vs  {&quot;admin&quot;:&quot;true&quot;}
+    loose comparison in any language with numeric strings
+    truthy strings:  &quot;false&quot;, &quot;0&quot;, &quot;null&quot;, &quot;&quot;   are truthy in PHP
+    array injection: ?password[]=x  turns the comparison into an array
+                     comparison, which is always &quot;not equal&quot;
+
+  SESSION ISSUES
+    no rotation on login -&gt; session fixation (see ps-07)
+    no invalidation on logout -&gt; the token still works
+    JWT flaws -&gt; see ps-07 and cry-d3
+
+  RECOVERY
+    predictable reset tokens
+    reset tokens with no expiry
+    username enumeration via the reset flow
+    host header injection in the reset link
+</code></pre>
+<p>PHP type juggling deserves its own demonstration because it is still<br />
+live everywhere PHP runs.</p>
+<h2 id="testing-procedure">Testing procedure</h2>
+<pre><code class="language-text">  1. MAP EVERYTHING
+     - log in as a normal user
+     - record every URL, method, body and response
+     - the application's own links are the map
+     - repeat as a SECOND, differently-privileged user
+
+  2. FOR EVERY REQUEST THAT REFERENCES AN OBJECT
+     - request an object YOU own            -&gt; expect 200
+     - request an object the OTHER user owns -&gt; expect 403/404
+     - if 200 with their data, that is an IDOR
+
+  3. FOR EVERY PRIVILEGED FUNCTION
+     - call it directly as a normal user
+     - is the check server-side?
+     - a hidden menu item is not a check
+
+  4. FOR EVERY FORM THAT UPDATES A USER
+     - add privilege fields
+     - is the binding allowlisted?
+
+  5. FOR EVERY AUTHENTICATION PATH
+     - wrong password vs unknown user: different status/length/time?
+     - is the session rotated? is it invalidated on logout?
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Access control</strong></td>
+<td>Who may do what to which object</td>
+</tr>
+<tr>
+<td><strong>Authentication</strong></td>
+<td>Proving identity</td>
+</tr>
+<tr>
+<td><strong>Authorization</strong></td>
+<td>Granting permission per object</td>
+</tr>
+<tr>
+<td><strong>IDOR / BORF</strong></td>
+<td>Accessing an object by changing its identifier</td>
+</tr>
+<tr>
+<td><strong>Vertical escalation</strong></td>
+<td>Low privilege to high</td>
+</tr>
+<tr>
+<td><strong>Horizontal escalation</strong></td>
+<td>One user's data to another's</td>
+</tr>
+<tr>
+<td><strong>Mass assignment</strong></td>
+<td>Binding unlisted client fields to a model</td>
+</tr>
+<tr>
+<td><strong>Force browsing</strong></td>
+<td>Directly requesting a privileged URL</td>
+</tr>
+<tr>
+<td><strong>Type juggling</strong></td>
+<td>PHP loose comparison pitfalls</td>
+</tr>
+<tr>
+<td><strong>Allowlist binding</strong></td>
+<td>Explicitly listing bindable fields</td>
+</tr>
+<tr>
+<td><strong>Forced browsing</strong></td>
+<td>Bypassing UI-level hiding</td>
+</tr>
+<tr>
+<td><strong>Least privilege (app)</strong></td>
+<td>A session should do only what it must</td>
+</tr>
+<tr>
+<td><strong>Vertical/horizontal slice</strong></td>
+<td>Test the full permission matrix</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-04 &amp;&amp; cd ~/aegis/labs/ps-04
+
+# --- 1. a two-user app where the authorisation check is missing ---
+cat &gt; app.php &lt;&lt;'PHP'
+&lt;?php
+// Two users. Every object has an owner. The app checks that you are
+// LOGGED IN and then serves the object. It never checks who owns it.
+session_start();
+$db = new PDO('sqlite:' . __DIR__ . '/ac.db');
+$db-&gt;setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,
+           name TEXT, is_admin INTEGER DEFAULT 0)&quot;);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY,
+           owner_id INTEGER, amount INTEGER, memo TEXT)&quot;);
+if ($db-&gt;query(&quot;SELECT COUNT(*) FROM users&quot;)-&gt;fetchColumn() == 0) {
+  $db-&gt;exec(&quot;INSERT INTO users VALUES (1,'alice',0)&quot;);
+  $db-&gt;exec(&quot;INSERT INTO users VALUES (2,'bob',0)&quot;);
+  $db-&gt;exec(&quot;INSERT INTO users VALUES (3,'admin',1)&quot;);
+  foreach ([[1,100,'Hosting'],[2,5000,'Consulting'],[3,0,'n/a']] as $i)
+    $db-&gt;exec(&quot;INSERT INTO invoices VALUES ({$i[0]},{$i[1]},{$i[2]},'{$i[3]}')&quot;);
+}
+$h = fn($s) =&gt; htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+?&gt;
+&lt;!doctype html&gt;&lt;meta charset=utf-8&gt;&lt;title&gt;ps-04&lt;/title&gt;&lt;h1&gt;ps-04 access control&lt;/h1&gt;
+&lt;?php
+// login
+if (($_POST['as'] ?? '') !== '') {
+  $u = $db-&gt;query(&quot;SELECT * FROM users WHERE name=&quot; . $db-&gt;quote($_POST['as']))-&gt;fetch();
+  if ($u) { $_SESSION['uid'] = (int)$u['id']; $_SESSION['is_admin'] = (int)$u['is_admin']; }
+}
+$uid = $_SESSION['uid'] ?? 0;
+echo &quot;&lt;p&gt;you are uid=$uid admin=&quot; . ($_SESSION['is_admin'] ?? 0) . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;form method=post&gt;&lt;button name=as value=alice&gt;login alice&lt;/button&gt;&quot;
+   . &quot;&lt;button name=as value=bob&gt;login bob&lt;/button&gt;&quot;
+   . &quot;&lt;button name=as value=admin&gt;login admin&lt;/button&gt;&lt;/form&gt;&quot;;
+
+$path = $_SERVER['REQUEST_URI'];
+
+if (str_contains($path, '/invoice')) {
+  // THE BUG: authentication only. No ownership check.
+  $id  = (int)($_GET['id'] ?? 1);
+  $inv = $db-&gt;query(&quot;SELECT * FROM invoices WHERE id=$id&quot;)-&gt;fetch();
+  if ($inv) echo &quot;&lt;p&gt;invoice #$id owner={$inv['owner_id']} amount={$inv['amount']} memo={$inv['memo']}&lt;/p&gt;&quot;;
+  else echo &quot;&lt;p&gt;(no invoice)&lt;/p&gt;&quot;;
+}
+if (str_contains($path, '/admin')) {
+  // THE BUG: the UI hides this, but the endpoint is unguarded.
+  echo &quot;&lt;h2&gt;ADMIN AREA&lt;/h2&gt;&quot;;
+  foreach ($db-&gt;query(&quot;SELECT * FROM invoices&quot;) as $i) echo &quot;&lt;p&gt;{$i}&lt;/p&gt;&quot;;
+}
+if (str_contains($path, '/profile')) {
+  // THE BUG: mass assignment. Every posted field is written.
+  $u = $db-&gt;query(&quot;SELECT * FROM users WHERE id=$uid&quot;)-&gt;fetch();
+  if (($_POST['name'] ?? '') !== '') {
+    // an allowlist, for contrast - the 'if' above is what a DTO looks like
+    $allowed = ['name'];
+    foreach ($allowed as $f) {
+      if (isset($_POST[$f]))
+        $db-&gt;exec(&quot;UPDATE users SET &quot; . $f . &quot;=&quot; . $db-&gt;quote($_POST[$f])
+                  . &quot; WHERE id=$uid&quot;);
+    }
+    echo &quot;&lt;p&gt;(updated: &quot; . $h(implode(',', $allowed)) . &quot; only)&lt;/p&gt;&quot;;
+  }
+  print_r($u);
+}
+if (str_contains($path, '/my')) {
+  // THE FIX, for contrast: filter by owner in the QUERY.
+  foreach ($db-&gt;query(&quot;SELECT * FROM invoices WHERE owner_id=$uid&quot;) as $i)
+    echo &quot;&lt;p&gt;{$i}&lt;/p&gt;&quot;;
+}
+PHP
+# the same file with a router: ?p=invoice&amp;id=1 for convenience
+cp app.php app2.php
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+
+# --- 2. prove the IDOR ---
+{
+  echo &quot;=== baseline: bob fetches HIS OWN invoice ===&quot;
+  curl -s -c b.jar -X POST -d 'as=bob' http://127.0.0.1:8080/app.php | grep -E &quot;you are&quot; | sed 's/^/  /'
+  curl -s -b b.jar 'http://127.0.0.1:8080/app.php/invoice?id=2' | grep &quot;invoice&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== IDOR: bob fetches ALICE'S invoice by changing one number ===&quot;
+  curl -s -b b.jar 'http://127.0.0.1:8080/app.php/invoice?id=1' | grep &quot;invoice&quot; | sed 's/^/  /'
+  echo &quot;  ^ uid=2 requesting invoice 1 (owned by uid=1). Same request shape,&quot;
+  echo &quot;    one changed digit, someone else's data. That is the whole bug.&quot;
+  echo
+  echo &quot;=== and enumerate: how much is exposed? ===&quot;
+  for i in 1 2 3; do
+    printf &quot;  id=%s -&gt; %s\n&quot; &quot;$i&quot; \
+      &quot;$(curl -s -b b.jar &quot;http://127.0.0.1:8080/app.php/invoice?id=$i&quot; | grep -oE 'amount=[0-9]+ memo=[A-Za-z]+' | head -1)&quot;
+  done
+  echo
+  echo &quot;=== THE FIX, for comparison: /my filters by owner in the query ===&quot;
+  curl -s -b b.jar 'http://127.0.0.1:8080/app.php/my' | grep -oE &quot;\[0-9\][^]]*&quot; | sed 's/^/  /'
+  echo &quot;  ^ only bob's rows. Same data, one clause of difference.&quot;
+} 2&gt;&amp;1 | tee 01-idor.txt
+
+# --- 3. forced browsing ---
+{
+  echo &quot;=== the admin endpoint exists and does not check anything ===&quot;
+  curl -s -c b.jar -X POST -d 'as=bob' http://127.0.0.1:8080/app.php &gt; /dev/null
+  curl -s -b b.jar 'http://127.0.0.1:8080/app.php/admin' | grep -E &quot;ADMIN|invoice&quot; | head -4 | sed 's/^/  /'
+  echo
+  echo &quot;  bob is not an admin and got the admin area. The UI hid the link;&quot;
+  echo &quot;  the UI is not a security control.&quot;
+} 2&gt;&amp;1 | tee 02-forced.txt
+
+# --- 4. mass assignment ---
+{
+  echo &quot;=== POST is_admin=true to /profile ===&quot;
+  curl -s -c b.jar -X POST -d 'as=bob' http://127.0.0.1:8080/app.php &gt; /dev/null
+  curl -s -b b.jar -X POST -d 'name=hacked&amp;is_admin=1&amp;id=3' \
+    'http://127.0.0.1:8080/app.php/profile' | grep -A3 &quot;Array&quot; | sed 's/^/  /'
+  echo
+  echo &quot;  The allowlisted version ignored is_admin and id. A mass-assignment&quot;
+  echo &quot;  version would have written them. The difference between those two&quot;
+  echo &quot;  outcomes is one allowlist array.&quot;
+} 2&gt;&amp;1 | tee 03-mass.txt
+
+# --- 5. the auth-bypass patterns, run ---
+python3 - &lt;&lt;'PY' | tee 04-authbypass.txt
+print(&quot;  === PHP type juggling: the comparison that lies ===&quot;)
+print()
+cases = [
+    (&quot;'0e12345' == '0e67890'&quot;,        True,  &quot;both numeric-looking -&gt; compared as 0 == 0&quot;),
+    (&quot;'0e12345' === '0e67890'&quot;,       False, &quot;strict === compares strings&quot;),
+    (&quot;'abc'   == 0&quot;,                  True,  &quot;PHP 7: leading-numeric cast. PHP 8: fixed&quot;),
+    (&quot;'1abc'  == 1&quot;,                  True,  &quot;same&quot;),
+    (&quot;'true'  == true&quot;,               False, &quot;'true' string vs bool true&quot;),
+    (&quot;boolval('false')&quot;,              True,  &quot;the string 'false' is truthy&quot;),
+    (&quot;boolval('0')&quot;,                  False, &quot;the string '0' is falsy&quot;),
+    (&quot;isset(\$_POST['p']) &amp;&amp; \$_POST['p']&quot;, &quot;TRUE&quot;, &quot;array param makes it truthy&quot;),
+]
+print(f&quot;  {'comparison':&lt;44} {'result':&lt;8} why&quot;)
+print(&quot;  &quot; + &quot;-&quot;*92)
+for expr, res, why in cases:
+    print(f&quot;  {expr:&lt;44} {str(res):&lt;8} {why}&quot;)
+print()
+print(&quot;  THE FIX, and it is one character:&quot;)
+print(&quot;    if (\$_POST['p'] === 'yes')          not  == 'yes'&quot;)
+print(&quot;    if (hash_equals(\$a, \$b))            not  == for tokens/passwords&quot;)
+print(&quot;    if ((int)\$_POST['n'] === 1)          not  == 1&quot;)
+print()
+print(&quot;  PHP 8 fixed the string-to-number juggling. The == on two numeric&quot;)
+print(&quot;  strings ('0e...') still works, and array-injection tricks still&quot;)
+print(&quot;  work. Never rely on the language version for a security property.&quot;)
+PY
+cat 04-authbypass.txt
+
+php -r '
+$a = &quot;0e12345&quot;; $b = &quot;0e67890&quot;;
+echo &quot;  loose  ==  : &quot;, var_export($a == $b, true), &quot;\n&quot;;
+echo &quot;  strict === : &quot;, var_export($a === $b, true), &quot;\n&quot;;
+echo &quot;  boolval(\&quot;false\&quot;) : &quot;, var_export((bool)&quot;false&quot;, true), &quot;\n&quot;;
+echo &quot;  \&quot;1abc\&quot; == 1        : &quot;, var_export(&quot;1abc&quot; == 1, true), &quot;\n&quot;;
+' | sed 's/^/  PHP says: /' | tee -a 04-authbypass.txt
+
+# --- 6. the full matrix tester ---
+cat &gt; 05-matrix.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Test the FULL permission matrix, not one account. Most real IDOR is
+# found by the second user, not by reading the code.
+B=http://127.0.0.1:8080/app.php
+declare -A UID_FOR=( [alice]=1 [bob]=2 [admin]=3 )
+
+login() { rm -f &quot;/tmp/j_$1&quot;; curl -s -c &quot;/tmp/j_$1&quot; -X POST -d &quot;as=$1&quot; &quot;$B&quot; &gt;/dev/null; }
+
+echo &quot;=== does &lt;user&gt; get &lt;object&gt; it should not have? ===&quot;
+printf &quot;  %-8s %-8s %-14s %s\n&quot; &quot;USER&quot; &quot;OBJECT&quot; &quot;STATUS&quot; &quot;VERDICT&quot;
+printf &quot;  &quot; ; printf -- &quot;-%.0s&quot; {1..58}; echo
+
+login alice; login bob
+for u in alice bob; do
+  for id in 1 2 3; do
+    owner=$([ &quot;$id&quot; = 1 ] &amp;&amp; echo alice || ([ &quot;$id&quot; = 2 ] &amp;&amp; echo bob || echo admin))
+    body=$(curl -s -b &quot;/tmp/j_$u&quot; &quot;$B/invoice?id=$id&quot;)
+    got=$(echo &quot;$body&quot; | grep -c &quot;invoice #$id&quot;)
+    expect=$([ &quot;$u&quot; = &quot;$owner&quot; ] &amp;&amp; echo 1 || echo 0)
+    if [ &quot;$got&quot; -eq 1 ] &amp;&amp; [ &quot;$expect&quot; -eq 0 ]; then
+      printf &quot;  %-8s %-8s %-14s %s\n&quot; &quot;$u&quot; &quot;inv#$id&quot; &quot;200 OK&quot; &quot;*** IDOR ***&quot;
+    elif [ &quot;$got&quot; -eq 1 ]; then
+      printf &quot;  %-8s %-8s %-14s %s\n&quot; &quot;$u&quot; &quot;inv#$id&quot; &quot;200 OK&quot; &quot;own (correct)&quot;
+    else
+      printf &quot;  %-8s %-8s %-14s %s\n&quot; &quot;$u&quot; &quot;inv#$id&quot; &quot;denied&quot; &quot;correct&quot;
+    fi
+  done
+done
+
+echo
+echo &quot;=== and the privileged area ===&quot;
+for u in alice bob; do
+  n=$(curl -s -b &quot;/tmp/j_$u&quot; &quot;$B/admin&quot; | grep -c &quot;ADMIN AREA&quot;)
+  printf &quot;  %-8s /admin -&gt; %s\n&quot; &quot;$u&quot; &quot;$([ &quot;$n&quot; -eq 1 ] &amp;&amp; echo '*** REACHABLE, should not be ***' || echo 'blocked (correct)')&quot;
+done
+rm -f /tmp/j_alice /tmp/j_bob
+EOF
+chmod +x 05-matrix.sh
+./05-matrix.sh 2&gt;&amp;1 | tee 06-matrix.txt
+rm -f b.jar app2.php
+</code></pre>
+<p><strong>Step 6 is the deliverable</strong>: <code>05-matrix.sh</code> tests the <em>full permission matrix</em> — three users ×<br />
+three objects — rather than one account. Every IDOR campaign needs a second account, and most<br />
+people skip that and miss the bug entirely. Run it and the IDORs light up in a table.</p>
+<p><strong>Step 5</strong> is worth doing directly: <code>php -r</code> with <code>"0e12345" == "0e67890"</code> is the auth bypass<br />
+that will outlive every PHP version.</p>
+<p><strong>Record:</strong> <code>01-idor.txt</code> and <code>06-matrix.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between authentication and authorisation, and how do apps conflate them?</li>
+<li>Vertical vs horizontal escalation: what changes and which is more common?</li>
+<li>What is mass assignment, and why is an allowlist the only correct fix?</li>
+<li>Give the PHP comparison pitfall with numeric strings, and the one-character fix.</li>
+<li>Why is hiding an admin link not access control?</li>
+<li>Outline the test for an endpoint that takes an object identifier.</li>
+<li>Why does a second test account change what you can find?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>IDOR</strong> → <strong>Access Control</strong> → <strong>Authentication Bypass</strong> → <strong>Authorization</strong> →<br />
+<strong>Mass Assignment</strong> → <strong>OWASP Top 10</strong>.<br />
+<code>ps-09</code> covers the sibling class: logic flaws in <em>correctly authorised</em> operations.</p>

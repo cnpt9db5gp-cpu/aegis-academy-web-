@@ -1,0 +1,230 @@
+<h1 id="the-command-line-environment">The Command Line Environment</h1>
+<h2 id="summary">Summary</h2>
+<p>This lecture covers the environment a command runs inside: which directories the shell searches<br />
+(<strong>PATH</strong>), which variables it exports, and how to make settings persist. Three tools dominate:<br />
+<code>~/.bashrc</code>, <code>~/.profile</code>, and <code>/etc/environment</code>.</p>
+<p>It sounds mundane. It is also where several real attack paths live — an attacker who can append<br />
+one line to your <code>~/.bashrc</code> has persistence; a script that trusts <code>$PATH</code> can be hijacked; and<br />
+<code>LD_PRELOAD</code> turns any non-setuid program into your program.</p>
+<h2 id="path-the-search-order">PATH: the search order</h2>
+<p>When you type <code>nmap</code>, the shell checks each <code>$PATH</code> directory <strong>left to right</strong>, in order, and<br />
+runs the first match. Consequences:</p>
+<pre><code class="language-bash">echo $PATH | tr ':' '\n' | nl
+
+# Which one wins if there are two?
+type -a nmap
+
+# Proof of concept: hijack a command with a directory earlier in PATH
+mkdir -p /tmp/evil
+printf '#!/bin/sh\necho &quot;you just ran MY ls, not /bin/ls&quot;\n' &gt; /tmp/evil/ls
+chmod +x /tmp/evil/ls
+PATH=/tmp/evil:$PATH ls -la      # yes, that works, and it is a real technique
+</code></pre>
+<p><strong>Defence:</strong> never put a writable directory early in <code>PATH</code>, and always invoke tools by absolute<br />
+path (<code>/usr/bin/passwd</code>, not <code>passwd</code>) in security-critical scripts. <code>/usr/local/sbin</code> and<br />
+<code>/usr/local/bin</code> are conventionally root-owned and safe to be early.</p>
+<h2 id="shell-variable-scope">Shell variable scope</h2>
+<pre><code class="language-bash">NAME=&quot;nwpcs&quot;            # not exported: only this shell sees it
+export NAME=&quot;nwpcs&quot;     # exported: child processes see it
+echo $NAME               # works either way in this shell
+bash -c 'echo $NAME'    # empty: not exported
+</code></pre>
+<p>The three types that matter:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Syntax</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shell variable</td>
+<td><code>X=1</code></td>
+<td>current shell only</td>
+</tr>
+<tr>
+<td>Environment variable</td>
+<td><code>export X=1</code></td>
+<td>current shell + children</td>
+</tr>
+<tr>
+<td>Local (function)</td>
+<td><code>local X=1</code></td>
+<td>that function only</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-startup-files-precisely">The startup files, precisely</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Read when</th>
+<th>For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/etc/profile</code></td>
+<td>login shells, all users</td>
+<td>system-wide environment</td>
+</tr>
+<tr>
+<td><code>~/.profile</code></td>
+<td>login shells, you</td>
+<td>your env vars</td>
+</tr>
+<tr>
+<td><code>~/.bashrc</code></td>
+<td>interactive non-login shells, you</td>
+<td>aliases, prompt, functions</td>
+</tr>
+<tr>
+<td><code>/etc/bash.bashrc</code></td>
+<td>same, all users</td>
+<td>system-wide interactive config</td>
+</tr>
+</tbody>
+</table>
+<p>The distinction bites: a <strong>login</strong> shell reads <code>~/.profile</code>; a <strong>terminal you opened</strong> reads<br />
+<code>~/.bashrc</code>. Put an export in the wrong file and it appears not to work.</p>
+<pre><code class="language-bash"># Put this in ~/.bashrc
+export EDITOR=vim
+export HISTSIZE=10000        # default is usually 1000 - too small for recon
+export HISTCONTROL=ignorebothspace   # do not record commands starting with a space
+alias ll='ls -alhF'
+alias net='ip -br addr; ip route'
+</code></pre>
+<h2 id="path-and-other-things-you-will-use-constantly">$PATH, $?, and other things you will use constantly</h2>
+<pre><code class="language-bash">ls /nonexistent; echo $?            # 2
+true; echo $?                       # 0
+nmap 127.0.0.1 2&gt;/dev/null; echo $? # 0
+
+echo $PWD $HOME $USER $UID $$ $PPID $RANDOM
+ps -p $$ -o pid,comm               # $$ is this shell's PID
+</code></pre>
+<h2 id="privilege-drop-sudo-and-environment-loss">Privilege drop: sudo and environment loss</h2>
+<p><code>sudo</code> <strong>does not</strong> preserve your environment by default. <code>export TARGET=1.2.3.4</code> then<br />
+<code>sudo nmap $TARGET</code> will fail because <code>$TARGET</code> is gone. Three solutions, in order of preference:</p>
+<pre><code class="language-bash">sudo TARGET=1.2.3.4 nmap -sn $TARGET        # 1. pass it for one command (best)
+sudo -E nmap -sn $TARGET                    # 2. preserve the whole environment (blunt)
+sudoedit /etc/environment                   # 3. make it a system default (persistent)
+</code></pre>
+<h2 id="the-dangerous-ones">The dangerous ones</h2>
+<pre><code class="language-bash"># LD_PRELOAD injects a shared library into any program you launch.
+# It does NOT work on setuid binaries - which is exactly the defence.
+echo $LD_PRELOAD          # should be empty. If it is not, investigate immediately.
+
+# HISTSIZE / HISTCONTROL matter for operational security
+echo $HISTFILE            # if HOME is writable this is your problem
+set +o history            # stop recording this shell's commands
+unset HISTFILE            # hard stop
+</code></pre>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- PATH hygiene ---
+echo $PATH | tr ':' '\n' | while read -r d; do
+  [ -d &quot;$d&quot; ] &amp;&amp; printf &quot;%-40s %s\n&quot; &quot;$d&quot; &quot;$(stat -c '%A %U' &quot;$d&quot; 2&gt;/dev/null)&quot;
+done
+
+# find writable directories that are in your PATH (real finding, real risk)
+IFS=: read -ra P &lt;&lt;&lt; &quot;$PATH&quot;
+for d in &quot;${P[@]}&quot;; do
+  [ -d &quot;$d&quot; ] &amp;&amp; [ -w &quot;$d&quot; ] &amp;&amp; echo &quot;WRITABLE AND IN PATH: $d ($(stat -c %U &quot;$d&quot;))&quot;
+done
+
+# --- configuration ---
+declare -p PATH HOME USER SHELL
+set | grep -cE '^[A-Z_]+='     # how many variables are set
+alias
+type -a ls
+
+# --- persistence files (what an attacker would target) ---
+ls -la ~/.bashrc ~/.profile ~/.bash_profile ~/.zshrc 2&gt;/dev/null
+sudo cat /etc/environment
+grep -rn &quot;alias\|export&quot; ~/.bashrc | tail -20
+
+# --- start a clean shell, see what you inherited ---
+env | sort &gt; /tmp/env-before.txt
+bash --noprofile --norc -c 'env | sort' &gt; /tmp/env-clean.txt
+diff /tmp/env-before.txt /tmp/env-clean.txt | head -20
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> understand PATH resolution well enough to demonstrate a hijack, and audit your own<br />
+startup files as an attacker would.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ms-03 &amp;&amp; cd ~/aegis/labs/ms-03
+
+# --- 1. PATH resolution order ---
+type -a ls nmap python3 2&gt;&amp;1 | tee 01-path-order.txt
+echo $PATH | tr ':' '\n' | nl &gt;&gt; 01-path-order.txt
+
+# --- 2. Demonstrate a PATH hijack (harmless, local) ---
+mkdir -p hijack
+cat &gt; hijack/id &lt;&lt;'EOF'
+#!/bin/sh
+echo &quot;[!] this is NOT /usr/bin/id&quot;
+exec /usr/bin/id &quot;$@&quot;
+EOF
+chmod +x hijack/id
+echo &quot;normal:&quot;;  /usr/bin/id -u
+echo &quot;hijacked:&quot;; PATH=&quot;$PWD/hijack:$PATH&quot; id -u
+rm -rf hijack
+
+# --- 3. Audit your PATH for writable directories ---
+{
+  echo &quot;=== writable dirs in PATH (attack surface) ===&quot;
+  IFS=: read -ra P &lt;&lt;&lt; &quot;$PATH&quot;
+  for d in &quot;${P[@]}&quot;; do
+    if [ -d &quot;$d&quot; ] &amp;&amp; [ -w &quot;$d&quot; ]; then
+      echo &quot;WRITABLE: $d  owner=$(stat -c %U &quot;$d&quot;)&quot;
+    fi
+  done
+  echo &quot;(empty above = good)&quot;
+} | tee 02-path-audit.txt
+
+# --- 4. Read your own startup files like an attacker ---
+{
+  echo &quot;=== files that auto-execute for you ===&quot;
+  for f in ~/.bashrc ~/.profile ~/.bash_profile /etc/profile /etc/bash.bashrc /etc/environment; do
+    [ -f &quot;$f&quot; ] &amp;&amp; { echo &quot;--- $f ---&quot;; grep -vE '^\s*(#|$)' &quot;$f&quot; | tail -15; }
+  done
+} | tee 03-startup-files.txt
+
+# --- 5. What does an attacker do here? Trace the persistence primitive ---
+{
+  echo &quot;=== shell startup files, modification times ===&quot;
+  ls -la --time-style=long-iso ~/.bashrc ~/.profile 2&gt;/dev/null
+  echo
+  echo &quot;=== bash history, last 30 (what have I been doing on this box?) ===&quot;
+  tail -30 ~/.bash_history 2&gt;/dev/null || echo &quot;(history file absent - HISTFILE unset or cleared)&quot;
+} | tee 04-persistence-surface.txt
+
+# --- 6. Environment hygiene check ---
+{
+  echo &quot;LD_PRELOAD=${LD_PRELOAD:-&lt;empty, good&gt;}&quot;
+  echo &quot;HISTFILE=${HISTFILE:-&lt;unset, good&gt;}&quot;
+  echo &quot;PATH=${PATH}&quot;
+} | tee 05-env-hygiene.txt
+
+# --- 7. Prove sudo drops your environment ---
+export TARGET=127.0.0.1
+sudo sh -c 'echo &quot;TARGET inside sudo: ${TARGET:-&lt;dropped&gt;}&quot;'
+sudo TARGET=127.0.0.1 sh -c 'echo &quot;TARGET passed explicitly: $TARGET&quot;'
+</code></pre>
+<p><strong>Read <code>04-persistence-surface.txt</code> carefully.</strong> Those startup files are exactly what malware<br />
+modifies for persistence, and <code>~/.bashrc</code> is the first place an attacker looks. You now know your<br />
+own machine's persistence surface — that knowledge is the whole defensive half of the course.</p>
+<p><strong>Record:</strong> whether any PATH directory is writable, and what your <code>.bashrc</code> currently contains.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>In order of execution, what does the shell check to resolve a command name?</li>
+<li>Why is putting your project directory first in <code>$PATH</code> dangerous?</li>
+<li><code>export</code> a variable, then use it in a <code>sudo</code> command. Why does it fail, and what are two fixes?</li>
+<li>Name the four shell startup files and which one an interactive terminal actually reads.</li>
+<li>An attacker appends one line to your <code>~/.bashrc</code>. What can they achieve, and what would<br />
+   detection look like?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Environment Variables</strong> → <strong>Persistence</strong> → <strong>Privilege Escalation (Linux)</strong> → <strong>Credential Exposure</strong>.<br />
+Step 5 of this lab is a preview of <code>pr-04</code>.</p>

@@ -1,0 +1,235 @@
+<h1 id="bandit-levels-0-10-ssh-ls-find-cat-base64">Bandit Levels 0-10: SSH, ls, find, cat, base64</h1>
+<h2 id="summary">Summary</h2>
+<p>Bandit is a text-only wargame with 60 levels and no account or VM — you SSH in and solve levels<br />
+in order. It is the ideal companion to Tier 0 because it forces you to use <code>ls</code>, <code>find</code>, <code>cat</code>,<br />
+<code>grep</code>, pipes and permissions until they stop being frightening.</p>
+<p><strong>How it works:</strong> connect, read the level description, find the password file for level N, and<br />
+read it. The passwords are generated from the previous level's flag, so you cannot skip.</p>
+<pre><code class="language-bash">ssh bandit0@bandit.labs.overthewire.org -p 2220
+</code></pre>
+<h2 id="what-levels-0-10-actually-drill">What levels 0-10 actually drill</h2>
+<table>
+<thead>
+<tr>
+<th>Levels</th>
+<th>Skill</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0-3</td>
+<td><code>ls</code>, <code>find</code>, <code>cat</code>, hidden files, absolute vs relative paths</td>
+</tr>
+<tr>
+<td>4-6</td>
+<td><code>ls -la</code>, reading <code>/etc/passwd</code>, <code>more</code>/<code>cat</code> with hidden directories</td>
+</tr>
+<tr>
+<td>7-8</td>
+<td><code>find</code> with <code>-readable</code>, hidden directories, permissions</td>
+</tr>
+<tr>
+<td>9-10</td>
+<td><code>strings</code>, <code>grep</code>, <code>find -exec</code>, base64 decoding</td>
+</tr>
+</tbody>
+</table>
+<h2 id="level-notes">Level notes</h2>
+<p><strong>Level 0 — find and read.</strong> The flag is in a file in the home directory.</p>
+<pre><code class="language-bash">ls -la
+cat readme
+</code></pre>
+<p><strong>Level 1 — the file is hidden.</strong> Nothing shows with plain <code>ls</code>.</p>
+<pre><code class="language-bash">ls -a          # -a = all, including dotfiles
+cat -
+</code></pre>
+<p><strong>Level 2 — hidden files, directories and somewhere else.</strong></p>
+<pre><code class="language-bash">ls -la
+cat ./-        # read a file whose name starts with a dash
+find . -type f
+cat ./*readme* # a glob, because you do not know the exact name
+</code></pre>
+<p><strong>Level 3 — find the file, then read it without <code>ls</code>.</strong></p>
+<pre><code class="language-bash">find . -type f
+cat ./secret   # adjust to whatever find returned
+ls -la ./secret # the -a is required if it is hidden
+</code></pre>
+<p><strong>Level 4 — permission denied on a file. This is the first real lesson.</strong></p>
+<pre><code class="language-bash">ls -la
+cat ./-file        # Permission denied
+
+# who am I, what groups?
+id
+
+# what does the mode mean?
+#   -rw-r--r--   owner rw, group r, others r   -&gt; &quot;others&quot; cannot read
+#   -rw-r-----   owner rw, group r, others ---
+sudo cat ./-file   # on this box sudo is allowed and passwordless
+</code></pre>
+<p><strong>You have just encountered the entire privilege model in one line of output.</strong> <code>others</code> has no<br />
+read bit, which is why you cannot read it. <code>sudo</code> works because this is a single-purpose<br />
+challenge machine.</p>
+<p><strong>Level 5 — a binary, not a text file.</strong></p>
+<pre><code class="language-bash">ls -la
+file ./-file                    # identify the type
+cat ./-file                     # garbage - it is binary
+strings ./-file | grep password # extract printable strings, then filter
+</code></pre>
+<p><code>strings ./-file</code> alone usually prints the password in the last line.</p>
+<p><strong>Level 6 — find a file owned by a user, no permission to read it directly.</strong></p>
+<pre><code class="language-bash">find / -user bandit7 -readable 2&gt;/dev/null
+cat /home/bandit7/.ssh/id_rsa   # or wherever find points
+</code></pre>
+<p>Two flags worth memorising: <code>-user &lt;name&gt;</code> and <code>-readable</code> / <code>-writable</code>. Redirect stderr to<br />
+<code>/dev/null</code> because <code>/proc</code> and restricted directories are noisy.</p>
+<p><strong>Level 7 — permissions again, with <code>-ls</code>.</strong></p>
+<pre><code class="language-bash">find / -user bandit6 -ls 2&gt;/dev/null | grep -E &quot;bandit7|\.txt&quot;
+sudo cat /home/bandit6/.secret
+</code></pre>
+<p><strong>Level 8 — the file is hidden and there are a lot of them.</strong></p>
+<pre><code class="language-bash">find / -user bandit6 -group bandit6 -ls 2&gt;/dev/null
+sudo cat /home/bandit6/.secret
+find . -readable -type f -exec cat {} \; 2&gt;/dev/null | grep -i password
+</code></pre>
+<p>The <code>-exec ... \;</code> form runs a command per result. This is an extremely common enumeration<br />
+pattern you will use constantly.</p>
+<p><strong>Level 9 — binary again, different tool.</strong></p>
+<pre><code class="language-bash">find . -readable -type f -exec strings {} \; 2&gt;/dev/null | grep -i password
+strings ./-file | grep -i password
+</code></pre>
+<p><strong>Level 10 — base64.</strong> The password is encoded, so you must decode it.</p>
+<pre><code class="language-bash">ls -la
+cat data.txt
+base64 -d data.txt
+echo &quot;cGFzc3dvcmQ=&quot; | base64 --decode
+</code></pre>
+<p>Useful variants: <code>base64 -w0</code> to strip line wrapping, <code>xxd -r -p</code> for hex, <code>base32 -d</code>.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SSH</strong></td>
+<td>Encrypted remote shell; <code>-p</code> sets the port</td>
+</tr>
+<tr>
+<td><strong>Dotfile</strong></td>
+<td>A hidden file starting with <code>.</code></td>
+</tr>
+<tr>
+<td><strong><code>ls -a</code></strong></td>
+<td>Include entries starting with <code>.</code></td>
+</tr>
+<tr>
+<td><strong>Glob</strong></td>
+<td><code>*</code> and <code>?</code> wildcards expanded by the shell</td>
+</tr>
+<tr>
+<td><strong><code>--</code></strong></td>
+<td>End of options; lets you read files named <code>-foo</code></td>
+</tr>
+<tr>
+<td><strong>Mode bits</strong></td>
+<td><code>rwx</code> per owner/group/others</td>
+</tr>
+<tr>
+<td><strong>gid / group</strong></td>
+<td>Whose file is it, and who else may read it</td>
+</tr>
+<tr>
+<td><strong><code>find -exec</code></strong></td>
+<td>Run a command per matched file</td>
+</tr>
+<tr>
+<td><strong><code>strings</code></strong></td>
+<td>Print printable sequences from a binary</td>
+</tr>
+<tr>
+<td><strong><code>base64 -d</code></strong></td>
+<td>Decode; base64 is an <strong>encoding</strong>, not encryption</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the useful flags, drilled ---
+ls -la
+ls -ld /etc/passwd
+cat -A /etc/passwd          # show non-printing characters
+find . -maxdepth 2 -type f -name &quot;*.txt&quot;
+find / -user bandit0 -group bandit0 -ls 2&gt;/dev/null | head
+find / -perm -4000 -type f 2&gt;/dev/null | head      # SUID
+find / -writable -type f 2&gt;/dev/null | head        # world/group writable
+
+# --- reading awkward files ---
+cat ./-file                 # works because the name is &quot;-file&quot;
+cat -- ./-file              # the explicit form
+cat ./*readme*              # glob when you do not know the name
+
+# --- strings and encodings ---
+strings /bin/ls | head -20
+base64 -w0 data.txt
+base64 -d data.txt
+echo &quot;SGVsbG8=&quot; | base32 -d 2&gt;/dev/null
+xxd data.txt | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> clear Bandit levels 0-10 and build a cheat-sheet of the patterns.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/otw-00 &amp;&amp; cd ~/aegis/labs/otw-00
+
+# Log every session so you can review what actually worked
+{
+  echo &quot;=== Bandit 0-10 — $(date -Iseconds) ===&quot;
+} &gt; 00-journal.txt
+
+# Connect and work the levels
+ssh bandit0@bandit.labs.overthewire.org -p 2220
+</code></pre>
+<p><strong>On the box, keep a running notes file:</strong></p>
+<pre><code class="language-bash"># on the Bandit machine
+cat &gt; ~/my-notes.txt &lt;&lt;'EOF'
+# commands that worked
+
+ls -la                          # reveal hidden files
+find / -user X -readable 2&gt;/dev/null
+find . -type f -exec strings {} \;
+cat ./-file                     # names starting with -
+base64 -d file
+sudo cat &lt;unreadable&gt;           # permission level
+EOF
+cat ~/my-notes.txt
+</code></pre>
+<p><strong>When you finish levels 0-10, come back and build your cheat-sheet:</strong></p>
+<pre><code class="language-bash">cd ~/aegis/labs/otw-00
+cat &gt; 01-patterns.md &lt;&lt;'EOF'
+# Bandit 0-10 patterns
+
+| Problem | Command |
+|---|---|
+| files are hidden | `ls -la` |
+| file named `-x` | `cat ./-x` |
+| filename unknown | `cat ./*readme*` |
+| permission denied | `sudo cat` (understand why first) |
+| file is binary | `strings FILE \| grep -i password` |
+| find files by owner | `find / -user NAME -readable 2&gt;/dev/null` |
+| run cmd on results | `find . -type f -exec CMD {} \;` |
+| data is encoded | `base64 -d FILE` |
+EOF
+cat 01-patterns.md | tee 01-patterns.txt
+</code></pre>
+<p><strong>Record:</strong> <code>01-patterns.md</code>. Every one of those patterns is used in real engagements daily.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does <code>cat readme</code> fail to find a file that <code>ls -a</code> shows?</li>
+<li>What does <code>-rw-r-----</code> permit for "others", and why does <code>cat</code> then fail?</li>
+<li>Why is <code>strings</code> the right tool for a binary, and <code>cat</code> the wrong one?</li>
+<li>What does <code>find / -user X -readable 2&gt;/dev/null</code> do, and why redirect stderr?</li>
+<li>base64 is an encoding, not encryption — what does that mean practically when decoding?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Linux Shell Puzzles</strong> → <strong>OverTheWire Bandit</strong> → <strong>find &amp; locate Enumeration</strong> →<br />
+<strong>File Permissions</strong> → <strong>OTW</strong> on the Concept Graph.</p>

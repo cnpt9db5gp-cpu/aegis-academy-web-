@@ -1,0 +1,238 @@
+<h1 id="disk-forensics-challenges">Disk Forensics Challenges</h1>
+<h2 id="summary">Summary</h2>
+<p>The disk is where most challenges' answers live. This note is the discipline for working a disk<br />
+image against ground truth: the artefact classes you will meet, the order to work them in, and<br />
+the questions that appear in every one.</p>
+<p>The framing: <strong>disk forensics is a lookup problem with a time<br />
+component.</strong> Almost every question has an answer in a specific,<br />
+findable structure, and the skill is knowing which structure holds<br />
+which question.</p>
+<blockquote>
+<p>Companion to <code>cd-01</code> (the flow) and <code>for-04</code> (carving). This note is<br />
+the discipline against real challenges.</p>
+</blockquote>
+<h2 id="the-artefact-classes-and-what-each-answers">The artefact classes, and what each answers</h2>
+<pre><code class="language-text">  ARTEFACT                     ANSWERS THESE QUESTIONS
+  --------------------------------------------------------------------------
+  FILE SYSTEM (MFT)            what existed, when it was created and
+                               modified, where it was, its size,
+                               whether it is deleted, its streams
+
+  $UsnJrnl                     the file system's own record of
+                               creates/renames/deletes. Survives
+                               timestomping. Answers &quot;was this
+                               renamed, and from where&quot;
+
+  PREFETCH                     which executables ran, and when
+                               (last run time). Answers &quot;what ran&quot;
+
+  EVENT LOGS (.evtx)           logons, process creation, service and
+                               task changes, the Security log, and
+                               whether the log was cleared
+
+  REGISTRY                     persistence, configuration, USB
+                               devices, installed software, recent
+                               documents, user activity (UserAssist),
+                               and what the user typed
+
+  NTUSER.DAT                   per-user: logon times, RunMRU
+                               (typed Run commands), TypedPaths
+                               (explorer paths typed or clicked),
+                               RecentDocs, MountPoints2
+
+  LNK FILES (jump lists)       what was opened FROM EXPLORER, with
+                               timestamps. Survives the file being
+                               deleted. Answers &quot;what did the user do&quot;
+
+  $MFT's RESIDENT DATA         the content of small (&lt;700 byte) files,
+                               including deleted ones
+
+  RECYCLE BIN ($I + $R)        the original path, size, and deletion
+                               time of a deleted file
+
+  BROWSER DATA                 downloads, history, cookies, saved
+                               passwords (DPAPI-encrypted), and
+                               the autofill history
+
+  EMAIL CLIENT DB              whether it came by email, from whom,
+                               with the header intact
+
+  SLACK / BACKUP DATA          things the file system never saw
+
+  PREFETCH vs $UsnJrnl         prefetch says &quot;it ran&quot;; $UsnJrnl says
+                               &quot;the file system's view&quot;. When they
+                               disagree about EXISTENCE, you have a
+                               timestomp.
+</code></pre>
+<h2 id="the-order-that-works">The order that works</h2>
+<pre><code class="language-bash"># cd-01's 03-triage.sh produces the file map. From there:
+
+# 1. THE FILE MAP, and the four greps
+grep -iE &quot;\\\\(Downloads|Desktop|Temp|Startup|Recycle\.Bin)\\\\&quot; mft.txt
+grep -iE '\.(exe|bat|ps1|vbs|js|scr|hta|jar)$' mft.txt
+grep '\*' mft.txt                    # deleted
+grep -E '\*:' mft.txt                # alternate data streams
+
+# 2. PREFETCH, and diff it against what is on disk
+#    an executable that ran but no longer exists is the interesting one
+fls -r -p part.dd | grep -i prefetch | grep -i '\.exe' \
+  | sed -E 's/.*\\([A-Z0-9_-]+\.EXE)-[0-9A-F]{10}\.pdb/\1/' | sort -u &gt; ran.txt
+grep -iE '\.exe$' mft.txt | sed -E 's/.*\\//' | sort -u &gt; present.txt
+comm -23 ran.txt present.txt
+#    ^ ran and is gone. THAT list is where the answer usually is.
+
+# 3. THE REGISTRY: persistence first
+icat part.dd &lt;reg_hive_inode&gt; &gt; system.hive
+python3 -c &quot;
+from Registry import Registry
+r = Registry.Registry('system.hive')
+for k in r.open('Microsoft\\\\Windows\\\\CurrentVersion\\\\Run'):
+    print(k.path(), '=', k.value())
+for k in r.open('Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon'):
+    print(k.path(), '=', k.value())
+&quot;
+# python-registry: pipx install python-registry
+
+# 4. THE EVENT LOGS, which is where the timeline is
+icat part.dd &lt;evtx_inode&gt; &gt; sec.evtx
+python3 -c &quot;
+import Evtx.Evtx as evtx
+import Evtx.Views as e_views
+with evtx.Evtx('sec.evtx') as log:
+    for r in log.records():
+        print(r.timestamp(), r.xml().replace('\n',' ')[:200])
+&quot;
+# python-evtx: pipx install python-evtx
+# and: EvtxECmd (libevtx-utils), for export to XML
+
+# 5. THE USER ACTIVITY (NTUSER + jump lists), which is the last thing
+#    people look at and the first thing a report needs
+icat part.dd &lt;ntuser_inode&gt; &gt; ntuser.dat
+python3 -c &quot;
+from Registry import Registry
+r = Registry.Registry('ntuser.dat')
+for k in r.open('Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Explorer\\\\RunMRU'):
+    print(k.path(), '=', k.value())
+for k in r.open('Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Explorer\\\\TypedPaths'):
+    print(k.path(), '=', k.value())
+&quot;
+# 8. THE BROWSER, if the scenario is about delivery
+#    Chrome:   User Data/Default/History (SQLite), Cookies, Login Data
+#    Firefox:  places.sqlite, cookies.sqlite, logins.json (encrypted)
+#    the timestamps are WEBSOCKET (microseconds since 1601), not
+#    FILETIME. That conversion is a per-challenge skill.
+</code></pre>
+<h2 id="the-conversions-nobody-teaches-you">The conversions nobody teaches you</h2>
+<pre><code class="language-python">mkdir -p ~/aegis/labs/cd-02
+cd ~/aegis/labs/cd-02
+
+cat &gt; 01-conversions.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;The timestamp conversions every disk challenge needs.
+
+These are the four formats you will meet, and getting them wrong is
+the single most common reason a disk answer is marked incorrect even
+though you found the right artefact.
+&quot;&quot;&quot;
+from datetime import datetime, timedelta, timezone
+import struct
+
+EPOCH_FILETIME = datetime(1601, 1, 1, tzinfo=timezone.utc)
+EPOCH_UNIX     = datetime(1970, 1, 1, tzinfo=timezone.utc)
+EPOCH_WEBKIT   = datetime(1601, 1, 1, tzinfo=timezone.utc)
+
+def filetime_to_dt(v: int) -&gt; datetime:
+    &quot;&quot;&quot;Windows FILETIME: 100-nanosecond intervals since 1601-01-01.&quot;&quot;&quot;
+    return EPOCH_FILETIME + timedelta(microseconds=v / 10)
+
+def unix_to_dt(v: int) -&gt; datetime:
+    return EPOCH_UNIX + timedelta(seconds=v)
+
+def webkit_to_dt(v: int) -&gt; datetime:
+    &quot;&quot;&quot;Chrome uses microseconds since 1601-01-01, like FILETIME but
+    scaled by 1000. Getting this wrong shifts dates by 100000x.&quot;&quot;&quot;
+    return EPOCH_WEBKIT + timedelta(microseconds=v)
+
+def dos_to_dt(v: int) -&gt; datetime:
+    &quot;&quot;&quot;MS-DOS date-time: 2 bytes date + 2 bytes time. Used in $I files
+    (recycle bin) and in ZIP local headers.&quot;&quot;&quot;
+    date, time = struct.unpack(&quot;&lt;HH&quot;, struct.pack(&quot;&lt;I&quot;, v))
+    y   = ((date &gt;&gt; 9) &amp; 0x7f) + 1980
+    mon = (date &gt;&gt; 5) &amp; 0x0f
+    d   = date &amp; 0x1f
+    hh  = (time &gt;&gt; 11) &amp; 0x1f
+    mm  = (time &gt;&gt; 5) &amp; 0x3f
+    ss  = (time &amp; 0x1f) * 2
+    return datetime(y, mon, d, hh, mm, ss)
+
+def ft_to_dos(dt: datetime):
+    y = max(dt.year, 1980) - 1980
+    date = (y &lt;&lt; 9) | (dt.month &lt;&lt; 5) | dt.day
+    time = (dt.hour &lt;&lt; 11) | (dt.minute &lt;&lt; 5) | (dt.second // 2)
+    return (date | (time &lt;&lt; 16))
+
+def show(label, raw, conv):
+    dt = conv(raw)
+    print(f&quot;  {label:&lt;34} {raw:&lt;24} {dt:%Y-%m-%d %H:%M:%S} UTC&quot;)
+
+print(&quot;  === THE SAME INSTANT, IN FOUR FORMATS ===&quot;)
+target = datetime(2026, 6, 11, 14, 32, 41, tzinfo=timezone.utc)
+ft  = int((target - EPOCH_FILETIME).total_seconds() * 1e7)
+uni = int((target - EPOCH_UNIX).total_seconds())
+wk  = int((target - EPOCH_WEBKIT).total_seconds() * 1e6)
+print()
+show(&quot;FILETIME (MFT, $I, .evtx)&quot;,      ft,  filetime_to_dt)
+show(&quot;UNIX epoch (logs, python)&quot;,      uni, unix_to_dt)
+show(&quot;WebKit/Chrome microseconds&quot;,     wk,  webkit_to_dt)
+print(f&quot;  {'DOS date-time (recycle, zip)':&lt;34} {ft_to_dos(target):&lt;24} {target:%Y-%m-%d %H:%M:%S} UTC&quot;)
+print()
+print(&quot;  ^ ONE instant, four encodings, four scales. A FILETIME read as&quot;)
+print(&quot;    a UNIX epoch is 369 years out. A Chrome timestamp read as a&quot;)
+print(&quot;    FILETIME is 100000x out. Neither is obviously wrong.&quot;)
+print()
+print(&quot;  === THE COMMON CONVERSIONS, DO THIS ONCE ===&quot;)
+print(f&quot;    FILETIME -&gt; ISO : {filetime_to_dt(ft).isoformat()}&quot;)
+print(f&quot;    UNIX     -&gt; ISO : {unix_to_dt(uni).isoformat()}&quot;)
+print(f&quot;    WebKit   -&gt; ISO : {webkit_to_dt(wk).isoformat()}&quot;)
+print()
+print(&quot;  === ONES TO RECOGNISE ON SIGHT ===&quot;)
+for name, v, conv in [
+    (&quot;FILETIME zero (never)&quot;,            0, filetime_to_dt),
+    (&quot;MFT epoch when no timestamp&quot;,      0, filetime_to_dt),
+    (&quot;Chrome 'never visited'&quot;,           9223372036854775807, webkit_to_dt),
+    (&quot;DOS zip 1980 floor&quot;,               0x00210000, dos_to_dt),
+]:
+    try: show(name, v, conv)
+    except Exception as e: print(f&quot;  {name:&lt;34} {'-':&lt;24} {type(e).__name__}&quot;)
+print()
+print(&quot;  9223372036854775807 in Chrome's history means 'never'. Seeing&quot;)
+print(&quot;  it as a date is how you report a 7-billion-year-old cookie.&quot;)
+PY
+python3 01-conversions.py 2&gt;&amp;1 | tee 02-conversions.txt
+rm -f 01-conversions.py
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: the same instant in four formats — FILETIME, UNIX epoch, Chrome<br />
+WebKit microseconds, and DOS date-time — with the two failure modes called out explicitly. A<br />
+FILETIME read as a UNIX epoch is 369 years out; a Chrome timestamp read as a FILETIME is 100,000×<br />
+out. <strong>Neither produces an obviously wrong answer</strong>, which is why it's the most common reason a<br />
+correct artefact produces an incorrect submission.</p>
+<p><strong><code>02-conversions.txt</code></strong> also shows the sentinel values — <code>0</code> for a never-timestamped MFT entry,<br />
+<code>9223372036854775807</code> for a Chrome "never visited" cookie (read as a date, it's a<br />
+seven-billion-year-old cookie).</p>
+<p><strong>Record:</strong> <code>02-conversions.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name eight artefact classes and the question each answers.</li>
+<li>What does prefetch say that <code>$UsnJrnl</code> does not, and vice versa?</li>
+<li>How do you find an executable that ran but no longer exists on disk?</li>
+<li>Why are jump lists valuable when the files they point to are deleted?</li>
+<li>Give the signature of a timestomp detectable by comparing prefetch to <code>$UsnJrnl</code>.</li>
+<li>What is in <code>NTUSER.DAT</code>'s <code>RunMRU</code> and <code>TypedPaths</code>, and why do they matter?</li>
+<li>Which four timestamp formats will you meet, and what happens if you confuse FILETIME with<br />
+   UNIX epoch?</li>
+<li>What does <code>9223372036854775807</code> mean in a Chrome history database?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>File Forensics</strong> → <strong>NTFS</strong> → <strong>Timeline Analysis</strong> → <strong>Windows Registry</strong> →<br />
+<strong>Incident Response</strong>.<br />
+<code>cd-03</code> moves the same questions to memory.</p>

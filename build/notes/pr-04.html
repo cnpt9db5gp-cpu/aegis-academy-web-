@@ -1,0 +1,241 @@
+<h1 id="credentials-on-disk-config-files-history-ssh-keys">Credentials on Disk: Config Files, History, SSH Keys</h1>
+<h2 id="summary">Summary</h2>
+<p>Credentials are everywhere on a Linux host, and almost none of them are encrypted. This lecture is<br />
+the enumeration pattern that finds them — and the hardening advice that stops them being there.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Config files</strong> for services often contain plaintext passwords, tokens, or keys</li>
+<li><strong>Shell history</strong> records every command, including ones with passwords inline</li>
+<li><strong>SSH keys</strong>: <code>authorized_keys</code> is a persistence mechanism and a lateral movement vector</li>
+<li><strong>Process environment</strong> (<code>/proc/PID/environ</code>) leaks secrets to any local user for the same UID</li>
+<li><strong>Backups and temp files</strong> are the classic place credentials get left behind</li>
+<li><code>.env</code>, <code>config.yml</code>, <code>settings.py</code>, <code>wp-config.php</code>, <code>*.bak</code>, <code>*.old</code> are all worth grepping</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Plaintext credential</strong></td>
+<td>Stored without hashing — the finding</td>
+</tr>
+<tr>
+<td><strong>SSH key pair</strong></td>
+<td>Private key on disk, public key in <code>authorized_keys</code></td>
+</tr>
+<tr>
+<td><strong><code>authorized_keys</code></strong></td>
+<td>Where a key may log in from — also a persistence path</td>
+</tr>
+<tr>
+<td><strong><code>known_hosts</code></strong></td>
+<td>Remembered server keys, useful for host-key verification</td>
+</tr>
+<tr>
+<td><strong><code>/proc/PID/environ</code></strong></td>
+<td>A process's environment variables</td>
+</tr>
+<tr>
+<td><strong>Credential exposure</strong></td>
+<td>Secrets discoverable on the filesystem</td>
+</tr>
+<tr>
+<td><strong>History file</strong></td>
+<td><code>~/.bash_history</code>, <code>~/.python_history</code></td>
+</tr>
+<tr>
+<td><strong>Backup artefact</strong></td>
+<td><code>file.bak</code>, <code>file~</code>, <code>file.old</code>, <code>file.swp</code></td>
+</tr>
+<tr>
+<td><strong>Secret scanning</strong></td>
+<td>Grepping for key patterns before committing</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the one-liner that finds most plaintext credentials ---
+sudo grep -rIl --exclude-dir={proc,sys,dev,run,var/lib/docker} \
+  -E &quot;(password|passwd|pwd|secret|api[_-]?key|token|BEGIN [A-Z ]*PRIVATE KEY)&quot; \
+  /etc /opt /srv /home /var/www 2&gt;/dev/null | head -30
+
+# --- history ---
+ls -la ~/.bash_history ~/.zsh_history ~/.python_history ~/.mysql_history 2&gt;/dev/null
+tail -50 ~/.bash_history 2&gt;/dev/null | grep -iE &quot;pass|token|key|curl -u|mysql -p&quot;
+history | grep -iE &quot;sudo|pass&quot; | head
+
+# --- environment of a running process ---
+tr '\0' '\n' &lt; /proc/1/environ 2&gt;/dev/null | head
+sudo ls -l /proc/*/environ 2&gt;/dev/null | head -5
+tr '\0' '\n' &lt; &quot;$(pgrep -u postgres | head -1 | sed 's|^|/proc/|')/environ&quot; 2&gt;/dev/null
+
+# --- ssh material ---
+ls -la ~/.ssh/ 2&gt;/dev/null
+cat ~/.ssh/config 2&gt;/dev/null
+cat ~/.ssh/authorized_keys 2&gt;/dev/null
+sudo find / -name &quot;authorized_keys&quot; -o -name &quot;id_rsa&quot; -o -name &quot;id_ed25519&quot; 2&gt;/dev/null | head -15
+
+# --- hashes, and the offline attack surface ---
+sudo grep -vE '^[^:]*:[!*]?:' /etc/shadow | cut -d: -f1,2 | head
+
+# --- backups and leftovers ---
+sudo find / \( -name &quot;*.bak&quot; -o -name &quot;*~&quot; -o -name &quot;*.old&quot; -o -name &quot;*.swp&quot; -o -name &quot;*.save&quot; \) \
+  -type f 2&gt;/dev/null | head -20
+sudo find / -name &quot;.env&quot; -o -name &quot;*.env&quot; -o -name &quot;config.php&quot; -o -name &quot;settings.py&quot; 2&gt;/dev/null | head
+
+# --- secret scanning your own git history ---
+git log -p --all | grep -iE &quot;(password|secret|api[_-]?key|BEGIN .*PRIVATE KEY)&quot; | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> find credential exposure on your own machine, verify what is actually usable, and<br />
+harden what you found.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/pr-04 &amp;&amp; cd ~/aegis/labs/pr-04
+
+# --- 1. the broad grep ---
+sudo grep -rIl --exclude-dir={proc,sys,dev,run,share,locale,man} \
+  -E &quot;(password|passwd|secret|api[_-]?key|token|BEGIN [A-Z ]*PRIVATE KEY)&quot; \
+  /etc /opt /srv /home /var/www 2&gt;/dev/null | head -40 | tee 01-grep-hits.txt
+echo &quot;$(wc -l &lt; 01-grep-hits.txt) files mention a credential keyword&quot;
+
+# --- 2. history: is it a problem? ---
+{
+  echo &quot;=== history files present ===&quot;
+  ls -la ~/.bash_history ~/.python_history ~/.mysql_history 2&gt;/dev/null || echo &quot;  (none)&quot;
+  echo
+  echo &quot;=== credential-shaped commands in MY history ===&quot;
+  grep -iE &quot;pass|token|key|mysql -p|psql.*-W|curl -u|--user&quot; ~/.bash_history 2&gt;/dev/null | head -10 \
+    || echo &quot;  (nothing found)&quot;
+  echo
+  echo &quot;=== is HISTFILE set? ===&quot;
+  echo &quot;  HISTFILE=${HISTFILE:-&lt;unset&gt;}&quot;
+  echo &quot;  HISTSIZE=${HISTSIZE:-&lt;unset&gt;}&quot;
+  echo &quot;  HISTCONTROL=${HISTCONTROL:-&lt;unset&gt;}&quot;
+} 2&gt;&amp;1 | tee 02-history.txt
+
+# --- 3. process environments, readable by root and sometimes by you ---
+{
+  echo &quot;=== environ of my own processes ===&quot;
+  for p in $(pgrep -u $(id -u) | head -10); do
+    if [ -r /proc/$p/environ ]; then
+      vars=$(tr '\0' '\n' &lt; /proc/$p/environ 2&gt;/dev/null | grep -ciE &quot;pass|token|secret|key&quot;)
+      [ &quot;$vars&quot; -gt 0 ] &amp;&amp; echo &quot;  PID $p ($(cat /proc/$p/comm)): $vars credential-ish var(s)&quot;
+    fi
+  done
+  echo
+  echo &quot;=== and the famous one: everything running as root ===&quot;
+  sudo bash -c 'for p in $(pgrep -u 0 | head -20); do
+      n=$(tr &quot;\0&quot; &quot;\n&quot; &lt; /proc/$p/environ 2&gt;/dev/null | grep -ciE &quot;pass|token|secret|api&quot;)
+      [ &quot;$n&quot; -gt 0 ] &amp;&amp; echo &quot;  root PID $p ($(cat /proc/$p/comm)): $n&quot;
+    done'
+} 2&gt;&amp;1 | tee 03-environ.txt
+
+# --- 4. ssh material on this machine ---
+{
+  echo &quot;=== my ~/.ssh ===&quot;
+  ls -la ~/.ssh/ 2&gt;/dev/null
+  echo
+  echo &quot;=== authorised_keys files anywhere (persistence + lateral movement) ===&quot;
+  sudo find / -name authorized_keys -type f 2&gt;/dev/null | head -10
+  echo
+  echo &quot;=== private keys on disk ===&quot;
+  sudo find / \( -name &quot;id_rsa&quot; -o -name &quot;id_ed25519&quot; -o -name &quot;*.pem&quot; \) -type f 2&gt;/dev/null | head -15
+  echo
+  echo &quot;=== permissions on my private key (600 is required) ===&quot;
+  ls -l ~/.ssh/id_* 2&gt;/dev/null
+} 2&gt;&amp;1 | tee 04-ssh.txt
+
+# --- 5. the hash surface ---
+{
+  echo &quot;=== local accounts with a real hash ===&quot;
+  sudo awk -F: 'length($2) &gt; 3 {print &quot;  &quot; $1 &quot; : &quot; substr($2,1,16) &quot;... (&quot; length($2) &quot; chars, type &quot; substr($2,1,3) &quot;)&quot;}' /etc/shadow | head
+  echo
+  echo &quot;=== which algorithm, and is it appropriate? ===&quot;
+  echo &quot;  \$1/\$2 = MD5 (fast, wrong)  \$y = yescrypt (good)  \$6 = SHA-512&quot;
+  echo
+  echo &quot;=== the attack surface these represent ===&quot;
+  echo &quot;  Any of these hashes found on a backup or a colleague's machine is an offline target.&quot;
+} 2&gt;&amp;1 | tee 05-hashes.txt
+
+# --- 6. VERIFY what is actually usable (the important part) ---
+echo &quot;=== test each finding rather than trusting it ===&quot;
+while read -r f; do
+  [ -r &quot;$f&quot; ] || continue
+  # try to find a credential-shaped assignment
+  hit=$(grep -oE &quot;(password|passwd|secret|token)[[:space:]]*[=:][[:space:]]*['\&quot;]?[^'\&quot;[:space:]]+&quot; &quot;$f&quot; 2&gt;/dev/null | head -1)
+  if [ -n &quot;$hit&quot; ]; then
+    echo &quot;  $f -&gt; $hit&quot;
+  fi
+done &lt; 01-grep-hits.txt | head -15 | tee 06-verified.txt
+
+echo
+echo &quot;Note: report the FILE and the LINE, never the secret value itself.&quot;
+
+# --- 7. harden your own machine ---
+echo
+echo &quot;=== hardening, applied to your own account ===&quot;
+cat &gt;&gt; ~/.bashrc &lt;&lt;'EOF'
+
+# --- AEGIS hardening ---
+export HISTCONTROL=ignorebothspace   # do not record commands beginning with a space
+export HISTSIZE=10000
+export HISTFILESIZE=20000
+umask 077                           # new files private by default
+EOF
+echo &quot;  HISTCONTROL, larger history, umask 077 appended to ~/.bashrc&quot;
+echo
+echo &quot;  umask 077 means: new files get 600, new directories 700.&quot;
+echo &quot;  That alone prevents a whole class of accidental exposure.&quot;
+echo
+echo &quot;=== and a pre-commit secret scan for any repo you keep ===&quot;
+# Prefer ~/aegis/tools/; fall back to the current directory if that
+# tree does not exist. mkdir -p first so the redirect target is real -
+# otherwise the first `cat` fails and the shell reads the heredoc into
+# the fallback, which is confusing to debug.
+mkdir -p ~/aegis/tools
+if cat &gt; ~/aegis/tools/secret_scan.sh 2&gt;/dev/null &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Fail if anything looks like a credential is about to be committed.
+set -euo pipefail
+PAT='(password|passwd|secret|api[_-]?key|token)[[:space:]]*[=:][[:space:]]*[&quot;'\'']?[^&quot;'\''[:space:]]{6,}|BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}'
+if git diff --cached | grep -nIE &quot;$PAT&quot;; then
+  echo &quot;POSSIBLE SECRET STAGED - commit aborted&quot; &gt;&amp;2; exit 1
+fi
+echo &quot;no obvious secrets staged&quot;
+EOF
+then
+  DEST=~/aegis/tools/secret_scan.sh
+else
+  cat &gt; secret_scan.sh &lt;&lt;'EOF2'
+#!/usr/bin/env bash
+# Fail if anything looks like a credential is about to be committed.
+set -euo pipefail
+PAT='(password|passwd|secret|api[_-]?key|token)[[:space:]]*[=:][[:space:]]*[&quot;'\'']?[^&quot;'\''[:space:]]{6,}|BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}'
+if git diff --cached | grep -nIE &quot;$PAT&quot;; then
+  echo &quot;POSSIBLE SECRET STAGED - commit aborted&quot; &gt;&amp;2; exit 1
+fi
+echo &quot;no obvious secrets staged&quot;
+EOF2
+  DEST=./secret_scan.sh
+fi
+chmod +x &quot;$DEST&quot; 2&gt;/dev/null || true
+echo &quot;  $DEST written - run it before any commit&quot;
+</code></pre>
+<p><strong>Step 6 is the professional habit.</strong> A finding is "file X line 12 contains a plaintext<br />
+credential for service Y". It is never "here is the password".</p>
+<p><strong>Record:</strong> <code>06-verified.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name five places credentials leak from on a Linux host.</li>
+<li>Why is a large <code>HISTSIZE</code> a security concern?</li>
+<li>What does <code>umask 077</code> do to newly created files?</li>
+<li>Why should a pentest report name the file and line rather than the secret?</li>
+<li>Why is <code>/proc/PID/environ</code> a finding even when the file is root-only?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Credential Exposure</strong> → <strong>SSH Keys</strong> → <strong>Environment Variables</strong> → <strong>Password Hashing</strong> →<br />
+<strong>Persistence</strong> → <strong>Command Injection</strong>.</p>

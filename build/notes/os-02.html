@@ -1,0 +1,350 @@
+<h1 id="c-and-gdb">C and gdb</h1>
+<h2 id="summary">Summary</h2>
+<p>Exploit development happens in C, and understanding it happens in gdb. This lecture covers what<br />
+you need about the C language that <em>matters for memory safety</em> — not the whole language — and how<br />
+to drive a debugger well enough to watch a stack frame being built.</p>
+<p><strong>This is the most practically important lecture in 6.S081.</strong> If you skip it, lectures 4-7 become<br />
+memorisation instead of comprehension.</p>
+<h2 id="the-c-parts-that-cause-vulnerabilities">The C parts that cause vulnerabilities</h2>
+<h3 id="pointers-and-manual-memory">Pointers and manual memory</h3>
+<pre><code class="language-c">int  x = 5;
+int *p = &amp;x;     // p holds the ADDRESS of x
+*p = 10;         // x is now 10
+
+char buf[32];
+char *q = buf;   // q points at the START of the array
+q + 5            // points 5 bytes in - still inside the array
+q + 40           // still a valid POINTER, but now out of bounds
+</code></pre>
+<p><strong>The single most important C fact for security:</strong> the language does not know your array's size.<br />
+<code>q + 40</code> is a perfectly legal pointer expression. It is the programmer's job to check bounds, and<br />
+C will never check it for you.</p>
+<h3 id="the-dangerous-functions">The dangerous functions</h3>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Problem</th>
+<th>Safe-ish replacement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>strcpy</code></td>
+<td>No destination size limit</td>
+<td><code>strncpy</code> + explicit null termination</td>
+</tr>
+<tr>
+<td><code>strcat</code></td>
+<td>No size limit on append</td>
+<td><code>strncat</code></td>
+</tr>
+<tr>
+<td><code>gets</code></td>
+<td>Cannot be used safely, ever</td>
+<td><code>fgets</code></td>
+</tr>
+<tr>
+<td><code>sprintf</code></td>
+<td>Can overflow the destination</td>
+<td><code>snprintf</code></td>
+</tr>
+<tr>
+<td><code>scanf("%s")</code></td>
+<td>No width limit</td>
+<td><code>scanf("%10s", ...)</code></td>
+</tr>
+<tr>
+<td><code>memcpy</code></td>
+<td>Length is the caller's problem</td>
+<td>check first</td>
+</tr>
+</tbody>
+</table>
+<p><code>strcpy</code>, <code>strcat</code> and <code>gets</code> are how buffer overflows are born. You will see them in lecture 4.</p>
+<h3 id="undefined-behaviour">Undefined behaviour</h3>
+<p>Anything the C standard does not specify is "undefined behaviour", and the compiler may do<br />
+<em>anything</em> — including removing your bounds check.</p>
+<pre><code class="language-c">int n = 32;
+char buf[n];
+// VLA (variable length array) is a GCC extension, not standard C
+</code></pre>
+<p>Practical consequence: <strong><code>-O2</code> can delete a check it decides is redundant.</strong> This is why exploit<br />
+code is compiled at <code>-O0</code> and why "the check was there" is not a defence.</p>
+<h3 id="arrays-structs-and-the-stack">Arrays, structs and the stack</h3>
+<pre><code class="language-c">struct user {
+    int  uid;
+    char name[32];
+};                 // 36 bytes: 4 + 32, no padding surprise here
+
+void greet(char *input) {
+    char buf[32];        // 32 bytes of stack
+    strcpy(buf, input);  // if input is longer -&gt; overwrites saved RBP and return address
+}
+</code></pre>
+<p>That function is the entire lecture 4 exploit.</p>
+<h2 id="gdb-the-workflow">gdb: the workflow</h2>
+<pre><code class="language-bash">gcc -g -O0 -fno-stack-protector -no-pie -z execstack vuln.c -o vuln
+gdb ./vuln
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>break main</code> / <code>b *0x401136</code></td>
+<td>Breakpoint at a function / address</td>
+</tr>
+<tr>
+<td><code>run</code> / <code>start</code></td>
+<td>Execute / run to main</td>
+</tr>
+<tr>
+<td><code>next</code> / <code>n</code></td>
+<td>Step over</td>
+</tr>
+<tr>
+<td><code>step</code> / <code>s</code></td>
+<td>Step into</td>
+</tr>
+<tr>
+<td><code>finish</code></td>
+<td>Run until the current function returns</td>
+</tr>
+<tr>
+<td><code>continue</code> / <code>c</code></td>
+<td>Run to next breakpoint</td>
+</tr>
+<tr>
+<td><code>print x</code> / <code>p x</code></td>
+<td>Print a variable</td>
+</tr>
+<tr>
+<td><code>p/x $rsp</code></td>
+<td>Print in hex</td>
+</tr>
+<tr>
+<td><code>info registers</code></td>
+<td>All registers</td>
+</tr>
+<tr>
+<td><code>x/16xb $rsp</code></td>
+<td>16 bytes at an address, hex</td>
+</tr>
+<tr>
+<td><code>x/4gx $rbp</code></td>
+<td>4 quadwords at a frame pointer</td>
+</tr>
+<tr>
+<td><code>backtrace</code> / <code>bt</code></td>
+<td>Call stack</td>
+</tr>
+<tr>
+<td><code>disassemble main</code></td>
+<td>Assembly for a function</td>
+</tr>
+<tr>
+<td><code>info functions</code></td>
+<td>All symbols</td>
+</tr>
+<tr>
+<td><code>delete breakpoints</code></td>
+<td>Clear them all</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-session-you-will-actually-have">The session you will actually have</h3>
+<pre><code>(gdb) break *main
+(gdb) run
+(gdb) disassemble main
+(gdb) break *0x4011a6          # the call instruction
+(gdb) continue
+(gdb) info registers rsp rbp rip
+(gdb) x/16gx $rsp
+(gdb) p/x $rbp
+(gdb) x/s $rdi
+(gdb) bt
+(gdb) quit
+</code></pre>
+<p><strong>Write down the rsp/rbp values.</strong> On x86-64 the stack grows downward, so higher addresses are<br />
+older frames. Your buffer sits at low addresses near <code>rsp</code>.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Pointer</strong></td>
+<td>A variable holding an address</td>
+</tr>
+<tr>
+<td><strong>Dangling pointer</strong></td>
+<td>Points at freed or out-of-scope memory</td>
+</tr>
+<tr>
+<td><strong>Buffer overflow</strong></td>
+<td>Writing past the end of a buffer</td>
+</tr>
+<tr>
+<td><strong>Stack frame</strong></td>
+<td>Per-function region: locals, saved RBP, return address</td>
+</tr>
+<tr>
+<td><strong>Return address</strong></td>
+<td>Where execution resumes after <code>ret</code></td>
+</tr>
+<tr>
+<td><strong><code>ret</code> instruction</strong></td>
+<td>Pops the saved address into RIP</td>
+</tr>
+<tr>
+<td><strong>Breakpoint</strong></td>
+<td>Pause point; INT3 (0xCC) in software</td>
+</tr>
+<tr>
+<td><strong>Watchpoint</strong></td>
+<td>Pause when an address changes</td>
+</tr>
+<tr>
+<td><strong>Undefined behaviour</strong></td>
+<td>Anything the standard does not specify</td>
+</tr>
+<tr>
+<td><strong>PIE</strong></td>
+<td>Position-independent executable; randomised base</td>
+</tr>
+<tr>
+<td><strong>NX</strong></td>
+<td>Non-executable stack/heap</td>
+</tr>
+<tr>
+<td><strong>ASLR</strong></td>
+<td>Randomised load addresses</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">command -v gdb gdb-multiarch valgrind cppcheck clang gcc make
+
+# --- the toolchain check ---
+gcc --version | head -1
+gdb --version | head -1
+ls /usr/bin/gdb*
+
+# --- batch mode, for scripting ---
+gdb -q --batch -ex 'break main' -ex 'run' -ex 'info registers rip rsp rbp' \
+    -ex 'disassemble main' -ex 'bt' ./myprog
+
+# --- static analysis while you type ---
+gcc -Wall -Wextra -Wformat-security -fsanitize=address -g vuln.c -o vuln-asan
+./vuln-asan                    # AddressSanitizer catches overflows for you
+gcc -fanalyzer -Wall vuln.c -o /dev/null
+
+# --- cppcheck: catch unsafe function use ---
+cppcheck --enable=warning,style,performance,security vuln.c 2&gt;&amp;1 | head -20
+
+# --- valgrind: precise memory errors ---
+valgrind --leak-check=full --track-origins=yes ./vuln
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a vulnerable C function, compile it three ways, and watch the stack frame<br />
+under gdb.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-02 &amp;&amp; cd ~/aegis/labs/os-02
+
+cat &gt; vuln.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+void vulnerable(const char *input) {
+    char buffer[32];
+    strcpy(buffer, input);          /* the bug */
+    printf(&quot;copied: %s\n&quot;, buffer);
+}
+
+int safe(const char *input) {
+    char buffer[32];
+    strncpy(buffer, input, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';   /* explicit termination */
+    printf(&quot;copied safely: %s\n&quot;, buffer);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc &lt; 2) { fprintf(stderr, &quot;usage: %s &lt;string&gt; [safe]\n&quot;, argv[0]); return 1; }
+    if (argc &gt; 2 &amp;&amp; argv[2][0] == 's') return safe(argv[1]);
+    vulnerable(argv[1]);
+    return 0;
+}
+EOF
+
+# --- build: weak, default, hardened ---
+gcc -Wall -Wextra -g -O0 -fno-stack-protector -no-pie -z execstack vuln.c -o vuln-weak
+gcc -Wall -Wextra -g -O0 vuln.c -o vuln-default
+gcc -Wall -Wextra -g -O0 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pie -fPIE vuln.c -o vuln-hard
+
+{
+  for b in vuln-hard vuln-default vuln-weak; do
+    echo &quot;==================================&quot;
+    echo &quot;$b&quot;
+    echo &quot;==================================&quot;
+    file ./$b; checksec --file=./$b 2&gt;/dev/null; echo
+  done
+} | tee 01-hardening.txt
+
+# --- the observable difference ---
+SHORT=$(python3 -c 'print(&quot;A&quot;*20)')
+LONG=$(python3 -c 'print(&quot;A&quot;*200)')
+./vuln-hard   &quot;$SHORT&quot;; echo &quot;hard/short:   $?&quot;
+./vuln-hard   &quot;$LONG&quot;;  echo &quot;hard/long:    $?&quot;
+./vuln-default &quot;$LONG&quot;;  echo &quot;default/long: $?&quot;
+./vuln-weak   &quot;$LONG&quot;;  echo &quot;weak/long:    $?&quot;
+./vuln-weak   &quot;$SHORT&quot; safe; echo &quot;safe version: $?&quot;
+
+# --- the gdb session ---
+gdb -q --batch \
+  -ex 'break main' -ex 'run' \
+  -ex 'info registers rsp rbp rip' \
+  -ex 'disassemble main' \
+  -ex 'break vulnerable' -ex 'run' \
+  -ex 'info registers rsp rbp' \
+  -ex 'x/48xb $rbp-32' \
+  -ex 'print buffer' \
+  -ex 'bt' \
+  -ex 'finish' \
+  ./vuln-weak &quot;$LONG&quot; 2&gt;&amp;1 | tee 02-gdb-trace.txt
+
+echo &quot;In 02-gdb-trace.txt, compare rsp vs rbp.&quot;
+echo &quot;buffer is at LOW addresses (near rsp). The return address sits just ABOVE rbp.&quot;
+
+# --- let a tool find it for you ---
+gcc -g -fsanitize=address vuln.c -o vuln-asan 2&gt;/dev/null
+./vuln-asan &quot;$LONG&quot; 2&gt;&amp;1 | head -15 | tee 03-asan.txt
+echo &quot;AddressSanitizer pinpointed the overflow in one line. That is the whole job.&quot;
+
+# --- static analysis ---
+cppcheck --enable=warning,style,security vuln.c 2&gt;&amp;1 | head -10 | tee 04-cppcheck.txt
+</code></pre>
+<p><strong>Step 3 is the whole lecture in miniature.</strong> <code>buffer</code> occupies 32 bytes; immediately above it sit<br />
+the saved frame pointer and the return address. Overwriting those is the return address you already<br />
+saw in <code>kr-*</code>/<code>ms-05</code>, now under your control.</p>
+<p><strong>Record:</strong> in your scratchpad, write the exact byte offsets: where <code>buffer</code> starts, where the<br />
+saved RBP sits, where the return address sits. <code>ex-03</code> depends on these numbers.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is <code>q + 40</code> legal C even when the array is only 32 bytes?</li>
+<li>Name three functions that cannot be used safely and their replacements.</li>
+<li>Why can the compiler delete a bounds check?</li>
+<li>What does <code>x/16xb $rsp</code> print, and what are <code>x</code>, <code>i</code>, <code>s</code> short for?</li>
+<li>On x86-64, is the buffer at a higher or lower address than the return address?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>C Fundamentals</strong> → <strong>gdb</strong> → <strong>Stack Frame</strong> → <strong>RBP / RSP</strong> → <strong>strcpy</strong> → <strong>Buffer Overflow</strong>.<br />
+Every Tier 3 exploitation lecture depends on the numbers you just produced.</p>

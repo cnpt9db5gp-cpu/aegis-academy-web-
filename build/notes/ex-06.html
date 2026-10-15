@@ -1,0 +1,344 @@
+<h1 id="bypassing-nx-pie-and-full-relro">Bypassing NX, PIE and Full RELRO</h1>
+<h2 id="summary">Summary</h2>
+<p>The final board. With NX on, PIE on, and Full RELRO, most of the classic routes are closed. What<br />
+remains is a set of specific, well-understood techniques — and the recognition that a hardened<br />
+binary often is not the right target.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>NX</strong>: return to existing code (ROP, ret2libc), or place shellcode somewhere executable and jump</li>
+<li><strong>PIE</strong>: leak the binary base or a libc pointer from a format string or an uninitialised read</li>
+<li><strong>Full RELRO</strong>: GOT is read-only → target <code>__malloc_hook</code>/<code>__free_hook</code> (older glibc), the<br />
+  exit handlers, a <code>.fini_array</code> entry, or overwrite a live function pointer</li>
+<li><strong>Modern glibc (2.34+)</strong> removed <code>__malloc_hook</code>/<code>__free_hook</code> — use <code>environ</code>, TLS, or FSOP</li>
+<li><strong>Stack pivot</strong>: move RSP to a larger writable region to gain more overflow capacity</li>
+<li><strong>JOP / SROP</strong>: when you cannot find a usable chain in the binary</li>
+<li><strong>The honest answer</strong>: a properly hardened binary is not the way in. Look for a weaker service.</li>
+</ul>
+<h2 id="the-hardened-binarys-attack-surface">The hardened binary's attack surface</h2>
+<table>
+<thead>
+<tr>
+<th>Mitigation</th>
+<th>Closed off</th>
+<th>What is still open</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NX</td>
+<td>Stack shellcode</td>
+<td>ROP, ret2libc, writable+executable regions (JIT, <code>ld.so</code>)</td>
+</tr>
+<tr>
+<td>PIE</td>
+<td>Fixed code addresses</td>
+<td>Info leaks, partial over-reads, uninitialised stack</td>
+</tr>
+<tr>
+<td>Full RELRO</td>
+<td>GOT overwrite</td>
+<td>Function pointers, exit handlers, heap metadata, hooks</td>
+</tr>
+<tr>
+<td>Canary</td>
+<td>Blind overflow</td>
+<td>Leaks first; then all of the above</td>
+</tr>
+<tr>
+<td>seccomp</td>
+<td>Forbidden syscalls</td>
+<td>Allowed syscalls, and their side effects</td>
+</tr>
+</tbody>
+</table>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>__malloc_hook</code> / <code>__free_hook</code></strong></td>
+<td>glibc function pointers (removed in 2.34)</td>
+</tr>
+<tr>
+<td><strong>FSOP</strong></td>
+<td>File-stream-oriented programming: corrupt a <code>FILE*</code> for hijack</td>
+</tr>
+<tr>
+<td><strong><code>_IO_list_all</code></strong></td>
+<td>Head of the glibc FILE chain; corrupting it is an FSOP primitive</td>
+</tr>
+<tr>
+<td><strong>SROP</strong></td>
+<td>Sigreturn-oriented programming: fake a signal frame to get registers</td>
+</tr>
+<tr>
+<td><strong>JOP</strong></td>
+<td>Jump-oriented programming: dispatch via a table</td>
+</tr>
+<tr>
+<td><strong>Stack pivot</strong></td>
+<td>Move RSP into an attacker-controlled large buffer</td>
+</tr>
+<tr>
+<td><strong>one-gadget</strong></td>
+<td>libc address where constraints are already satisfied</td>
+</tr>
+<tr>
+<td><strong>Tcache poisoning</strong></td>
+<td>Overwrite a freed chunk's forward pointer</td>
+</tr>
+<tr>
+<td><strong>environ</strong></td>
+<td>The process environment block, on the stack, always mapped</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what protections are actually on? ---
+checksec --file=./target
+readelf -lW ./target | grep -E &quot;GNU_STACK|GNU_RELRO&quot;
+readelf -d ./target | grep -E &quot;BIND_NOW|FLAGS&quot;
+cat /proc/sys/kernel/randomize_va_space
+
+# --- the got/plt picture ---
+objdump -R ./target | head -12          # relocations = the GOT
+objdump -d ./target | grep &quot;@plt&gt;:&quot; | head
+
+# --- do hooks still exist in this libc? ---
+libc=$(ldd ./target | awk '/libc.so/{print $3}')
+strings -a &quot;$libc&quot; | grep -E &quot;^__(malloc|free|realloc)_hook$&quot; | head
+nm -D &quot;$libc&quot; | grep -E &quot;malloc_hook|free_hook&quot; | head
+libc.so.6 2&gt;/dev/null | head -1 || /lib/x86_64-linux-gnu/libc.so.6 | head -1
+
+# --- FSOP and environ symbols ---
+nm -D &quot;$libc&quot; | grep -E &quot;_IO_list_all|_IO_2_1_stdout_|_IO_file_jumps|environ&quot; | head
+strings -a &quot;$libc&quot; | grep -E &quot;^environ$|_IO_list_all&quot; | head
+
+# --- find &quot;/bin/sh&quot; and one-gadgets ---
+ROPgadget --binary &quot;$libc&quot; --string &quot;/bin/sh&quot; 2&gt;/dev/null
+one_gadget &quot;$libc&quot; 2&gt;/dev/null | head -8 || \
+  echo &quot;(one_gadget: gem install one_gadget, or check manually)&quot;
+
+# --- everything executable in the process ---
+cat /proc/self/maps | grep -E &quot;r-x|rwx&quot; | head
+
+# --- writable+executable regions would defeat NX outright ---
+python3 - &lt;&lt;'PY'
+import os, re
+found = []
+for pid in [os.getpid()]:
+    try:
+        for line in open(f&quot;/proc/{pid}/maps&quot;):
+            m = re.match(r&quot;([0-9a-f]+)-([0-9a-f]+) (\S+) &quot;, line)
+            if m and m.group(3) == &quot;rwxp&quot;:
+                found.append(line.strip())
+    except PermissionError:
+        pass
+print(&quot;  writable+executable mappings in this process:&quot;, found or &quot;none&quot;)
+print(&quot;  If any existed, NX would be bypassable without ROP.&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> audit a fully hardened binary, enumerate what remains open, and demonstrate the<br />
+stack pivot that beats a small buffer.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ex-06 &amp;&amp; cd ~/aegis/labs/ex-06
+
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+void win(void) { write(1, &quot;you win\n&quot;, 8); }
+void vuln(void) { char buf[32]; read(0, buf, 200); }   /* small buf, big read */
+int main(void) { vuln(); return 0; }
+EOF
+
+# --- build the fully hardened version ---
+gcc -Wall -g -O0 -fstack-protector-strong -pie -fPIE -D_FORTIFY_SOURCE=2 \
+    -Wformat -Werror=format-security -Wl,-z,relro,-z,now target.c -o target-hardened
+
+{
+  echo &quot;=== protection report ===&quot;
+  checksec --file=./target-hardened
+  echo
+  echo &quot;=== raw evidence ===&quot;
+  readelf -h ./target-hardened | grep Type
+  readelf -lW ./target-hardened | grep -E &quot;GNU_STACK|GNU_RELRO&quot;
+  readelf -d ./target-hardened | grep -E &quot;BIND_NOW|FLAGS&quot;
+  objdump -R ./target-hardened 2&gt;/dev/null | head -6
+} 2&gt;&amp;1 | tee 01-audit.txt
+
+cat 01-audit.txt
+
+# --- 1. how much can we actually write? ---
+echo
+echo &quot;=== how far does the overflow reach? ===&quot;
+python3 - &lt;&lt;'PY' | tee 02-reach.txt
+import subprocess, struct
+# 32-byte buffer + canary + saved rbp, then everything after is ours to write
+for n in [40, 56, 72, 96, 128, 160, 200]:
+    r = subprocess.run([&quot;./target-hardened&quot;], input=b&quot;A&quot;*n, capture_output=True, timeout=5)
+    status = &quot;clean&quot; if r.returncode == 0 else (&quot;canary abort (134)&quot; if r.returncode == 134 else f&quot;crash ({r.returncode})&quot;)
+    print(f&quot;  wrote {n:&gt;4} bytes -&gt; {status}&quot;)
+print()
+print(&quot;  The canary stops a naive overflow, but the WRITE still succeeded.&quot;)
+print(&quot;  That is why leaks matter: the memory past the buffer is readable.&quot;)
+PY
+
+# --- 2. THE STACK PIVOT: 32 bytes is too small, so move RSP ---
+cat &gt; 03-stack-pivot.md &lt;&lt;'EOF'
+# Stack pivoting: getting a bigger overflow
+
+## The problem
+`buf[32]` plus canary plus saved RBP gives you about 40 usable bytes of chain.
+A useful chain needs 40-80 bytes (three gadgets plus three arguments).
+
+## The idea
+You do not need the chain to live at the original stack pointer. You only
+need `rsp` to point at it when the chain executes.
+
+## Method A: leave; ret
+    *   leave           ; rsp = rbp ; pop rbp
+    *   ret             ; jumps to [rbp]
+
+So if you overwrite **saved RBP** with the address of your buffer, then trigger
+`leave; ret`, execution returns into your own buffer.
+
+## Method B: pop rsp; ret
+Find `pop rsp ; ret` (or `xchg rsp, rax ; ret`). Overwrite the saved return
+address with it, then your next 8 bytes become the new stack pointer.
+
+## Method C: xchg rax, rsp
+Common in modern glibc startup code, and a classic CTF pivot target.
+
+## What you need a *big* writable buffer for
+Write your shellcode (or chain) to a known location first — `.bss`, the heap,
+or a location you read() into — then pivot there.
+
+## Lab-safe demonstration
+`leave; ret` present in the binary, a 32-byte overflow, and a scratch buffer
+on the heap you control.
+EOF
+cat 03-stack-pivot.md
+
+# --- 3. find the pivot gadgets in this binary ---
+echo
+echo &quot;=== pivot gadgets available ===&quot;
+python3 - &lt;&lt;'PY' | tee 04-pivots.txt
+raw = open(&quot;./target-hardened&quot;,&quot;rb&quot;).read()
+base = 0
+# find the load base for a PIE binary by reading /proc/self/maps style offsets;
+# for scanning we report file offsets plus the usual base so you can add ASLR later
+import subprocess
+out = subprocess.run([&quot;readelf&quot;,&quot;-h&quot;,&quot;./target-hardened&quot;],capture_output=True,text=True).stdout
+type_ = [l for l in out.splitlines() if &quot;Type:&quot; in l][0].split(&quot;:&quot;)[1].strip()
+print(f&quot;  binary type: {type_}  ({'PIE - every address is randomised' if 'DYN' in type_ else 'fixed base'})&quot;)
+
+patterns = {
+    &quot;leave ; ret&quot;:            b&quot;\xc9\xc3&quot;,
+    &quot;pop rsp ; ret&quot;:          b&quot;\x5c\xc3&quot;,
+    &quot;xchg rsp, rax ; ret&quot;:    b&quot;\x48\x94\xc3&quot;,
+    &quot;pop rbp ; ret&quot;:          b&quot;\x5d\xc3&quot;,
+}
+for name, pat in patterns.items():
+    hits = [i for i in range(len(raw)-len(pat)+1) if raw[i:i+len(pat)] == pat]
+    locs = &quot;, &quot;.join(f&quot;0x{x:x}(file)&quot; for x in hits[:3]) or &quot;none&quot;
+    print(f&quot;  {name:&lt;24} {locs}&quot;)
+PY
+cat 04-pivots.txt
+
+# --- 4. what is left after every mitigation ---
+cat &gt; 05-remaining-surface.md &lt;&lt;'EOF'
+# What is still available against a fully hardened binary
+
+## Closed
+- stack shellcode (NX)
+- hardcoded code addresses (PIE)
+- GOT overwrites (Full RELRO)
+- blind stack smashing (canary)
+
+## Open
+1. **Info leaks** — format strings, uninitialised reads, out-of-bounds reads,
+   use-after-free. Every real exploit chain starts here.
+2. **Heap exploitation** — tcache poisoning, fastbin dup, house of force.
+   Independent of NX/PIE/RELRO entirely.
+3. **Function pointers** — `__free_hook`/`__malloc_hook` (pre-2.34), C++ vtables,
+   exit handlers, `.fini_array`, `atexit` chains.
+4. **FSOP** — corrupt a glibc `FILE*` structure; `_IO_list_all` walks the chain
+   on flush, so corrupting it hijacks control. Survives Full RELRO.
+5. **environ / TLS** — both are mapped and writable-from-a-leak; TLS `dtv` is
+   a per-thread gadget source on some glibc versions.
+6. **SROP** — a single `syscall; ret` plus a forged `rt_sigframe` on the stack
+   gives you every register at once. Needs no gadgets at all.
+7. **Kernel bugs** — a kernel exploit sidesteps every userspace mitigation.
+8. **The weakest service** — usually the answer.
+
+## The strategic point
+A hardened binary raises the cost of an exploit; it does not remove the bug.
+If your only path is a hardened binary, you are probably on the wrong host,
+or the wrong service. This is `vulnerability-risk-exploit` in practice: risk is
+likelihood times impact, and a hard target is not a soft one.
+EOF
+cat 05-remaining-surface.md
+
+# --- 6. the honest professional conclusion ---
+cat &gt; 06-strategy.md &lt;&lt;'EOF'
+# When to stop trying to exploit the hardened binary
+
+Escalate down this list rather than grinding on one target:
+
+1. Re-read the protections — you may have missed a weaker service on the host.
+2. Look for credentials on that host, then use them against something softer.
+3. Look for a different service entirely.
+4. Look for the network: is there a host that trusts this one?
+5. Look at the application layer, where mitigations usually do not apply.
+6. Only then consider heap exploitation, FSOP or SROP.
+7. Kernel exploitation is genuinely the last resort.
+
+Every hour spent on a hardened binary is an hour not spent on the other four
+hosts you already have credentials for. Enumeration breadth beats depth.
+EOF
+cat 06-strategy.md
+
+# --- 7. record ---
+cat &gt; 07-audit.md &lt;&lt;'EOF'
+# Hardened binary audit (my lab target)
+
+| Protection | Status | Evidence |
+|---|---|---|
+| NX | | |
+| PIE | | |
+| Canary | | |
+| RELRO | | |
+| Stack canary abort signature | | |
+
+## Remaining attack surface I identified
+- info leaks:
+- heap:
+- function pointers / hooks:
+- FSOP:
+- other services on the host:
+EOF
+cat 07-audit.md
+echo &quot;  fill in 07-audit.md from 01-audit.txt&quot;
+</code></pre>
+<p><strong>Step 7's conclusion is the real lesson.</strong> <code>05-remaining-surface.md</code> and <code>06-strategy.md</code> are<br />
+about judgement: recognising when a hardened target is telling you to look elsewhere. That is<br />
+the difference between a penetration tester and someone grinding on one binary.</p>
+<p><strong>Record:</strong> <code>07-audit.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does Full RELRO protect, and what does it not?</li>
+<li>Why did modern glibc remove <code>__malloc_hook</code>?</li>
+<li>What is FSOP and which structure does it corrupt?</li>
+<li>How does a stack pivot help when the buffer is only 32 bytes?</li>
+<li>Why is "look at another host" usually the right move against a hardened binary?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>NX / DEP</strong> → <strong>PIE</strong> → <strong>RELRO</strong> → <strong>Stack Pivot</strong> → <strong>SROP</strong> → <strong>Heap Exploitation</strong> →<br />
+<strong>Vulnerability / Risk / Exploit</strong>.<br />
+This completes the exploit development track.</p>

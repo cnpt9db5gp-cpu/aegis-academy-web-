@@ -1,0 +1,209 @@
+<h1 id="networking-scripts-and-sockets">Networking Scripts and Sockets</h1>
+<h2 id="summary">Summary</h2>
+<p>Python as a network client and server. This is the lecture where the tools stop being commands<br />
+you type and become programs you own — and where you see exactly what a "connection" is.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><code>socket</code>, <code>create_connection</code>, <code>bind</code>/<code>listen</code>/<code>accept</code>/<code>connect</code></li>
+<li>TCP vs UDP semantics, and why UDP scanning is unreliable</li>
+<li><strong>Timeouts are mandatory</strong> — a blocking read with no timeout hangs forever</li>
+<li><code>recv</code> returns <em>up to</em> N bytes; loop until you have what you need</li>
+<li>A one-shot HTTP request written by hand, to see the wire format</li>
+<li><code>sendall</code> vs <code>send</code> — <code>send</code> may write partially</li>
+<li><code>selectors</code> or threads for a multi-connection server</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Socket</strong></td>
+<td>Kernel object for a network endpoint</td>
+</tr>
+<tr>
+<td><strong>IP:port</strong></td>
+<td>What identifies a socket</td>
+</tr>
+<tr>
+<td><strong>bind/listen/accept</strong></td>
+<td>Server side</td>
+</tr>
+<tr>
+<td><strong>connect</strong></td>
+<td>Client side</td>
+</tr>
+<tr>
+<td><strong>SOCK_STREAM / SOCK_DGRAM</strong></td>
+<td>TCP / UDP</td>
+</tr>
+<tr>
+<td><strong>Blocking / non-blocking</strong></td>
+<td>Whether a call waits</td>
+</tr>
+<tr>
+<td><strong>Timeout</strong></td>
+<td>Mandatory deadline on a socket operation</td>
+</tr>
+<tr>
+<td><strong><code>recv</code></strong></td>
+<td>Read up to N bytes</td>
+</tr>
+<tr>
+<td><strong><code>sendall</code></strong></td>
+<td>Write all bytes or fail</td>
+</tr>
+<tr>
+<td><strong>Little/big-endian</strong></td>
+<td>Byte order; matters for binary protocols</td>
+</tr>
+<tr>
+<td><strong>Selector loop</strong></td>
+<td>One thread handling many sockets</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 -c 'import socket; help(socket.create_connection)' | head -20
+
+# --- what greets you on loopback, in 15 lines ---
+python3 - &lt;&lt;'PY'
+import socket
+for port in (21,22,23,25,80,110,143,443,3306,5432,8080):
+    try:
+        with socket.create_connection((&quot;127.0.0.1&quot;, port), timeout=0.4) as s:
+            s.settimeout(0.4)
+            try:    b = s.recv(96).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()[:44]
+            except socket.timeout: b = &quot;(open, no banner)&quot;
+            print(f&quot;  {port:&lt;6} open   {b}&quot;)
+    except ConnectionRefusedError: pass
+    except socket.timeout:        print(f&quot;  {port:&lt;6} filtered&quot;)
+    except OSError as e:          print(f&quot;  {port:&lt;6} {type(e).__name__}&quot;)
+PY
+
+# --- a hand-written HTTP GET ---
+python3 - &lt;&lt;'PY'
+import socket
+req = b&quot;GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: aegis\r\nConnection: close\r\n\r\n&quot;
+print(&quot;  request bytes:&quot;)
+for i in range(0, len(req), 16):
+    chunk = req[i:i+16]
+    print(&quot;   &quot;, chunk.hex(&quot; &quot;), &quot; |&quot;, &quot;&quot;.join(chr(b) if 32 &lt;= b &lt; 127 else &quot;.&quot; for b in chunk))
+try:
+    with socket.create_connection((&quot;127.0.0.1&quot;, 80), timeout=2) as s:
+        s.sendall(req); data = b&quot;&quot;
+        while chunk := s.recv(4096): data += chunk
+    print(&quot;  response:&quot;, data[:200].decode(&quot;utf8&quot;,&quot;replace&quot;))
+except OSError as e:
+    print(&quot;  no http on 80:&quot;, type(e).__name__)
+PY
+
+# --- tcpdump shows you exactly what you sent ---
+#   terminal 1:  sudo tcpdump -i lo -A -s0 'tcp port 80'
+#   terminal 2:  run the snippet above
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a scanner with a listener, so you see both sides of a connection.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/atb-04 &amp;&amp; cd ~/aegis/labs/atb-04
+
+cat &gt; netserv.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+# netserv.py - a tiny multi-connection TCP server, then a client that talks to it.
+import socket, threading, sys, time
+
+BANNER = b&quot;AEGIS-LAB-1.0\r\n&quot;
+
+def handle(conn, addr):
+    with conn:
+        conn.settimeout(3)
+        conn.sendall(BANNER)
+        try:
+            data = conn.recv(1024)
+        except socket.timeout:
+            data = b&quot;&quot;
+        print(f&quot;  [server] {addr} said: {data[:60]!r}&quot;)
+        conn.sendall(b&quot;HELLO FROM SERVER\n&quot;)
+
+def serve(host=&quot;127.0.0.1&quot;, port=9001, n=2):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    srv.listen(5)
+    print(f&quot;  [server] listening on {host}:{port}&quot;)
+    for _ in range(n):
+        conn, addr = srv.accept()
+        threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
+    srv.close()
+
+def client(host=&quot;127.0.0.1&quot;, port=9001, message=b&quot;ping\n&quot;):
+    with socket.create_connection((host, port), timeout=3) as s:
+        s.settimeout(3)
+        banner = s.recv(128)
+        print(f&quot;  [client] banner: {banner!r}&quot;)
+        s.sendall(message)
+        print(f&quot;  [client] sent  : {message!r}&quot;)
+        print(f&quot;  [client] reply : {s.recv(128)!r}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    role = sys.argv[1] if len(sys.argv) &gt; 1 else &quot;both&quot;
+    if role in (&quot;serve&quot;, &quot;both&quot;):
+        threading.Thread(target=serve, daemon=True).start()
+        time.sleep(0.4)
+    if role in (&quot;client&quot;, &quot;both&quot;):
+        client()
+        client(b&quot;second connection\n&quot;)
+PY
+chmod +x netserv.py
+
+echo &quot;=== run both sides in one process ===&quot;
+python3 netserv.py both | tee 01-loop.txt
+
+echo
+echo &quot;=== split across two terminals instead ===&quot;
+echo &quot;  terminal 1:  python3 netserv.py serve&quot;
+echo &quot;  terminal 2:  python3 netserv.py client&quot;
+echo &quot;  and in a third:  sudo tcpdump -i lo -A -s0 'tcp port 9001'&quot;
+python3 netserv.py serve &gt; /dev/null 2&gt;&amp;1 &amp;
+SRVPID=$!
+sleep 0.5
+python3 netserv.py client 2&gt;&amp;1 | tee -a 01-loop.txt
+kill $SRVPID 2&gt;/dev/null
+
+echo
+echo &quot;=== netcat, same conversation, no Python ===&quot;
+python3 netserv.py serve &gt;/dev/null 2&gt;&amp;1 &amp;
+SRVPID=$!; sleep 0.5
+printf 'ping\n' | timeout 3 nc -v 127.0.0.1 9001 | head -3
+kill $SRVPID 2&gt;/dev/null
+
+echo
+echo &quot;=== why timeouts matter: prove the hang ===&quot;
+python3 - &lt;&lt;'PY'
+import socket, time
+t = time.time()
+try:
+    socket.create_connection((&quot;192.0.2.1&quot;, 9), timeout=2)   # TEST-NET-1
+except OSError as e:
+    print(f&quot;  with timeout   : gave up after {time.time()-t:.1f}s ({type(e).__name__})&quot;)
+print(&quot;  without timeout: would block indefinitely&quot;)
+print(&quot;  (uncomment socket.create_connection(('192.0.2.1', 9)) in a terminal to feel it)&quot;)
+PY
+</code></pre>
+<p><strong>Step 1 vs step 4 is the lesson:</strong> your program and netcat produce the same bytes on the wire. A<br />
+protocol is a protocol regardless of what implements it — and once you can see the bytes, you can<br />
+craft them by hand.</p>
+<p><strong>Record:</strong> <code>01-loop.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why must every socket used for scanning have a timeout?</li>
+<li>What is the difference between <code>send</code> and <code>sendall</code>, and which is safer?</li>
+<li>Why can <code>recv(4096)</code> return fewer bytes than you asked for?</li>
+<li>What does <code>SO_REUSEADDR</code> do, and why do you need it when restarting a server quickly?</li>
+<li>Why is UDP scanning fundamentally unreliable?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Sockets</strong> → <strong>Port</strong> → <strong>Reverse Shell</strong> → <strong>Banner Grabbing</strong> → <strong>Automation</strong>.</p>

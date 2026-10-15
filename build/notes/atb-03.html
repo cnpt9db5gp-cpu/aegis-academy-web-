@@ -1,0 +1,187 @@
+<h1 id="files-paths-search-and-text-processing">Files, Paths, Search and Text Processing</h1>
+<h2 id="summary">Summary</h2>
+<p>Finding things and cutting them apart. In security this means: locating files on a target,<br />
+extracting the exact fields you need from tool output, and doing it fast enough to iterate.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><code>find</code> with <code>-name -type -user -perm -size -mtime -ls -exec</code></li>
+<li><code>locate</code>/<code>updatedb</code> versus <code>find</code> — index versus live walk</li>
+<li><code>grep</code> with <code>-i -v -n -c -E -r -A -B</code></li>
+<li><code>cut -d -f</code>, <code>awk '{print $N}'</code>, <code>sort | uniq -c | sort -rn</code></li>
+<li><code>sed</code> for transforms, <code>tr</code> for character translation</li>
+<li>Redirection and process substitution to avoid intermediate files</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Glob</strong></td>
+<td><code>*</code>/<code>?</code>/<code>[]</code> pattern expanded by the shell</td>
+</tr>
+<tr>
+<td><strong><code>find</code> predicate</strong></td>
+<td><code>-name</code>, <code>-type</code>, <code>-perm</code>, <code>-user</code>, <code>-size</code>, <code>-mtime</code></td>
+</tr>
+<tr>
+<td><strong><code>-exec</code></strong></td>
+<td>Run a command per matched file</td>
+</tr>
+<tr>
+<td><strong>Field separator</strong></td>
+<td><code>-d</code> for cut/awk, <code>FS</code> for awk</td>
+</tr>
+<tr>
+<td><strong><code>sort -n</code></strong></td>
+<td>Numeric, not lexicographic — critical for ports and sizes</td>
+</tr>
+<tr>
+<td><strong><code>uniq -c</code></strong></td>
+<td>Collapse duplicates and count</td>
+</tr>
+<tr>
+<td><strong><code>tr</code></strong></td>
+<td>Translate or delete characters</td>
+</tr>
+<tr>
+<td><strong><code>/dev/null</code></strong></td>
+<td>Discard output</td>
+</tr>
+<tr>
+<td><strong><code>xargs</code></strong></td>
+<td>Turn stdin into command arguments</td>
+</tr>
+<tr>
+<td><strong><code>updatedb</code></strong></td>
+<td>Rebuild the <code>locate</code> database</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- find, the predicates that matter in an assessment ---
+find / -perm -4000 -type f 2&gt;/dev/null | head        # SUID
+find / -perm -2000 -type f 2&gt;/dev/null | head        # SGID
+find / -perm -o+w -type f 2&gt;/dev/null | grep -v '^/proc' | head   # world-writable
+find / -writable -type f -path '*/etc/*' 2&gt;/dev/null | head
+find / -user root -group root -perm -4000 2&gt;/dev/null | head
+find . -type f -size +10M -exec ls -lh {} \; 2&gt;/dev/null | head
+find . -mmin -60 -type f 2&gt;/dev/null | head          # changed in the last hour
+find / -type d -name &quot;*backup*&quot; 2&gt;/dev/null | head
+find /etc -type f -name &quot;*.conf&quot; -exec grep -l -i &quot;password&quot; {} \; 2&gt;/dev/null | head
+
+# --- locate is an index: instant but stale ---
+command -v locate &amp;&amp; (locate shadow | head -3; echo &quot;rebuild with: sudo updatedb&quot;)
+
+# --- grep variants ---
+grep -n &quot;PermitRootLogin&quot; /etc/ssh/sshd_config
+grep -c &quot;Failed password&quot; /var/log/auth.log 2&gt;/dev/null || sudo grep -c &quot;Failed password&quot; /var/log/auth.log
+grep -rIl &quot;BEGIN PRIVATE KEY&quot; ~/ 2&gt;/dev/null | head
+grep -E &quot;^(GET|POST) &quot; access.log | awk '{print $6, $7}' | sort | uniq -c | sort -rn | head
+grep -v &quot;^#&quot; config.yml | grep -v '^$' | wc -l
+
+# --- cut, awk, sort, uniq ---
+cut -d: -f1,7 /etc/passwd | tail -10
+awk -F: '$3 &gt;= 1000 {print $1, $3}' /etc/passwd
+awk '{print $1}' /var/log/auth.log | sort | uniq -c | sort -rn | head
+sort -t/ -k1 -n ports.txt | head            # ports numerically
+
+# --- tr and paste ---
+tr '[:upper:]' '[:lower:]' &lt; /etc/hostname
+tr -d '\r' &lt; dos-file.txt &gt; unix-file.txt
+paste &lt;(cut -d: -f1 /etc/passwd) &lt;(cut -d: -f7 /etc/passwd) | head
+
+# --- xargs, space-safe and parallel ---
+# Do NOT combine -n1 with -I{}. They are mutually exclusive: -I{} already
+# means &quot;one invocation per line&quot;, and GNU xargs warns
+# &quot;options --max-args and --replace are mutually exclusive&quot; and silently
+# drops one of them. Pick the mechanism, not both.
+cat hosts.txt | xargs -P8 -I{} sh -c 'nmap -sT {} -oN /dev/null &amp;&amp; echo &quot;{} ok&quot;'
+# For plain positional batching, -n1 is right - but then you get {} by $1:
+cat hosts.txt | xargs -n1 -P8 sh -c 'nmap -sT &quot;$1&quot; -oN /dev/null &amp;&amp; echo &quot;$1 ok&quot;' _
+# -print0/-0 keeps filenames with spaces and newlines intact:
+find . -name &quot;*.txt&quot; -print0 | xargs -0 grep -l &quot;password&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> produce an enumeration report using find/grep/awk, then confirm it in Python.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/atb-03 &amp;&amp; cd ~/aegis/labs/atb-03
+
+# --- 1. SUID/SGID/world-writable sweep of your own machine ---
+{
+  echo &quot;=== SUID ===&quot;
+  find / -perm -4000 -type f 2&gt;/dev/null
+  echo
+  echo &quot;=== SGID ===&quot;
+  find / -perm -2000 -type f 2&gt;/dev/null | head -10
+  echo
+  echo &quot;=== world-writable outside pseudo-filesystems ===&quot;
+  find / -xdev -perm -o+w -type f 2&gt;/dev/null | grep -vE '^/(proc|sys|dev|run)' | head -15
+} &gt; 01-perms.txt
+echo &quot;wrote $(wc -l &lt; 01-perms.txt) lines&quot;; head -20 01-perms.txt
+
+# --- 2. config files that mention credentials ---
+{
+  echo &quot;=== readable configs mentioning 'password' ===&quot;
+  sudo find /etc /opt /srv -type f \( -name &quot;*.conf&quot; -o -name &quot;*.cfg&quot; -o -name &quot;*.ini&quot; -o -name &quot;*.yaml&quot; \) \
+       2&gt;/dev/null | head -200 | while read -r f; do
+    sudo grep -li &quot;password\|passwd\|secret\|api_key&quot; &quot;$f&quot; 2&gt;/dev/null
+  done | sort -u | head -20
+} 2&gt;/dev/null | tee 02-secrets.txt
+
+# --- 3. recently modified files: the incident-response reflex ---
+find /etc /var/www /home -xdev -type f -mtime -30 2&gt;/dev/null | head -20 | tee 03-recent.txt
+echo &quot;  (${PWD}/03-recent.txt)&quot;
+
+# --- 4. parse a scan: four ways to get what you need ---
+nmap -sV -p- 127.0.0.1 -oN scan.txt 2&gt;/dev/null
+{
+  echo &quot;=== ports only ===&quot;
+  grep &quot;open&quot; scan.txt | awk -F/ '{print $1}' | sort -t/ -k1 -n | tr '\n' ' '; echo
+  echo &quot;=== services ===&quot;
+  grep &quot;open&quot; scan.txt | awk '{print $2}' | sort | uniq -c | sort -rn
+  echo &quot;=== service -&gt; version ===&quot;
+  grep &quot;open&quot; scan.txt | awk '{print $2, $4, $5}'
+  echo &quot;=== everything, normalised ===&quot;
+  grep &quot;open&quot; scan.txt | sed -E 's/^([0-9]+)\/(\w+)\s+open\s+(\S+)\s*(.*)$/\1|\2|\3|\4/'
+} | tee 04-parse.txt
+
+# --- 5. awk doing real work: a small reporting pass ---
+awk -F'|' '/^[0-9]/ {
+    split($1, p, &quot;/&quot;);
+    printf &quot;%-6s %-5s %-12s %s\n&quot;, $1, $2, $3, $4;
+    total++
+} END { printf &quot;\n  %d open ports\n&quot;, total }' scan.txt
+
+# --- 6. confirm with Python: same facts, different code ---
+python3 - &lt;&lt;'PY' | tee 05-parse-python.txt
+import re
+rows = []
+for line in open(&quot;scan.txt&quot;, errors=&quot;replace&quot;):
+    m = re.match(r&quot;(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)&quot;, line)
+    if m: rows.append(m.groups())
+print(f&quot;  {len(rows)} open ports&quot;)
+from collections import Counter
+print(&quot;  services:&quot;, dict(Counter(r[2] for r in rows)))
+PY
+
+echo
+echo &quot;Shell gave you the answer instantly; Python will scale to 10,000 hosts. Use both.&quot;
+</code></pre>
+<p><strong>Step 1 is a real finding sheet for your own machine</strong>, and step 2 is the exact habit that turns<br />
+a foothold into root on a real engagement.</p>
+<p><strong>Record:</strong> <code>01-perms.txt</code> and <code>02-secrets.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does <code>sort</code> give the wrong order for port numbers, and what flag fixes it?</li>
+<li>When would you use <code>-print0 | xargs -0</code> instead of a plain pipe?</li>
+<li>What does <code>grep -v</code> do, and why is it common in audit output?</li>
+<li>When is <code>locate</code> preferable to <code>find</code>, and when is it dangerously wrong?</li>
+<li>Why do we <code>-xdev</code> when searching the whole filesystem?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Text Processing Tools</strong> → <strong>Regex</strong> → <strong>find &amp; locate Enumeration</strong> → <strong>Enumeration</strong> →<br />
+<strong>Linux Privilege Escalation</strong>.</p>

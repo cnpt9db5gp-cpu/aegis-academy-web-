@@ -1,0 +1,263 @@
+<h1 id="automating-analysis-with-tshark-and-jq">Automating Analysis with tshark and jq</h1>
+<h2 id="summary">Summary</h2>
+<p>The point of a capture is the answer, and the answer should be reproducible. <code>tshark</code> turns<br />
+packets into fields; <code>jq</code> turns fields into structure. Together they are how an analyst processes<br />
+more traffic than they can read.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><code>tshark -T fields</code> gives you tab-separated columns — machine-readable output</li>
+<li><code>-Y</code> takes a display filter; <code>-e</code> selects fields; <code>-T json</code> is even easier to post-process</li>
+<li><code>jq</code> filters, groups, and reshapes JSON without a language</li>
+<li>Extract first, analyse second: never parse a pcap with ad-hoc text tools</li>
+<li>Save the query, not just the answer, so the analysis is repeatable and reviewable</li>
+<li>Same discipline as writing an exploit: the script is the artefact</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Field extraction</strong></td>
+<td>Pulling specific columns out of a dissector</td>
+</tr>
+<tr>
+<td><strong><code>-T fields</code> / <code>-T json</code></strong></td>
+<td>Output formats of tshark</td>
+</tr>
+<tr>
+<td><strong><code>-Y</code></strong></td>
+<td>Display filter (equivalent to Wireshark's filter box)</td>
+</tr>
+<tr>
+<td><strong><code>-e</code></strong></td>
+<td>Which field to emit</td>
+</tr>
+<tr>
+<td><strong>jq</strong></td>
+<td>JSON filter and transform language</td>
+</tr>
+<tr>
+<td><strong>jq filters</strong></td>
+<td><code>.a.b</code>, <code>.[]</code>, <code>select(...)</code>, <code>group_by(...)</code></td>
+</tr>
+<tr>
+<td><strong>Aggregation</strong></td>
+<td>Counting and grouping in one pipeline</td>
+</tr>
+<tr>
+<td><strong>Pipeline</strong></td>
+<td>Output of one command feeding the next</td>
+</tr>
+<tr>
+<td><strong>Repeatable analysis</strong></td>
+<td>A saved query, not a one-off command</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">command -v tshark jq
+
+# --- field extraction, the core skill ---
+tshark -r cap.pcap -T fields -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport
+tshark -r cap.pcap -T fields -e ip.src 2&gt;/dev/null | sort | uniq -c | sort -rn
+tshark -r cap.pcap -Y &quot;http.response&quot; -T fields -e http.response.code 2&gt;/dev/null | sort | uniq -c
+tshark -r cap.pcap -Y &quot;dns&quot; -T fields -e dns.qry.name 2&gt;/dev/null | sort -u | head -20
+
+# --- JSON output, when structure matters ---
+tshark -r cap.pcap -T json 2&gt;/dev/null | head -c 400
+tshark -r cap.pcap -T json 2&gt;/dev/null | jq '.[] | {no: .[&quot;frame.number&quot;], src: .[&quot;ip.src&quot;]}'
+
+# --- jq essentials ---
+echo '{&quot;a&quot;:1,&quot;b&quot;:[{&quot;c&quot;:2},{&quot;c&quot;:3}]}' | jq '.'
+echo '{&quot;a&quot;:1,&quot;b&quot;:[{&quot;c&quot;:2},{&quot;c&quot;:3}]}' | jq '.b[].c'
+echo '{&quot;a&quot;:1,&quot;b&quot;:[{&quot;c&quot;:2},{&quot;c&quot;:3}]}' | jq '.b[] | select(.c &gt; 2)'
+echo '{&quot;a&quot;:1,&quot;b&quot;:[{&quot;c&quot;:2},{&quot;c&quot;:3}]}' | jq '[.b[].c] | add'
+echo '{&quot;a&quot;:1,&quot;b&quot;:[{&quot;c&quot;:2},{&quot;c&quot;:3}]}' | jq -r '.b[] | &quot;\(.c)&quot;'
+
+# --- the combination that does real work ---
+tshark -r cap.pcap -Y &quot;dns.flags.response == 1&quot; -T json 2&gt;/dev/null \
+  | jq -r '.[]._source.layers.dns.qry.name' 2&gt;/dev/null | sort -u | head -20
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a reusable analysis script that answers three questions about a capture.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/pkt-05 &amp;&amp; cd ~/aegis/labs/pkt-05
+
+# --- 1. build a capture worth analysing ---
+sudo tcpdump -i lo -n -w base.pcap -s 0 2&gt;/dev/null &amp;
+TC=$!; sleep 1
+( nc -l -p 8080 &gt;/dev/null 2&gt;&amp;1 &amp; )
+( nc -l -p 9090 &gt;/dev/null 2&gt;&amp;1 &amp; )
+sleep 1
+for i in $(seq 1 5); do echo &quot;GET / HTTP/1.0&quot; | timeout 2 nc 127.0.0.1 8080 2&gt;/dev/null; done
+for i in $(seq 1 3); do echo &quot;x $i&quot; | timeout 2 nc 127.0.0.1 9090 2&gt;/dev/null; done
+for i in 1 2 3; do dig +short &quot;name$i.example&quot; @127.0.0.1 &gt;/dev/null 2&gt;&amp;1; done
+sleep 5; kill $TC 2&gt;/dev/null; wait $TC 2&gt;/dev/null
+ls -la base.pcap
+
+# --- 2. Q1: who talked to whom, ranked by volume ---
+cat &gt; who_talked.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Q1: which host pairs exchanged the most packets?
+set -euo pipefail
+CAP=&quot;${1:-base.pcap}&quot;
+tshark -r &quot;$CAP&quot; -T fields -e ip.src -e ip.dst 2&gt;/dev/null \
+  | grep -v '^$' \
+  | awk '{print $1&quot; -&gt; &quot;$2}' \
+  | sort | uniq -c | sort -rn | head -15
+EOF
+chmod +x who_talked.sh
+echo &quot;=== Q1: conversations by volume ===&quot;
+./who_talked.sh base.pcap | tee 01-who.txt
+
+# --- 3. Q2: distinct ports contacted, per destination ---
+cat &gt; ports_per_host.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Q2: how many distinct ports did each host contact? (scan heuristic)
+set -euo pipefail
+CAP=&quot;${1:-base.pcap}&quot;
+tshark -r &quot;$CAP&quot; -T fields -e ip.src -e tcp.dstport -e udp.dstport 2&gt;/dev/null \
+  | awk 'NF&gt;1 { for(i=2;i&lt;=NF;i++) if($i!=&quot;&quot;) print $1, $i }' \
+  | sort -u | awk '{print $1}' | sort | uniq -c | sort -rn
+EOF
+chmod +x ports_per_host.sh
+echo
+echo &quot;=== Q2: distinct destination ports per source ===&quot;
+./ports_per_host.sh base.pcap | tee 02-ports-per-host.txt
+echo
+echo &quot;  A source contacting dozens of ports on one host = scanning.&quot;
+echo &quot;  This single query detects most port scans.&quot;
+
+# --- 4. Q3: DNS names, deduplicated, via jq ---
+cat &gt; dns_names.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Q3: every DNS name in the capture, deduplicated.
+set -euo pipefail
+CAP=&quot;${1:-base.pcap}&quot;
+if tshark -r &quot;$CAP&quot; -Y &quot;dns.qry.name&quot; -T json 2&gt;/dev/null | jq -e '.' &gt;/dev/null 2&gt;&amp;1; then
+  tshark -r &quot;$CAP&quot; -Y &quot;dns.qry.name&quot; -T json 2&gt;/dev/null \
+    | jq -r '.[]._source.layers.dns.qry.name' 2&gt;/dev/null
+else
+  tshark -r &quot;$CAP&quot; -Y &quot;dns.qry.name&quot; -T fields -e dns.qry.name 2&gt;/dev/null
+fi
+EOF
+chmod +x dns_names.sh
+echo
+echo &quot;=== Q3: DNS names seen ===&quot;
+./dns_names.sh base.pcap | sort -u | tee 03-dns.txt
+echo
+echo &quot;  A jQuery filter is more robust than a text field extraction - it fails&quot;
+echo &quot;  loudly rather than silently producing columns in the wrong order.&quot;
+
+# --- 5. the jq cheat sheet ---
+cat &gt; 04-jq.md &lt;&lt;'EOF'
+# jq, for people who analyse captures
+
+    .                 the whole input
+    .a.b              nested field
+    .[]               iterate an array
+    .[] | select(...) filter elements
+    .[] | {x: .x}    reshape
+    map(...)          apply to every element
+    add               sum an array of numbers
+    length            count
+    group_by(.x)      group an array by a key
+    sort_by(.x)       sort an array
+    unique            deduplicate
+    keys              object keys
+    to_entries        object -&gt; array of {key, value}
+
+## Practical patterns for packet analysis
+
+    # top talkers
+    ... | jq -r '.[]._source.layers.ip.src' | sort | uniq -c | sort -rn
+
+    # only successful responses
+    ... | jq -r '.[] | select(._source.layers.http.response.code &gt;= 200)'
+
+    # pairs as one string
+    ... | jq -r '.[] | &quot;\(._source.layers.ip.src) -&gt; \(._source.layers.ip.dst)&quot;'
+
+    # tally in jq itself
+    ... | jq -r '.[]._source.layers.tcp.dstport' | sort | uniq -c | sort -rn
+EOF
+cat 04-jq.md
+
+# --- 6. a full report in one command ---
+cat &gt; 05-report.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Full automated triage of a capture. One script, repeatable.
+set -euo pipefail
+CAP=&quot;${1:-base.pcap}&quot;
+BAR=$(printf '=%.0s' {1..66})
+
+echo &quot;$bar&quot;
+echo &quot;CAPTURE TRIAGE: $CAP&quot;
+capinfos &quot;$CAP&quot; 2&gt;/dev/null | grep -E &quot;File size|Number of packets|Time|Capture duration&quot; | sed 's/^/  /'
+echo
+
+echo &quot;$bar&quot;; echo &quot;1. PROTOCOL MIX&quot;
+tshark -r &quot;$CAP&quot; -q -z io,phs 2&gt;/dev/null | head -14 | sed 's/^/  /'
+echo
+
+echo &quot;$bar&quot;; echo &quot;2. TOP TALKERS (source addresses)&quot;
+tshark -r &quot;$CAP&quot; -T fields -e ip.src 2&gt;/dev/null | grep -v '^$' | sort | uniq -c | sort -rn | head -8 | sed 's/^/  /'
+echo
+
+echo &quot;$bar&quot;; echo &quot;3. TOP DESTINATION PORTS&quot;
+tshark -r &quot;$CAP&quot; -T fields -e tcp.dstport -e udp.dstport 2&gt;/dev/null \
+  | tr '\t' '\n' | grep -v '^$' | sort -n | uniq -c | sort -rn | head -10 | sed 's/^/  /'
+echo
+
+echo &quot;$bar&quot;; echo &quot;4. SCAN INDICATOR: distinct ports per source&quot;
+./ports_per_host.sh &quot;$CAP&quot; | awk '$1 &gt; 10 {print &quot;  *** &quot; $1 &quot; ports from &quot; $2 &quot; -- possible scan&quot;}' | head -10
+echo &quot;  (nothing above threshold = no obvious scanning)&quot;
+echo
+
+echo &quot;$bar&quot;; echo &quot;5. DNS NAMES&quot;
+./dns_names.sh &quot;$CAP&quot; | sort -u | head -15 | sed 's/^/  /'
+echo
+
+echo &quot;$bar&quot;; echo &quot;6. HTTP RESPONSES&quot;
+tshark -r &quot;$CAP&quot; -Y &quot;http.response.code&quot; -T fields -e http.response.code 2&gt;/dev/null \
+  | sort | uniq -c | sort -rn | head -8 | sed 's/^/  /'
+echo
+echo &quot;$bar&quot;
+EOF
+chmod +x 05-report.sh
+./05-report.sh base.pcap | tee 06-report.txt
+echo
+echo &quot;=== One command, six answers. This is the skill. ===&quot;
+</code></pre>
+<p><strong>Step 6 is the deliverable</strong>: a single repeatable triage script that answers six questions<br />
+about any capture you point it at.</p>
+<p><strong>Record:</strong> <code>05-report.sh</code> — this is the tool you will reuse in Tier 6 forensics.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What do <code>-T fields</code> and <code>-Y</code> do in tshark?</li>
+<li>Why prefer <code>-T json</code> over <code>-T fields</code> for scripted work?</li>
+<li>Write a jq filter that prints only the first field of each array element.</li>
+<li>Why is "distinct ports per source" such an effective scan detector?</li>
+<li>Why save the analysis script rather than just its output?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>tshark</strong> → <strong>jq</strong> → <strong>Automation Pipelines</strong> → <strong>Packet Filter</strong> → <strong>IDS / IPS</strong> →<br />
+<strong>Log Analysis</strong>.</p>

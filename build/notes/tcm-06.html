@@ -1,0 +1,424 @@
+<h1 id="pivoting-and-internal-network-movement">Pivoting and Internal Network Movement</h1>
+<h2 id="summary">Summary</h2>
+<p>Pivoting is using one compromised host to reach networks you could not otherwise reach. It is<br />
+where engagements either become very valuable or very dangerous, because a pivot is the point<br />
+at which <strong>the blast radius grows by an order of magnitude</strong>.</p>
+<p>The lecture's core discipline: <strong>every pivot is a new authorisation question.</strong> "I have a shell"<br />
+was never permission to scan the internal network.</p>
+<blockquote>
+<p>Companion to <code>ccnad-01</code> (routing and segmentation) and <code>atb-01</code><br />
+(Active Directory trust paths). This note is the network mechanics.</p>
+</blockquote>
+<h2 id="why-pivot-at-all">Why pivot at all</h2>
+<pre><code class="language-text">  - segmentation worked, and the only way past it is a foothold
+  - internal-only services (AD, databases, management consoles)
+  - trust relationships: compromising a web server may reach an app server
+  - the objective is behind a different firewall
+
+  But also:
+  - the perimeter IS the security boundary, and a flat network means the
+    perimeter is the only defence. Proving that is the whole finding.
+</code></pre>
+<p>That last point is the one that belongs in the report. <strong>Pivoting without<br />
+hitting an authorisation boundary is itself the critical finding</strong> — it<br />
+proves segmentation does not exist.</p>
+<h2 id="the-three-techniques">The three techniques</h2>
+<pre><code class="language-text">  1. PROXY CHAIN      route traffic through an existing SSH connection
+                      proxychains is the client; SSH -D is the server
+  2. TUNNEL           encapsulate one protocol inside another
+                      chisel, ligolo; carries arbitrary TCP/UDP over HTTP
+  3. PORT FORWARD     expose a remote port as a local one
+                      ssh -L / -R; simplest and most reliable
+</code></pre>
+<p>Choose by need, in that order of preference: <strong>port forward if one service,<br />
+proxy chain if a tool suite, tunnel if you need arbitrary protocols or the<br />
+link is unreliable.</strong></p>
+<h2 id="port-forwarding-precisely">Port forwarding, precisely</h2>
+<pre><code class="language-bash"># LOCAL forward: 127.0.0.1:8888 on MY machine becomes 10.0.0.5:8080 on the target
+ssh -N -L 8888:10.0.0.5:8088 user@192.168.56.20
+# now: curl http://127.0.0.1:8888
+
+# REMOTE forward: a port on the TARGET listens and forwards back to me
+ssh -N -R 9001:127.0.0.1:9001 user@192.168.56.20
+# now: connect to 192.168.56.20:9001 and reach MY listener
+
+# SOCKS PROXY: route anything that honours SOCKS through the SSH session
+ssh -N -D 127.0.0.1:1080 user@192.168.56.20
+proxychains nmap -sT -sV -p- 10.0.0.5
+</code></pre>
+<p><strong>The three-line rule for any forward:</strong><br />
+1. bind to <code>127.0.0.1</code>, never <code>0.0.0.0</code> — a forward on 0.0.0.0 exposes the<br />
+   internal service to your whole network, which is a worse finding than the one you are chasing<br />
+2. pick a high, unused port<br />
+3. record it in the diary, and kill it when you are done</p>
+<h2 id="proxychains-correctly">ProxyChains, correctly</h2>
+<pre><code class="language-bash"># /etc/proxychains4.conf
+# strict_chain            &lt;- fail if any hop is down (use this)
+# proxy_dns               &lt;- also proxy DNS, or you leak queries
+socks4  127.0.0.1 1080
+
+# Verify it routes where you think it does
+proxychains4 curl -s --max-time 5 https://ifconfig.me
+</code></pre>
+<p><code>proxy_dns</code> matters more than people realise: without it, DNS queries leak<br />
+outside the tunnel, which both breaks resolution on split-horizon internal<br />
+networks and tells the target's resolver exactly what you are looking for.</p>
+<h2 id="tunnelling-chisel">Tunnelling: chisel</h2>
+<pre><code class="language-bash"># chisel is the workhorse: TCP/UDP over HTTP or SOCKS, single static binary
+
+# server side, on the host you already own
+./chisel server --port 8080 --reverse --host 127.0.0.1
+
+# client side, from the compromised host
+./chisel client 127.0.0.1:8080 R:1080:socks
+
+# now proxychains through the compromised host's SOCKS
+proxychains4 ssh -o ProxyCommand=&quot;nc -X 5 -x 127.0.0.1:1080 %h %p&quot; \\
+    user@10.0.0.5
+</code></pre>
+<p><strong>The reason tunnels exist:</strong> deep internal networks have no route back, only<br />
+a forward path. HTTP is usually the one thing allowed out, so tunnelling<br />
+inside HTTP is what survives.</p>
+<h2 id="smb-relay-the-pivot-that-needs-no-exploit">SMB relay: the pivot that needs no exploit</h2>
+<pre><code class="language-text">  SMB SIGNING:
+    - signed   : the client signs the SMB session key; the server verifies.
+                 Relay is PREVENTED.
+    - unsigned : the client does not sign. A third party can:
+
+      1. victim authenticates to you (a file share or a web page that
+         triggers an outbound SMB connection)
+      2. you forward that authentication to the real server
+      3. you are now authenticated as the victim to the real server
+
+  CONDITION: the attacker must be able to receive the victim's outbound
+             connection. This is what makes it a LAN attack.
+
+  FIX: require SMB signing on every host. Enforce it with a GPO, not a
+       per-host checkbox.
+</code></pre>
+<pre><code class="language-bash"># Is signing required? This is a one-line check per host and a finding per host.
+nmap -p 445 --script smb2-security-mode 192.168.56.20
+# output contains: &quot;message signing: enabled&quot; or &quot;disabled&quot;
+</code></pre>
+<h2 id="ad-trust-paths-the-pivot-map">AD trust paths: the pivot map</h2>
+<pre><code class="language-text">  DOMAINADMIN of domain A  -&gt;  trusts domain B  -&gt;  admin in B
+  A machine account in forest A -&gt; SQL escalation -&gt; domain admin in A
+  Any admin in the domain -&gt; shadow credentials -&gt; domain admin
+  Web server run as a service account -&gt; read that account's privileges -&gt;
+     reach internal services
+
+  Every one of these is a graph edge. Enumerate the graph, then walk it.
+  That is why BloodHound is the tool of the stage.
+</code></pre>
+<h2 id="pivot-discipline">Pivot discipline</h2>
+<pre><code class="language-text">  BEFORE EVERY PIVOT:
+    [ ] is the destination range in the WRITTEN scope?
+    [ ] did the client explicitly authorise internal movement?
+    [ ] does the ROE set a hop limit or a host limit?
+    [ ] is this a scan (noisy) or a single connection (quiet)?
+    [ ] what is your stop condition on the internal network?
+
+  DEFAULTS TO USE:
+    hop limit          : if not written, assume 1 hop. Ask.
+    scan rate internal : low. Internal networks have monitoring too.
+    scope              : assume internal is NOT in scope until told.
+    evidence           : record every hop, or you cannot draw the finding.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Pivot</strong></td>
+<td>Using one host to reach another network</td>
+</tr>
+<tr>
+<td><strong>Lateral movement</strong></td>
+<td>Moving between hosts</td>
+</tr>
+<tr>
+<td><strong>Proxy chain</strong></td>
+<td>Traffic routed through a chain of proxies</td>
+</tr>
+<tr>
+<td><strong>SOCKS proxy</strong></td>
+<td>Generic TCP proxy protocol</td>
+</tr>
+<tr>
+<td><strong>Port forward</strong></td>
+<td>Local port mapped to a remote service</td>
+</tr>
+<tr>
+<td><strong>Tunnel</strong></td>
+<td>One protocol encapsulated inside another</td>
+</tr>
+<tr>
+<td><strong>chisel</strong></td>
+<td>Fast TCP/UDP tunnel over HTTP</td>
+</tr>
+<tr>
+<td><strong>ligolo</strong></td>
+<td>TUN/TAP tunnel for full network access</td>
+</tr>
+<tr>
+<td><strong>SMB relay</strong></td>
+<td>Reflecting authenticated SMB to impersonate a victim</td>
+</tr>
+<tr>
+<td><strong>SMB signing</strong></td>
+<td>The control that prevents relay</td>
+</tr>
+<tr>
+<td><strong>Trust path</strong></td>
+<td>An authorisation edge between domains</td>
+</tr>
+<tr>
+<td><strong>BloodHound</strong></td>
+<td>AD graph enumeration and path analysis</td>
+</tr>
+<tr>
+<td><strong>Blast radius</strong></td>
+<td>Damage potential; grows with every hop</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/tcm-06 &amp;&amp; cd ~/aegis/labs/tcm-06
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. build the pivot lab: two networks, only the &quot;jump host&quot; reaches both ---
+cat &gt; 00-lab.md &lt;&lt;'EOF'
+# Pivot lab
+
+Two VirtualBox networks:
+  NET-A  192.168.56.0/24  &quot;external&quot;   -- you sit here
+  NET-B  10.10.10.0/24     &quot;internal&quot;   -- only reachable via the jump host
+
+| Host | Networks | Role |
+|---|---|---|
+| 192.168.56.1 | NET-A only | your workstation |
+| 192.168.56.20 | NET-A + NET-B | the JUMP HOST - the pivot |
+| 10.10.10.5 | NET-B only | internal web server |
+| 10.10.10.6 | NET-B only | internal database |
+
+Setup on the jump host (two NICs, one in each range):
+  sudo ip link set ens33 up &amp;&amp; sudo ip addr add 192.168.56.20/24 dev ens33
+  sudo ip link set ens34 up &amp;&amp; sudo ip addr add 10.10.10.20/24  dev ens34
+  sudo sysctl -w net.ipv4.ip_forward=1
+
+Then verify you CANNOT reach NET-B from NET-A, which is the premise:
+  ping -c1 10.10.10.5        # from your workstation: must fail
+  ssh 192.168.56.20 'ping -c1 10.10.10.5'   # from the jump host: must succeed
+EOF
+echo &quot;written: 00-lab.md&quot;
+
+# --- 2. the three techniques, side by side ---
+cat &gt; 01-techniques.md &lt;&lt;'EOF'
+# Choosing a pivot technique
+
+| Need | Technique | Command |
+|---|---|---|
+| one internal HTTP service | port forward | `ssh -N -L 8888:10.10.10.5:80 user@jumphost` |
+| a whole tool suite | SOCKS + proxychains | `ssh -N -D 127.0.0.1:1080 user@jumphost` |
+| arbitrary TCP/UDP, HTTP-carried | chisel | `chisel client jumphost:8080 R:socks` |
+| a whole network, TUN/TAP | ligolo | `ligolo-proxy` + tun interface |
+
+## Always
+- bind forwards to 127.0.0.1, never 0.0.0.0
+- enable `proxy_dns` when using SOCKS
+- use `strict_chain` in proxychains
+- record the hop in the engagement diary
+- tear it down at the end and verify
+
+## Never
+- leave a forward running after the engagement
+- bind a forward to a routable interface &quot;just for convenience&quot;
+- assume internal is in scope because external was
+EOF
+echo &quot;written: 01-techniques.md&quot;
+
+# --- 3. demonstrate the premise: NET-B is unreachable ---
+{
+  echo &quot;=== from NET-A (this workstation) ===&quot;
+  in_scope 10.10.10.5 &amp;&amp; echo &quot;  10.10.10.5 IN SCOPE per the guard&quot; \
+                        || echo &quot;  10.10.10.5 REFUSED by the scope guard&quot;
+  echo &quot;  ^ this is the whole point. The guard does not know that NET-B is&quot;
+  echo &quot;    'internal to the engagement'. It knows 10/8 is not in my scope.&quot;
+  echo
+  echo &quot;=== the routes I actually have ===&quot;
+  ip route | sed 's/^/  /'
+  echo
+  echo &quot;=== without a pivot, NET-B is unreachable. That is segmentation&quot;
+  echo &quot;    working, and it is what the pivot is here to test. ===&quot;
+} | tee 02-premise.txt
+
+# --- 4. SOCKS proxy + proxychains, configured correctly ---
+cat &gt; /etc/proxychains4.conf.d/aegis.conf 2&gt;/dev/null &lt;&lt;'EOF'
+# AEGIS pivot config
+strict_chain          # fail if a hop is down rather than leaking traffic
+proxy_dns             # route DNS through the tunnel too
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+[ProxyList]
+socks5  127.0.0.1 1080
+EOF
+mkdir -p /etc/proxychains4.conf.d
+cat &gt; /etc/proxychains4.conf.d/aegis.conf &lt;&lt;'EOF'
+strict_chain
+proxy_dns
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+[ProxyList]
+socks5  127.0.0.1 1080
+EOF
+echo &quot;written: /etc/proxychains4.conf.d/aegis.conf&quot;
+echo &quot;  activate with:  proxychains4 -f /etc/proxychains4.conf.d/aegis.conf &lt;cmd&gt;&quot;
+
+# --- 5. the verification that makes a pivot trustworthy ---
+cat &gt; 03-verify.md &lt;&lt;'EOF'
+# Verifying a pivot before you trust it
+
+```bash
+# 1. is the tunnel alive?
+ss -tnp | grep 1080          # a SOCKS listener, loopback only
+
+# 2. does traffic actually leave from the jump host?
+ssh user@192.168.56.20 'curl -s --max-time 5 http://10.10.10.5/ | head -1'
+
+# 3. does it appear to, from your side? (compare the two)
+curl -s --max-time 5 http://127.0.0.1:8888/ | head -1
+
+# 4. confirm your source address is the jump host, not you
+proxychains4 -f /etc/proxychains4.conf.d/aegis.conf curl -s https://ifconfig.me
+
+# 5. THE IMPORTANT ONE: is it leaking without the proxy?
+#    a strict_chain misconfiguration falls back to a DIRECT connection
+curl -s --max-time 5 http://10.10.10.5/ | head -1   # must FAIL
+</code></pre>
+<p>Step 5 catches the single most common pivot failure: a broken tunnel that<br />
+looks like it works because <code>proxychains</code> fell back to direct. Every<br />
+"pivot attempt" you record without step 5 may have been you, not the pivot.</p>
+<h2 id="log-every-hop">Log every hop</h2>
+<pre><code>14:20  pivot 1: SSH local forward 127.0.0.1:8888 -&gt; 10.10.10.5:80
+       via 192.168.56.20. Verified source address 10.10.10.20.
+14:35  removed forward.
+</code></pre>
+<p>EOF<br />
+echo "written: 03-verify.md"</p>
+<h1 id="-6-smb-signing-the-check-that-finds-a-relay-pivot-">--- 6. SMB signing: the check that finds a relay pivot ---</h1>
+<p>{<br />
+  echo "=== SMB signing status ==="<br />
+  echo "  signing enabled  -&gt; relay is not possible against this host"<br />
+  echo "  signing disabled -&gt; relay is possible; report it"<br />
+  echo<br />
+  echo "  check:  nmap -p 445 --script smb2-security-mode <host>"<br />
+  echo "  or locally:"<br />
+  echo<br />
+  # local equivalent: what does this host require?<br />
+  if command -v testparm &gt;/dev/null 2&gt;&1; then<br />
+    testparm -sv 2&gt;/dev/null | grep -iE "server signing|client signing" | sed 's/^/  /'<br />
+  fi<br />
+  echo<br />
+  echo "=== relay defence, in order of strength ==="<br />
+  echo "  1. SMB signing REQUIRED everywhere (GPO, not per-host)"<br />
+  echo "  2. SMB encryption for sensitive shares"<br />
+  echo "  3. Restrict inbound SMB 445 to management hosts only"<br />
+  echo "  4. LDAP signing, channel binding, and LDAP protections"<br />
+  echo "     (this is the OTHER relay family, and it is how most relays"<br />
+  echo "      work in practice)"<br />
+} | tee 04-smb.txt</p>
+<h1 id="-7-the-ad-trust-graph-offline-">--- 7. the AD trust graph, offline ---</h1>
+<p>cat &gt; 05-ad-graph.md &lt;&lt;'EOF'</p>
+<h1 id="the-ad-graph-modelled-offline">The AD graph, modelled offline</h1>
+<p>Every privilege-escalation path in Active Directory is an edge in a graph.<br />
+Nodes: users, groups, computers, sessions, ACLs. Edges: who can read<br />
+whose credential, who can control which service, which sessions exist.</p>
+<pre><code>  svc_webapp (service account)
+        |
+        | HasSession/ReadGMSAPassword
+        v
+  SA-WEBAPP  --GenericAll--&gt;  DOMAIN ADMINS
+        |
+        | member of
+        v
+  &quot;Backup Operators&quot;  --SeRestorePrivilege--&gt;  domain root
+        |
+        v
+   takeover
+</code></pre>
+<p>The graph makes the path visible. BloodHound automates its collection;<br />
+the <em>reading</em> of the graph is the skill.</p>
+<h2 id="the-three-ad-paths-that-appear-in-every-engagement">The three AD paths that appear in every engagement</h2>
+<ol>
+<li><strong>Credential exposure</strong> — a readable share, a config file, a plaintext<br />
+   password in a script. Found by looking, not by exploiting.</li>
+<li><strong>ACL abuse</strong> — a GenericAll/WriteDACL on a user, group, or computer.<br />
+   Found by enumerating ACLs, not by guessing passwords.</li>
+<li><strong>Service accounts</strong> — a service account in a privileged group is a<br />
+   single misconfiguration away from domain admin.</li>
+</ol>
+<h2 id="how-to-report-a-path">How to report a path</h2>
+<pre><code>  Source      : user jdoe (domain Users)
+  Path        : jdoe -&gt; member of &quot;Helpdesk&quot; -&gt; GenericWrite on
+                SA-BACKUP -&gt; SeRestorePrivilege -&gt; DC01$
+  Impact      : domain compromise from any authenticated account
+  Effort      : none; jdoe is a normal account with no special rights
+  Fix         : remove jdoe from Helpdesk; remove GenericWrite on
+                SA-BACKUP; separate backup operator rights from
+                interactive login rights
+</code></pre>
+<p>That is a Critical finding written in five lines. The graph is the work.<br />
+EOF<br />
+echo "written: 05-ad-graph.md"</p>
+<h1 id="-8-tear-it-all-down-and-prove-it-">--- 8. tear it all down, and prove it ---</h1>
+<p>cat &gt; 06-teardown.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash">!/usr/bin/env bash</h1>
+<h1 id="every-pivot-must-be-gone-when-the-engagement-ends">Every pivot must be gone when the engagement ends.</h1>
+<p>echo "=== SOCKS listeners (pivots) ==="<br />
+ss -tnp 2&gt;/dev/null | grep -E "127.0.0.1:1080|:1080 " | sed 's/^/  /' || echo "  none"<br />
+echo<br />
+echo "=== SSH forwards still running ==="<br />
+ps -ef | grep -E "ssh .*-[LRD] " | grep -v grep | sed 's/^/  /' || echo "  none"<br />
+echo<br />
+echo "=== chisel / ligolo processes ==="<br />
+ps -ef | grep -E "chisel|ligolo" | grep -v grep | sed 's/^/  /' || echo "  none"<br />
+echo<br />
+echo "=== tun interfaces ==="<br />
+ip -br link | grep tun | sed 's/^/  /' || echo "  none"<br />
+echo<br />
+echo "=== proxychains config installed by this engagement ==="<br />
+ls -la /etc/proxychains4.conf.d/aegis.conf 2&gt;/dev/null &amp;&amp; \<br />
+  echo "  REMOVE before finishing" || echo "  (not present)"<br />
+echo<br />
+echo "  Kill the SSH master sessions last, or you lose your access to"<br />
+echo "  clean up anything remote."<br />
+EOF<br />
+chmod +x 06-teardown.sh<br />
+./06-teardown.sh 2&gt;&amp;1 | tee 06-teardown.txt<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: the scope guard refusing <code>10.10.10.5</code> even though it is<br />
+internal to the engagement. The guard doesn't know about NET-B; it knows 10/8 is not in the<br />
+written scope. That is exactly right — the ROE is a document, not a heuristic, and an<br />
+internal range is <em>out of scope until someone says otherwise</em>.</p>
+<p><strong>Step 6</strong> produces the artifact that ends an engagement cleanly: proof of teardown.</p>
+<p><strong>Record:</strong> <code>02-premise.txt</code>, <code>03-verify.md</code> and <code>06-teardown.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is a pivot a new authorisation question rather than a continuation?</li>
+<li>Give the three pivot techniques and when each is right.</li>
+<li>Why must a port forward bind to loopback rather than <code>0.0.0.0</code>?</li>
+<li>What does <code>proxy_dns</code> prevent, and why does it matter on internal networks?</li>
+<li>How does SMB relay work, and what control stops it?</li>
+<li>What is <code>strict_chain</code> for, and what is the failure mode if you omit it?</li>
+<li>Why is "we pivoted without hitting a control" itself a Critical finding?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pivoting</strong> → <strong>Tunneling</strong> → <strong>Proxy Chains</strong> → <strong>SMB Relay</strong> → <strong>Active Directory Trust Paths</strong> →<br />
+<strong>Network Segmentation</strong>.<br />
+The capstone of TCM; <code>tcm-07</code> is where it all becomes a document.</p>

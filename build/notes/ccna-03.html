@@ -1,0 +1,187 @@
+<h1 id="ip-addressing-subnetting-and-cidr">IP Addressing, Subnetting and CIDR</h1>
+<h2 id="summary">Summary</h2>
+<p>Subnetting is arithmetic, and the arithmetic is the skill. Every assessment question about "is<br />
+that host in scope?" reduces to a subnet calculation, so this has to be automatic.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>IPv4: 32 bits, written as four octets. CIDR <code>/n</code> means the first n bits are the network</li>
+<li><strong>Network address</strong>: host bits all zero. <strong>Broadcast</strong>: host bits all one.</li>
+<li><strong>Usable range</strong>: network+1 to broadcast-1. For /31 and /32 the rules change.</li>
+<li>Binary is base two; the mask is a contiguous run of ones — there is no other valid subnet mask</li>
+<li><strong>Private ranges</strong>: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16</li>
+<li>Scope checks in every tool you write should use exactly these ranges</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Octet</strong></td>
+<td>Eight bits; one IPv4 component</td>
+</tr>
+<tr>
+<td><strong>CIDR</strong></td>
+<td><code>a.b.c.d/n</code> prefix notation</td>
+</tr>
+<tr>
+<td><strong>Subnet mask</strong></td>
+<td>Contiguous 1s then 0s</td>
+</tr>
+<tr>
+<td><strong>Network address</strong></td>
+<td>Host bits zero</td>
+</tr>
+<tr>
+<td><strong>Broadcast address</strong></td>
+<td>Host bits one</td>
+</tr>
+<tr>
+<td><strong>Usable host range</strong></td>
+<td>Between network and broadcast</td>
+</tr>
+<tr>
+<td><strong>Private address</strong></td>
+<td>RFC1918; not routed on the internet</td>
+</tr>
+<tr>
+<td><strong>Loopback</strong></td>
+<td>127.0.0.0/8, always local</td>
+</tr>
+<tr>
+<td><strong>Wildcard mask</strong></td>
+<td>The inverse; used in ACLs and nmap</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- read a mask as binary ---
+python3 - &lt;&lt;'PY'
+import ipaddress
+for cidr in [&quot;192.168.1.120/24&quot;, &quot;10.0.5.7/30&quot;, &quot;172.16.0.1/12&quot;, &quot;127.0.0.1/8&quot;]:
+    n = ipaddress.ip_network(cidr, strict=False)
+    print(f&quot;  {cidr:&lt;20} mask={n.netmask}  net={n.network_address}  &quot;
+          f&quot;broadcast={n.broadcast_address}  usable={n.num_addresses-2}&quot;)
+print()
+print(&quot;  masks in binary:&quot;)
+for i in range(0, 33):
+    m = int(ipaddress.ip_network(f&quot;0.0.0.0/{i}&quot;).netmask)
+    print(f&quot;    /{i:&lt;2} {m:&gt;10}  {m:032b}&quot;)
+PY
+
+# --- the tools do this arithmetic for you ---
+ip -br addr
+ip route | head
+ipcalc 2&gt;/dev/null || echo &quot;(apt install ipcalc; python3 -m ipaddress works too)&quot;
+
+# --- scope decisions, in shell ---
+python3 -c &quot;
+import ipaddress, sys
+for tgt in ['192.168.56.101','10.0.0.5','172.32.0.1','8.8.8.8','127.0.0.1']:
+    a = ipaddress.ip_address(tgt)
+    private = a.is_private
+    print(f'  {tgt:&lt;16} private={private}')&quot;
+
+# --- what is actually on my networks ---
+ip route get 8.8.8.8
+ip route get 127.0.0.1
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> make subnetting automatic, then verify it against real interfaces.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccna-03 &amp;&amp; cd ~/aegis/labs/ccna-03
+
+# --- 1. the reference table, generated ---
+python3 - &lt;&lt;'PY' | tee 01-subnets.txt
+import ipaddress
+print(f&quot;{'CIDR':&lt;20}{'MASK':&lt;18}{'NETWORK':&lt;16}{'BROADCAST':&lt;16}{'USABLE':&lt;8}&quot;)
+print(&quot;-&quot;*78)
+for i in range(8, 33):
+    n = ipaddress.ip_network(f&quot;0.0.0.0/{i}&quot;)
+    hosts = n.num_addresses - 2 if i &lt; 31 else n.num_addresses
+    print(f&quot;/{i:&lt;18}{str(n.netmask):&lt;18}{n.network_address:&lt;16}{n.broadcast_address:&lt;16}{hosts:&lt;8}&quot;)
+PY
+
+# --- 2. the four exercises you must be able to do without thinking ---
+python3 - &lt;&lt;'PY' | tee 02-exercises.txt
+import ipaddress
+print(&quot;Q1: host 192.168.1.130/26 - is .200 in the same subnet?&quot;)
+net = ipaddress.ip_network(&quot;192.168.1.130/26&quot;, strict=False)
+print(&quot;   network is&quot;, net, &quot;-&gt; .200 same subnet:&quot;,
+      ipaddress.ip_address(&quot;192.168.1.200&quot;) in net)
+
+print(&quot;\nQ2: split 192.168.1.0/24 into four equal subnets&quot;)
+sup = ipaddress.ip_network(&quot;192.168.1.0/24&quot;)
+for i, sub in enumerate(sup.subnets(prefixlen_diff=2)):
+    print(f&quot;   {i+1}: {sub}  usable {sub.num_addresses-2}&quot;)
+
+print(&quot;\nQ3: how many host bits in /26? how many addresses?&quot;)
+n = ipaddress.ip_network(&quot;0.0.0.0/26&quot;)
+print(f&quot;   32-26 = {32-26} host bits, {n.num_addresses} total, {n.num_addresses-2} usable&quot;)
+
+print(&quot;\nQ4: /31 and /32 - the special cases&quot;)
+for c in [&quot;10.0.0.0/31&quot;, &quot;10.0.0.1/32&quot;]:
+    n = ipaddress.ip_network(c)
+    print(f&quot;   {c:&lt;16} {n.num_addresses} address(es) - point-to-point link, not a network&quot;)
+PY
+
+# --- 3. verify against your real interfaces ---
+{
+  echo &quot;=== your actual addresses ===&quot;
+  ip -br addr
+  echo
+  echo &quot;=== your actual networks ===&quot;
+  python3 - &lt;&lt;'PY'
+import ipaddress, subprocess, re
+out = subprocess.run([&quot;ip&quot;,&quot;-4&quot;,&quot;addr&quot;],capture_output=True,text=True).stdout
+for line in out.splitlines():
+    m = re.search(r&quot;inet (\d+\.\d+\.\d+\.\d+/\d+)&quot;, line)
+    if m:
+        n = ipaddress.ip_network(m.group(1), strict=False)
+        print(f&quot;  {m.group(1):&lt;20} network={n.network_address}  broadcast={n.broadcast_address}&quot;
+              f&quot;  usable={n.num_addresses-2}  private={n.is_private}&quot;)
+PY
+  echo
+  echo &quot;=== your actual routes ===&quot;
+  ip route
+} 2&gt;&amp;1 | tee 03-mine.txt
+
+# --- 4. THE SCOPE FUNCTION, written properly ---
+cat &gt; scope.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Correct RFC1918 scope check. Use this in every tool you write.&quot;&quot;&quot;
+import ipaddress, sys
+
+PRIVATE = [ipaddress.ip_network(n) for n in
+           (&quot;10.0.0.0/8&quot;, &quot;172.16.0.0/12&quot;, &quot;192.168.0.0/16&quot;, &quot;127.0.0.0/8&quot;)]
+
+def in_scope(host):
+    try:
+        a = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(a in net for net in PRIVATE)
+
+if __name__ == &quot;__main__&quot;:
+    for host in sys.argv[1:]:
+        print(f&quot;  {host:&lt;18} {'IN SCOPE' if in_scope(host) else 'REFUSED'}&quot;)
+PY
+python3 scope.py 192.168.56.101 10.1.2.3 172.16.4.4 172.32.4.4 8.8.8.8 127.0.0.1
+</code></pre>
+<p><strong><code>172.16.4.4</code> is in scope and <code>172.32.4.4</code> is not</strong> — that is the classic exam trap, because<br />
+<code>172.16.0.0/12</code> covers <code>172.16</code> through <code>172.31</code> only. Test both.</p>
+<p><strong>Record:</strong> <code>01-subnets.txt</code> — keep this table; you will reference it constantly.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why can a subnet mask never have a zero followed by a one?</li>
+<li>How many usable hosts in a /26, and why is it not 64?</li>
+<li>What is special about a /31?</li>
+<li>Is <code>172.32.1.1</code> private? Explain the boundary.</li>
+<li>Why does the scope check in your tools matter, operationally?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>CIDR</strong> → <strong>Subnetting</strong> → <strong>IP Addressing</strong> → <strong>Binary Numbering</strong> → <strong>Broadcast Domain</strong> →<br />
+<strong>Segmentation</strong>.</p>

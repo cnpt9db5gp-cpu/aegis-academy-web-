@@ -1,0 +1,209 @@
+<h1 id="capturing-on-loopback-with-tcpdump-and-bpf-filters">Capturing on Loopback with tcpdump and BPF Filters</h1>
+<h2 id="summary">Summary</h2>
+<p>Capturing is a privilege, and tcpdump is where it starts. Filters are the part worth learning<br />
+properly — an unfiltered capture is unusable, and a badly filtered one silently misses the thing<br />
+you were looking for.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>Capture needs <code>CAP_NET_RAW</code>, which is why raw sockets require root</li>
+<li><strong>BPF (Berkeley Packet Filter)</strong> is the compiled filter language inside libpcap</li>
+<li><strong>Capture filter</strong> (what is written to disk) versus <strong>display filter</strong> (what you look at) —<br />
+  confusing them wastes hours</li>
+<li><strong>tcpdump stores packets to disk first</strong>; the display happens later on the file</li>
+<li>Promiscuous mode is per-interface and required to see other hosts' traffic</li>
+<li>Snaplen truncates the payload; full packets matter for protocol analysis</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>BPF</strong></td>
+<td>The filter language libpcap compiles and attaches</td>
+</tr>
+<tr>
+<td><strong>Capture filter</strong></td>
+<td>Applied at capture time, reduces what is stored</td>
+</tr>
+<tr>
+<td><strong>Display filter</strong></td>
+<td>Applied at read time, e.g. Wireshark/tshark syntax</td>
+</tr>
+<tr>
+<td><strong>PCAP</strong></td>
+<td>libpcap capture file format</td>
+</tr>
+<tr>
+<td><strong>Snaplen</strong></td>
+<td>Bytes captured per packet</td>
+</tr>
+<tr>
+<td><strong>Promiscuous</strong></td>
+<td>Deliver all frames to this host</td>
+</tr>
+<tr>
+<td><strong>pcapng</strong></td>
+<td>The newer, richer capture format</td>
+</tr>
+<tr>
+<td><strong>Ring buffer</strong></td>
+<td>Kernel buffer between NIC and the capture socket</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- capability check ---
+getcap /usr/bin/tcpdump
+sudo -n tcpdump --version 2&gt;&amp;1 | head -2
+
+# --- loopback, no root needed in some configs; usually root is required ---
+sudo tcpdump -i lo -c 10 2&gt;&amp;1 | head -12
+
+# --- the filters you will actually use ---
+sudo tcpdump -i lo &quot;tcp port 80&quot;
+sudo tcpdump -i lo &quot;udp and port 53&quot;
+sudo tcpdump -i lo &quot;arp&quot;
+sudo tcpdump -i lo &quot;icmp&quot;
+sudo tcpdump -i lo &quot;host 127.0.0.1 and port 22&quot;
+sudo tcpdump -i lo &quot;net 192.168.56.0/24&quot;
+sudo tcpdump -i lo &quot;src 127.0.0.1 and dst port 8080&quot;
+sudo tcpdump -i lo &quot;tcp[tcpflags] &amp; tcp-syn != 0&quot;      # SYN packets only
+sudo tcpdump -i lo &quot;not port 22 and not port 53&quot;        # exclude noise
+sudo tcpdump -i lo &quot;tcp port 80 or udp port 53&quot;
+
+# --- save, then read ---
+sudo tcpdump -i lo -w capture.pcap -s 0 'tcp port 8080'   # -s 0 = full packets
+sudo tcpdump -r capture.pcap -n | head
+tcpdump -r capture.pcap -A | head -40                       # ASCII payload
+
+# --- counting, the fastest way to see what is flowing ---
+sudo timeout 10 tcpdump -i any -n 2&gt;/dev/null | awk '{print $5}' | sort | uniq -c | sort -rn | head
+sudo timeout 10 tcpdump -i any -n 2&gt;/dev/null | grep -c SYN
+
+# --- statistics ---
+sudo timeout 10 tcpdump -i any -n 2&gt;/dev/null | tail -5
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> capture cleanly on loopback, build a filter library, and prove capture-filter<br />
+versus display-filter.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/pkt-01 &amp;&amp; cd ~/aegis/labs/pkt-01
+
+# --- 1. the simplest possible capture ---
+sudo timeout 10 tcpdump -i lo -n -c 20 2&gt;&amp;1 | tee 01-basic.txt
+echo &quot;  Read the columns: time, source, &gt;, destination, flags, length.&quot;
+
+# --- 2. capture with a filter, in one terminal while you generate traffic ---
+sudo timeout 20 tcpdump -i lo -n -w 02-filtered.pcap -s 0 'tcp port 8080' 2&gt;/dev/null &amp;
+CAP=$!
+sleep 1
+( nc -l -p 8080 &gt;/dev/null 2&gt;&amp;1 &amp; )
+sleep 1
+for i in $(seq 1 5); do echo &quot;message $i&quot; | timeout 2 nc 127.0.0.1 8080 2&gt;/dev/null; done
+sleep 4; kill $CAP 2&gt;/dev/null; wait $CAP 2&gt;/dev/null
+echo &quot;=== capture-filtered file ===&quot;
+sudo tcpdump -r 02-filtered.pcap -n 2&gt;/dev/null | head -8
+echo
+echo &quot;=== how many packets did the filter let through? ===&quot;
+sudo tcpdump -r 02-filtered.pcap -n 2&gt;/dev/null | wc -l
+
+# --- 3. THE SAME CAPTURE, read without the filter ---
+sudo timeout 15 tcpdump -i lo -n -w 03-all.pcap -s 0 2&gt;/dev/null &amp;
+CAP2=$!
+sleep 1
+( nc -l -p 8080 &gt;/dev/null 2&gt;&amp;1 &amp; )
+sleep 1
+for i in $(seq 1 5); do echo &quot;message $i&quot; | timeout 2 nc 127.0.0.1 8080 2&gt;/dev/null; done
+sleep 4; kill $CAP2 2&gt;/dev/null; wait $CAP2 2&gt;/dev/null
+echo &quot;=== unfiltered file: what else was on the wire? ===&quot;
+sudo tcpdump -r 03-all.pcap -n 2&gt;/dev/null | head -12
+echo
+echo &quot;total packets unfiltered: $(sudo tcpdump -r 03-all.pcap -n 2&gt;/dev/null | wc -l)&quot;
+echo &quot;total packets filtered  : $(sudo tcpdump -r 02-filtered.pcap -n 2&gt;/dev/null | wc -l)&quot;
+echo
+echo &quot;That difference is why you filter at capture time: less disk, less noise,&quot;
+echo &quot;and no risk of the interesting packet having scrolled past.&quot;
+
+# --- 4. build the filter library ---
+cat &gt; 04-filters.txt &lt;&lt;'EOF'
+# BPF filter library - tcpdump capture filters
+
+# basics
+host 10.0.0.5                 # that host, either direction
+src host 10.0.0.5
+dst port 443
+net 192.168.56.0/24           # CIDR works
+portrange 4000-4100
+
+# protocol combinations
+tcp and port 22
+udp and port 53
+icmp
+arp
+
+# negation (exclude the noise)
+not port 5353                 # mDNS noise
+not (tcp port 22 or tcp port 53)
+
+# state
+tcp[tcpflags] &amp; tcp-syn != 0        # SYNs only (scan detection)
+tcp[tcpflags] &amp; tcp-rst != 0        # resets
+tcp[tcpflags] &amp; tcp-fin != 0
+
+# byte offsets (rarely needed, but powerful)
+ip[0] &amp; 0x0f &gt; 5                 # IP options present
+
+# practical combinations
+(host 192.168.56.101) and (tcp port 80 or tcp port 443)
+tcp port 445 and greater 100       # only large SMB frames
+EOF
+cat 04-filters.txt
+cat 04-filters.txt | while read -r line; do :; done
+echo &quot;  filters written to 04-filters.txt&quot;
+
+# --- 5. is anything suspicious flowing right now? ---
+{
+  echo &quot;=== SYN-only frames in 10 seconds (scan detection heuristic) ===&quot;
+  sudo timeout 10 tcpdump -i any -n &quot;tcp[tcpflags] &amp; tcp-syn != 0 and tcp[tcpflags] &amp; tcp-ack == 0&quot; 2&gt;/dev/null \
+    | wc -l
+  echo &quot;  (a burst of SYN-without-ACK from one source = a scan)&quot;
+  echo
+  echo &quot;=== ARP traffic in 10 seconds (spanning tree, discovery, or poisoning) ===&quot;
+  sudo timeout 10 tcpdump -i any -n &quot;arp&quot; 2&gt;/dev/null | wc -l
+  echo
+  echo &quot;=== ICMP traffic (reachability, or tunnelling) ===&quot;
+  sudo timeout 10 tcpdump -i any -n &quot;icmp&quot; 2&gt;/dev/null | wc -l
+} 2&gt;&amp;1 | tee 05-baseline.txt
+</code></pre>
+<p><strong>Step 5 is the habit worth building</strong> — a ten-second baseline of "what is normal here" makes<br />
+anomalies obvious later.</p>
+<p><strong>Record:</strong> <code>04-filters.txt</code> — keep this, you will use it every session.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What privilege does packet capture need, and why?</li>
+<li>Difference between a capture filter and a display filter?</li>
+<li>Why filter at capture time rather than at read time?</li>
+<li>Write the BPF filter for "SYN packets to port 443".</li>
+<li>What does a burst of SYN-without-ACK suggest?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>tcpdump</strong> → <strong>Packet Filter</strong> → <strong>PCAP</strong> → <strong>Wireshark</strong> → <strong>Protocol Analysis</strong> →<br />
+<strong>IDS / IPS</strong>.</p>

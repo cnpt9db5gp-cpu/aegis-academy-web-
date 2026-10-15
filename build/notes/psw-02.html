@@ -1,0 +1,192 @@
+<h1 id="apprentice-track-walkthroughs-access-control-and-business-logic">Apprentice Track Walkthroughs: Access Control and Business Logic</h1>
+<h2 id="summary">Summary</h2>
+<p><code>ps-04</code> and <code>ps-09</code> covered these two in theory. The walkthroughs add the thing theory cannot:<br />
+<strong>the order you notice things in.</strong> Access control bugs fall out of using a second account;<br />
+logic bugs fall out of asking "what is this rule, exactly?" before you touch anything.</p>
+<blockquote>
+<p>Companion to <code>ps-04</code> and <code>ps-09</code>. Same theory, different discipline.</p>
+</blockquote>
+<h2 id="the-access-control-walkthrough">The access-control walkthrough</h2>
+<pre><code class="language-text">  THE SEQUENCE, and each step depends on the previous one
+
+  1. CREATE A SECOND ACCOUNT
+     This is the step that makes the whole exercise possible. Do it
+     first, before anything else, because the bug is a *comparison*
+     and a comparison needs two values.
+
+  2. LOG IN AS EACH USER, AND MAP
+     Record for both accounts:
+       - every URL you can reach
+       - every UI element you can see
+       - the difference between the two views
+     The DIFFERENCE is your target list. What user A can see and user
+     B cannot is either a feature (fine) or a missing check (a finding).
+
+  3. FOR EACH OBJECT, SWAP THE OWNER
+       GET /api/invoice?id=&lt;A's id&gt;   as B  -&gt; 403?
+       GET /api/invoice?id=&lt;B's id&gt;   as B  -&gt; 200, B's data
+     Anything that returns 200 with the other user's data is an IDOR.
+
+  4. FOR EACH FUNCTION, SWAP THE ROLE
+       POST /admin/create as a normal user
+     The check might exist for GET and not POST. Test both verbs.
+
+  5. FOR EACH HIDDEN THING, REQUEST IT DIRECTLY
+       /admin, /internal, /actuator/env, /.git/config, /backup.sql
+     A hidden link is not a control.
+
+  6. CHANGE THE PARAMETER, NOT THE PATH
+       ?role=admin  ?isAdmin=1  ?userId=1  ?accountId=1
+       Many apps check the path and trust the body.
+</code></pre>
+<h3 id="the-one-that-people-miss-a-consistent-role-check">The one that people miss: a <em>consistent</em> role check</h3>
+<pre><code class="language-text">  THE SUBTLE CASE:
+    user:  viewer  (role=1)
+    user:  editor  (role=2)
+
+    /api/document?id=5&amp;role=2      &lt;- role in the QUERY, not the session
+
+  Here the attacker is not bypassing a check. They are supplying the
+  value the check compares against. The check passes, and it should:
+  it was comparing against the wrong input.
+
+  FIND IT BY: adding every parameter you see in the UI to a request
+  that only needs one of them. Look for authority-looking names:
+    role, level, isAdmin, scope, access, type, mode, acl, group_id
+</code></pre>
+<h3 id="reporting-it-so-it-cannot-be-waved-away">Reporting it so it cannot be waved away</h3>
+<pre><code class="language-text">  ## F-04 · Horizontal privilege escalation on invoice documents
+
+  Risk
+    Any authenticated user can read any other user's invoice, including
+    billing address and partial payment details.
+
+  Prerequisite
+    Any authenticated account, including a self-registered one. No
+    elevated role, no user interaction, no special tooling.
+
+  Evidence
+    As user A (uid 2, role &quot;user&quot;):
+      GET /api/invoice?id=1     -&gt; 200, invoice belonging to user B
+      GET /api/invoice?id=1     as user B -&gt; 200, identical response
+
+  Root cause
+    The handler authenticates the session but never compares the
+    session's user id against the invoice's owner_id. The ownership
+    check was present in /api/invoice/list and absent in
+    /api/invoice/get.
+
+  Remediation
+    Add the ownership predicate to the query itself, not as a
+    post-fetch check:
+      SELECT * FROM invoices WHERE id = ? AND owner_id = ?
+    Doing it in the SQL makes it impossible to forget at a call site.
+
+  Why the SQL form is the right recommendation: a check in application
+  code is one `if` away from being omitted, and it was. A predicate in
+  the query is not optional.
+</code></pre>
+<h2 id="the-business-logic-walkthrough">The business-logic walkthrough</h2>
+<pre><code class="language-text">  THE SEQUENCE, and it is the reverse of access control
+
+  1. WRITE THE BUSINESS RULES BEFORE YOU TEST
+     You cannot violate a rule you have not articulated. Before
+     touching the app, produce:
+
+       R1  one coupon per order
+       R2  an order must be paid before shipping
+       R3  prices come from the catalogue, never the client
+       R4  a refund requires a prior payment
+       R5  inventory decrements at payment, not at order
+
+  2. MAP THE LIFECYCLE
+     For an order: draft -&gt; submitted -&gt; paid -&gt; shipped -&gt; delivered
+                                     \-&gt; cancelled
+                                     \-&gt; refunded (from paid/delivered)
+
+     Draw it. The drawing shows which edges the application allows.
+
+  3. ATTACK THE RULES, NOT THE ENDPOINTS
+     For each rule, ask:
+       - where is it enforced? (server? client? database?)
+       - is the enforcement atomic with the action?
+       - does it cover every field?
+       - is there another path to the same state?
+
+  4. THE PRICE RULE, immediately
+       Change every price in a checkout request to 1.
+       Negative quantity. Quantity = 2147483647. Coupon applied
+       after the total is computed.
+
+  5. THE ONE-TIME RULE, with concurrency
+       Two requests at the same instant. See ps-09's race.py.
+       If you cannot demonstrate it reliably, report it as a design
+       flaw with the proof-of-concept explanation. Do not claim a
+       breach you did not achieve.
+
+  6. THE LIFECYCLE RULE
+       Create an order. Immediately POST the refund endpoint.
+       Then: ship it without paying. Then: cancel after shipping.
+       Test every PAIR of states.
+</code></pre>
+<h3 id="the-question-that-finds-logic-bugs">The question that finds logic bugs</h3>
+<pre><code class="language-text">  &quot;What does this application ASSUME about me?&quot;
+
+  Assumes the quantity is positive.
+  Assumes the price was not tampered with.
+  Assumes only one request happens at a time.
+  Assumes the user already paid before refunding.
+  Assumes the invoice is theirs.
+
+  Every assumption is a rule. Every rule is a test case.
+  This question finds more logic bugs than any payload list.
+</code></pre>
+<h3 id="the-state-matrix-as-a-worksheet">The state matrix, as a worksheet</h3>
+<pre><code class="language-text">                  to: draft  submitted  paid  shipped  delivered  cancelled  refunded
+  from draft              -     TEST      TEST   TEST      TEST      TEST      TEST
+  from submitted          -       -        TEST   TEST      TEST      TEST      TEST
+  from paid               -       -          -     ok        ok        ok        TEST
+  from shipped            -       -          -       -        ok        ok        TEST
+  from delivered          -       -          -       -         -         ok        TEST
+  from cancelled          -       -          -       -         -         -        TEST
+  from refunded           -       -          -       -         -         -        TEST
+
+  Every TEST you cannot justify as legal behaviour is a finding.
+  Record the response, not just the status code.
+</code></pre>
+<h2 id="what-the-walkthroughs-teach-that-a-payload-list-does-not">What the walkthroughs teach that a payload list does not</h2>
+<pre><code class="language-text">  1. ORDER. Enumerate before attacking. You cannot form a hypothesis
+     about a parameter you have not found.
+
+  2. MINIMUM. Prove the effect, then stop. Every extra request is
+     more state you must clean up and more risk.
+
+  3. SECOND ACCOUNT. The most common tool in access-control testing
+     and the one most often skipped.
+
+  4. THE PREREQUISITE. State what must be true for the attack to work.
+     It is what separates a real finding from a theoretical one.
+
+  5. THE FIX IN THE RIGHT PLACE. &quot;Check ownership&quot; is advice. &quot;Add
+     owner_id = ? to the WHERE clause&quot; is a fix. The second one
+     cannot be forgotten at a call site, which is how the bug happened.
+
+  6. HONESTY ABOUT UNPROVEN BUGS. &quot;I found the check is not atomic;
+     I could not reproduce it under concurrency; treat as a design
+     flaw&quot; is a professional finding. An overstated claim is not.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why must the second account be created before mapping?</li>
+<li>What is "consistent role checking", and how does an attacker exploit it?</li>
+<li>Name four authority-looking parameter names.</li>
+<li>Why is putting <code>owner_id</code> in the WHERE clause a better recommendation than an <code>if</code>?</li>
+<li>Why write the business rules before testing?</li>
+<li>What does the state matrix add that reading the code does not?</li>
+<li>What is the question that finds logic bugs?</li>
+<li>What should a report say when you found a non-atomic check but could not race it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>IDOR</strong> → <strong>Access Control</strong> → <strong>Logic Bug</strong> → <strong>OWASP Top 10</strong> →<br />
+<strong>Business Logic</strong> → <strong>Reporting</strong>.<br />
+This closes PortSwigger. Next: <code>cry-d1</code>..<code>d4</code>.</p>

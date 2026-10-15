@@ -1,0 +1,339 @@
+<h1 id="timeline-analysis-tying-files-logs-and-registry-together">Timeline Analysis: Tying Files, Logs and Registry Together</h1>
+<h2 id="summary">Summary</h2>
+<p>A timeline is not a list of timestamps. It is a <strong>narrative with a shape</strong> — what happened first,<br />
+what caused what, and where the gaps are. Building one is the difference between a list of<br />
+artefacts and an incident narrative.</p>
+<p>The framing: <strong>every artefact has a timestamp, and the timestamps disagree.</strong> That disagreement is<br />
+information: it tells you about clock skew, about deliberate timestomping, and about which source<br />
+to trust for which question.</p>
+<blockquote>
+<p>Companion to <code>for-01</code> (get the image) and <code>ad-08</code> (what the DC logged).<br />
+This note is the analysis that happens between them.</p>
+</blockquote>
+<h2 id="the-artefact-sources-and-what-each-is-authoritative-for">The artefact sources, and what each is authoritative for</h2>
+<pre><code class="language-text">  SOURCE              TIMESTAMP IT CARRIES        TRUST IT FOR
+  ------------------  -------------------------   -----------------
+  MFT ($MFT)          created / modified /       the file system's
+                      accessed (4 columns)        own view; 8 fields
+  NTFS $UsnJrnl       file create/rename          the FILE SYSTEM's
+                      journal, timestamped as     intent - survives
+                      they happened               rename-based
+                                                   timestomping
+  $LogFile            transaction log            what the file
+                                                   system did
+  Registry hives       LastWriteTime per key      configuration
+                                                   changes
+  Event logs (evtx)   SystemTime per record       what was logged
+                                                   (and by whom)
+  Prefetch (.pf)      LastRunTime per executable  execution, and
+                      (needs the file too)        the volume it ran from
+  Amcache / ShimCache creation times              execution history
+  Shimcache            AppId, path, timestamp     what ran, oldest
+                                                   first
+  NTUSER.DAT          LastLogon, RecentDocs       user activity
+  SRUDB / UsnJrnl     session and usage          who was at the
+                                                   keyboard
+  MFT's $STANDARD_INFORMATION vs $FILE_NAME      the timestomping
+                                                   vector itself
+
+  THE RULE: use the least-valuable source to find the event and the
+  most-valuable to prove it. Prefetch finds you the time; the event
+  log proves it.
+</code></pre>
+<h2 id="timestomping-and-how-to-catch-it">Timestomping, and how to catch it</h2>
+<pre><code class="language-text">  THE ATTACK: an attacker with write access sets a file's created and
+  modified times to look old or to align with a system they were not
+  on. Placed in the MFT's timestamps.
+
+  THE CATCH, in order of reliability:
+
+  1. THE $UsnJrnl
+     The USN change journal is written by the file system BEFORE
+     any user tool can touch a file, and it is append-only.
+     A file that appears in the journal at time T but whose MFT says
+     time S is timestomped. The journal cannot be edited without
+     the volume unmounting cleanly or the attacker disabling it.
+
+  2. THE MFT's OWN INTERNALS
+     $STANDARD_INFORMATION has the times an OS sets on creation.
+     $FILE_NAME (a separate attribute, and there can be several)
+     has the times when THAT NAME was last written.
+     If $FILE_NAME's times differ from $STANDARD_INFORMATION's, the
+     file was renamed - or timestomped.
+
+  3. THE PARENT DIRECTORY's $MFT
+     A file's create time must be &gt;= its parent's modification
+     time (a file cannot be created before the directory it is in
+     was last modified... except in exactly the timestomping case).
+     Violations are candidates.
+
+  4. CREATION TIME &gt; MODIFICATION TIME
+     Impossible for an honest file. Usually an artefact of a tool
+     that did not set it, so it needs checking - but it is a lead.
+
+  5. $LogFile
+     The transaction log records the operations. A file created in
+     the journal but absent from $LogFile is a lead.
+</code></pre>
+<h2 id="the-clock-problem">The clock problem</h2>
+<pre><code class="language-text">  EVERY TIMELINE HAS THREE CLOCKS, AND THEY DISAGREE:
+
+    the evidence machine's clock   (may be wrong, or attacker-set)
+    your acquisition machine's     (probably right, NTP-synced)
+      clock
+    the DC's clock                (authoritative for domain events)
+
+  THE PROCEDURE:
+    1. record your own clock and whether it is NTP-synced
+    2. record the evidence machine's clock and its offset from yours
+    3. for domain events, use the DC's clock and its offset
+    4. state the offsets in the report
+
+  WHY IT MATTERS, CONCRETELY:
+    an attacker sets the clock back 6 months to make their activity
+    look like a scheduled maintenance window. Every file they touched
+    has a timestamp consistent with that lie. The ONLY way to catch
+    it is the USN journal, the MFT internals, and the DC's log -
+    which is on a different clock they did not control.
+
+  AND THE INVERSE: a machine with a broken battery has a clock at
+  1970. Every file looks ancient. That is not an attack; it is a
+  coin cell, and you must not report it as one.
+</code></pre>
+<h2 id="building-the-timeline">Building the timeline</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/for-02 &amp;&amp; cd ~/aegis/labs/for-02
+mkdir -p timeline/{raw,merged,output}
+
+# --- 1. the merged timeline, with provenance preserved ---
+cat &gt; merge.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Merge timeline artefacts from every source into one file, keeping the
+# SOURCE column intact. The source is never discarded - two artefacts
+# with the same timestamp from different sources are two facts.
+OUT=&quot;timeline/merged/all.csv&quot;
+mkdir -p &quot;$(dirname &quot;$OUT&quot;)&quot;
+echo &quot;timestamp_utc,source,record,detail&quot; &gt; &quot;$OUT&quot;
+
+# 1. file system: the mactime body file from fls/log2timeline.py
+if [ -f timeline/raw/mactime.csv ]; then
+  awk -F, 'NR&gt;1{printf &quot;%s,mactime,%s,%s\n&quot;,$1,$2,$4}' timeline/raw/mactime.csv &gt;&gt; &quot;$OUT&quot;
+fi
+
+# 2. the file system's own journal (survives timestomping)
+if [ -f timeline/raw/usnjrnl.csv ]; then
+  awk -F, 'NR&gt;1{printf &quot;%s,usnjrnl,%s,%s\n&quot;,$2,$3,$5}' timeline/raw/usnjrnl.csv &gt;&gt; &quot;$OUT&quot;
+fi
+
+# 3. windows event logs
+for f in timeline/raw/*.evtx.csv; do
+  [ -f &quot;$f&quot; ] || continue
+  src=$(basename &quot;$f&quot; .evtx.csv)
+  awk -F, -v s=&quot;$src&quot; 'NR&gt;1 &amp;&amp; $3!=&quot;&quot; {printf &quot;%s,%s,%s,%s\n&quot;,$3,s,$4,$8}' &quot;$f&quot; &gt;&gt; &quot;$OUT&quot;
+fi
+
+# 4. registry key last-write times
+if [ -f timeline/raw/registry.csv ]; then
+  awk -F, 'NR&gt;1{printf &quot;%s,registry,%s,%s\n&quot;,$2,$3,$5}' timeline/raw/registry.csv &gt;&gt; &quot;$OUT&quot;
+fi
+
+# 5. prefetch: what ran, and from which volume
+if [ -f timeline/raw/prefetch.csv ]; then
+  awk -F, 'NR&gt;1{printf &quot;%s,prefetch,%s,%s\n&quot;,$3,$1,$2}' timeline/raw/prefetch.csv &gt;&gt; &quot;$OUT&quot;
+fi
+
+sort -t, -k1,1 &quot;$OUT&quot; -o &quot;$OUT&quot;
+echo &quot;merged -&gt; $OUT ($(($(wc -l &lt; &quot;$OUT&quot;)-1)) records)&quot;
+echo
+echo &quot;THE SOURCE COLUMN IS NOT OPTIONAL.&quot;
+echo &quot;  Two records at the same second from mactime and from the event&quot;
+echo &quot;  log are two facts about one event. Collapsing them loses the&quot;
+echo &quot;  ability to cross-check.&quot;
+EOF
+chmod +x merge.sh
+
+# --- 2. the analysis queries ---
+cat &gt; analyse.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Questions to ask a merged timeline. Each one has found something in
+# a real incident.
+T=&quot;timeline/merged/all.csv&quot;
+[ -f &quot;$T&quot; ] || { echo &quot;run merge.sh first&quot;; exit 0; }
+
+echo &quot;=== 1. EXECUTION: what ran, and for the first time? ===&quot;
+echo &quot;    (first-run executables are where an investigation starts)&quot;
+grep -iE &quot;,prefetch,&quot; &quot;$T&quot; | sort -t, -k1,1 | head -20 | sed 's/^/  /'
+
+echo
+echo &quot;=== 2. PERSISTENCE: what was configured? ===&quot;
+echo &quot;    Run keys, services, scheduled tasks, WMI subscriptions.&quot;
+echo &quot;    A persistence artefact is a CONFIGURATION change, so it lives&quot;
+echo &quot;    in the registry, the MFT, and the event log - not in a file.&quot;
+grep -iE &quot;CurrentVersion\\\\Run|Image File Execution|Services\\\\|Schedule\\\\TaskCache&quot; &quot;$T&quot; \
+  | head -15 | sed 's/^/  /'
+
+echo
+echo &quot;=== 3. THE WINDOW: what happened in the smallest possible interval? ===&quot;
+echo &quot;    An intrusion has a start and an end. Everything between is&quot;
+echo &quot;    the attack. Find the densest cluster and look only there.&quot;
+sort -t, -k1,1 &quot;$T&quot; | awk -F, '
+  {t=substr($1,1,16); c[t]++}
+  END{for(k in c) if(c[k]&gt;3) print &quot;  &quot; k &quot;:00  &quot; c[k] &quot; records&quot;}' | sort | head -20
+
+echo
+echo &quot;=== 4. THE GAP: what should be there and is not? ===&quot;
+echo &quot;    A 3-hour silence at 03:00 followed by a burst is either a&quot;
+echo &quot;    break-in-the-night pattern (suspicious) or a scheduled task&quot;
+echo &quot;    (innocent). You cannot tell without correlating the OTHER&quot;
+echo &quot;    sources for the same window.&quot;
+sort -t, -k1,1 &quot;$T&quot; | awk -F, '
+  {h=substr($1,1,13)}
+  h!=p {if(p!=&quot;&quot; &amp;&amp; c[p]&lt;=1) print &quot;  quiet hour: &quot; p &quot;:00 (&quot; c[p] &quot; records)&quot;
+        p=h; c[h]=0}
+  {c[h]++}
+  END{if(c[p]&lt;=1) print &quot;  quiet hour: &quot; p &quot;:00 (&quot; c[p] &quot; records)&quot;}' | head -10
+
+echo
+echo &quot;=== 5. THE CROSS-CHECK: does the MFT agree with the event log? ===&quot;
+echo &quot;    A file created at T in mactime should appear in an event log&quot;
+echo &quot;    near T. Divergence means timestomping OR a clock offset.&quot;
+echo
+echo &quot;=== 6. THE USER: whose session was this? ===&quot;
+grep -iE &quot;logon|4624|4625|session&quot; &quot;$T&quot; | head -15 | sed 's/^/  /'
+echo
+echo &quot;  Correlate with: SRUDB (who was at the keyboard), NTUSER.DAT&quot;
+echo &quot;  (RecentDocs, UserAssist - what they opened), and the logon&quot;
+echo &quot;  events. Three sources, one answer.&quot;
+EOF
+chmod +x analyse.sh
+
+# --- 3. offline: a worked example, with the shape visible ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-example.txt
+from datetime import datetime, timedelta
+
+print(&quot;  === A TIMELINE, AND WHAT IT TELLS YOU ===\n&quot;)
+print(&quot;  Case: a workstation, encrypted file found by an AV scan.&quot;)
+print(&quot;  The task is to say WHEN and HOW, not WHAT.\n&quot;)
+
+t0 = datetime(2026, 10, 12, 8, 15, 0)
+events = [
+ (t0 + timedelta(days=-14), &quot;prefetch&quot;, &quot;OUTLOOK.EXE&quot;,       &quot;normal, runs daily&quot;),
+ (t0 + timedelta(days=-14), &quot;prefetch&quot;, &quot;EXCEL.EXE&quot;,         &quot;normal&quot;),
+ (t0 + timedelta(days=-3),  &quot;prefetch&quot;, &quot;POWERSHELL.EXE&quot;,    &quot;FIRST RUN - from a downloads folder&quot;),
+ (t0 + timedelta(days=-3),  &quot;registry&quot;,  &quot;HKCU\\...\\Run\\Updater&quot;,
+                                             &quot;persistence, points to %TEMP%&quot;),
+ (t0 + timedelta(days=-3),  &quot;mactime&quot;,   &quot;TEMP\\svchost32.exe&quot;,
+                                             &quot;created 4 minutes after the PowerShell prefetch&quot;),
+ (t0 + timedelta(days=-2),  &quot;prefetch&quot;,  &quot;SVCHOST32.EXE&quot;,     &quot;FIRST RUN - NOT a real svchost path&quot;),
+ (t0 + timedelta(days=-2),  &quot;eventlog&quot;,  &quot;4624&quot;,              &quot;logon, type 3, from an unusual source&quot;),
+ (t0 + timedelta(days=-2),  &quot;mactime&quot;,   &quot;TEMP\\a.dat&quot;,       &quot;the encrypted payload&quot;),
+ (t0 + timedelta(days=-2),  &quot;registry&quot;,  &quot;HKLM\\...\\Image File Execution Options\\a.exe&quot;,
+                                             &quot;IFEO debugger set - anti-analysis&quot;),
+ (t0 + timedelta(days=-1),  &quot;eventlog&quot;,  &quot;1102&quot;,              &quot;the Security log was CLEARED&quot;),
+]
+
+print(f&quot;  {'WHEN (UTC)':&lt;18} {'SOURCE':&lt;10} RECORD&quot;)
+print(&quot;  &quot; + &quot;-&quot;*70)
+for ts, src, rec, detail in sorted(events):
+    print(f&quot;  {ts:%Y-%m-%d %H:%M}   {src:&lt;10} {rec:&lt;32} {detail}&quot;)
+
+print()
+print(&quot;  === WHAT THE SHAPE TELLS YOU ===&quot;)
+first_run = [e for e in events if e[1]==&quot;prefetch&quot; and &quot;FIRST RUN&quot; in e[3]]
+print()
+print(&quot;  1. THE FIRST-RUN PREFETCH ENTRIES, and only those.&quot;)
+print(&quot;     Every day there are thousands of executions. Exactly two of&quot;)
+print(&quot;     them are the first time anything ever ran them. Those are the&quot;)
+print(&quot;     ones that are not in the baseline.&quot;)
+print()
+for ts, src, rec, detail in first_run:
+    print(f&quot;     {ts:%Y-%m-%d %H:%M}  {rec}&quot;)
+print()
+print(&quot;  2. THE ORDER, which is the story:&quot;)
+print(&quot;       PowerShell first ran from a downloads folder.&quot;)
+print(&quot;       4 minutes later, a file appeared in TEMP named to look&quot;)
+print(&quot;         like a system process.&quot;)
+print(&quot;       the next day, THAT file ran.&quot;)
+print(&quot;     That sequence is: execution -&gt; drop -&gt; execute. The drop is&quot;)
+print(&quot;     the payload; the execution is the malware.&quot;)
+print()
+print(&quot;  3. THE PERSISTENCE IS %TEMP%.&quot;)
+print(&quot;     A Run key pointing into TEMP is a finding on its own:&quot;)
+print(&quot;     it cannot survive a reboot cleanly, which means it was not&quot;)
+print(&quot;     intended to. It was for THIS session.&quot;)
+print()
+print(&quot;  4. THE IFEO ENTRY IS ANTI-ANALYSIS.&quot;)
+print(&quot;     Setting a debugger on an executable you will be asked to&quot;)
+print(&quot;     run is a classic: when the analyst launches it, the debugger&quot;)
+print(&quot;     (their own, or their sandbox) runs instead.&quot;)
+print()
+print(&quot;  5. EVENT 1102 IS THE END OF THE EVIDENCE, NOT THE START.&quot;)
+print(&quot;     Someone cleared the Security log. That:&quot;)
+print(&quot;       - DESTROYS the 4624 logon events before it&quot;)
+print(&quot;       - is itself a High-severity finding (anti-forensics)&quot;)
+print(&quot;       - changes your confidence in EVERY other 'no evidence'&quot;)
+print(&quot;         conclusion you reached from that log&quot;)
+print()
+print(&quot;  6. THE 3-DAY GAP.&quot;)
+print(&quot;     PowerShell on day -3, svchost32 on day -2. What was the&quot;)
+print(&quot;     user doing in between? Check NTUSER.DAT UserAssist and&quot;)
+print(&quot;     RecentDocs. If the user did nothing, the gap is the malware&quot;)
+print(&quot;     waiting - which is a different story than a user who&quot;)
+print(&quot;     downloaded a file and forgot about it.&quot;)
+print()
+print(&quot;  === THE REPORT, IN THAT ORDER ===&quot;)
+print(&quot;    1. the two first-run executions, with their prefetch times&quot;)
+print(&quot;    2. the drop, 4 minutes after the first, in a folder that&quot;)
+print(&quot;       is not in the baseline&quot;)
+print(&quot;    3. the persistence, and why it cannot survive a reboot&quot;)
+print(&quot;    4. the IFEO anti-analysis entry&quot;)
+print(&quot;    5. the log clear, and what it means for confidence&quot;)
+print(&quot;    6. the gap, and what the user-activity data says about it&quot;)
+print()
+print(&quot;  NOT in the report: 'a file called svchost32.exe was found'.&quot;)
+print(&quot;  In the report: WHEN, in what order, and what each step implies.&quot;)
+PY
+cat 03-example.txt
+</code></pre>
+<h2 id="building-a-narrative-not-a-list">Building a narrative, not a list</h2>
+<pre><code class="language-text">  THE STRUCTURE OF A GOOD TIMELINE SECTION:
+
+    1. THE WINDOW, in one sentence, with a date range.
+       &quot;Activity occurred between 2026-10-09 02:14 and 2026-10-09 04:31 UTC.&quot;
+
+    2. THE FIRST EVENT, and why it is first.
+       &quot;The first artefact is a first-run prefetch entry for
+        powershell.exe from C:\Users\jdoe\Downloads.&quot;
+
+    3. THE SEQUENCE, with the gaps named.
+       &quot;4 minutes later a file appeared in %TEMP%. The next first-run
+        execution was 19 hours after that.&quot;
+
+    4. THE ACTIONS, grouped by intent.
+       &quot;Execution (PowerShell), drop (%TEMP%\svchost32.exe),
+        persistence (Run key to %TEMP%), anti-forensics (IFEO, then
+        event 1102).&quot;
+
+    5. THE CONFIDENCE, and its limits.
+       &quot;The Security log was cleared at 04:31. Logon events before
+        that point are unavailable. The timeline's start is therefore
+        a lower bound, not a fact.&quot;
+
+  THE LAST POINT IS THE ONE THAT MAKES A REPORT TRUSTWORTHY. Say what
+  you cannot see, and why.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name four artefact sources and what each is authoritative <em>for</em>.</li>
+<li>Why is the <code>$UsnJrnl</code> the most reliable timestomping detector?</li>
+<li>What are the two MFT time attributes, and what does a difference between them indicate?</li>
+<li>Why can a file's create time not precede its parent directory's modification time?</li>
+<li>Name the three clocks in a timeline and how to handle their disagreement.</li>
+<li>How do you distinguish a clock attack from a dead CMOS battery?</li>
+<li>Why is "first-run prefetch" the query that starts an investigation?</li>
+<li>What does event 1102 change about every conclusion you drew from that log?</li>
+<li>What is a "lower bound" timeline, and why state it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Timeline Analysis</strong> → <strong>Windows Artifacts</strong> → <strong>File Forensics</strong> →<br />
+<strong>Incident Response</strong> → <strong>Windows Logging</strong>.<br />
+<code>for-03</code> is memory; <code>for-04</code> is the file system.</p>

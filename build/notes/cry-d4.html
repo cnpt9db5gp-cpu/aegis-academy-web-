@@ -1,0 +1,520 @@
+<h1 id="offline-password-attacks-john-hashcat-rules-and-wordlists">Offline Password Attacks: john, hashcat, rules and wordlists</h1>
+<h2 id="summary">Summary</h2>
+<p>The most common offensive skill in an engagement. The content is mostly not about cracking — it is<br />
+about <strong>identifying the hash</strong>, <strong>estimating whether the attack is worth running</strong>, and<br />
+<strong>reporting the result responsibly</strong>.</p>
+<p>The discipline: cracking someone's password hash is a finding about<br />
+their password, not a licence to log in as them. If you find a password,<br />
+you stop.</p>
+<h2 id="the-five-steps-in-order">The five steps, in order</h2>
+<pre><code class="language-text">  1. IDENTIFY   what hash is this? (format, length, prefix)
+  2. CLASSIFY   is it fast or slow? (this decides everything)
+  3. CHOOSE     wordlist + rules + masks, in that priority order
+  4. RUN        offline, with the right mode, measure throughput
+  5. REPORT     the finding is the PASSWORD POLICY, not the password
+
+  STEP 2 IS THE ONE PEOPLE SKIP.
+    md5     : 10^10 - 10^11 / sec on a GPU  -&gt; a 8-char complex pw: minutes
+    bcrypt  : 10^4 - 10^5 / sec              -&gt; a 8-char complex pw: centuries
+    Knowing this BEFORE you start tells you whether the engagement
+    will conclude in ten minutes or never.
+</code></pre>
+<h2 id="step-1-identify-the-hash">Step 1: identify the hash</h2>
+<pre><code class="language-bash"># hashid - the default first move
+hashid --identify 'f1a7e3c9d2b84056a3c59e8f1b7d2049'
+hashid --identify '5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8'
+hashid --identify '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6Ttxkc1oBOLVFa0hUlHd0jmQpMDr'
+
+# python's own guesser, for formats hashid does not know
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-identify.txt
+import hashlib, base64, binascii, re, string
+candidates = [
+ &quot;f1a7e3c9d2b84056a3c59e8f1b7d2049&quot;,
+ &quot;5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8&quot;,
+ &quot;2b241deea77f25e559b9031c651cb798a14efd61f6b3ae5d3b25f4d1a4d0e5b7&quot;,
+ &quot;$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6Ttxkc1oBOLVFa0hUlHd0jmQpMDr&quot;,
+ &quot;$6$rounds=5000$saltsalt$hashvaluelongenoughhere000000000&quot;,
+]
+def classify(h):
+    out = []
+    if re.fullmatch(r'[0-9a-f]{32}', h): out.append((&quot;MD5&quot;, &quot;128-bit, no prefix&quot;))
+    if re.fullmatch(r'[0-9a-f]{40}', h): out.append((&quot;SHA-1&quot;, &quot;160-bit, no prefix&quot;))
+    if re.fullmatch(r'[0-9a-f]{64}', h): out.append((&quot;SHA-256&quot;, &quot;256-bit, no prefix&quot;))
+    if re.fullmatch(r'[0-9a-f]{128}', h): out.append((&quot;SHA-512&quot;, &quot;512-bit, no prefix&quot;))
+    if re.fullmatch(r'[0-9a-f]{56}', h): out.append((&quot;SHA-224&quot;, &quot;224-bit&quot;))
+    if h.startswith(&quot;$2&quot;): out.append((&quot;bcrypt&quot;, &quot;SLOW - deliberately&quot;))
+    if h.startswith(&quot;$6$&quot;) or h.startswith(&quot;$5$&quot;): out.append((&quot;sha512crypt/sha256crypt&quot;, &quot;SLOW&quot;))
+    if h.startswith(&quot;$1$&quot;): out.append((&quot;md5crypt&quot;, &quot;medium - legacy&quot;))
+    if h.startswith(&quot;$pbkdf2&quot;): out.append((&quot;PBKDF2&quot;, &quot;parameterised&quot;))
+    if h.startswith(&quot;$argon2&quot;): out.append((&quot;Argon2&quot;, &quot;SLOW and memory-hard - best&quot;))
+    if h.startswith(&quot;$y$&quot;): out.append((&quot;yescrypt&quot;, &quot;SLOW and memory-hard&quot;))
+    if h.startswith(&quot;$s0$&quot;): out.append((&quot;Solar Designer&quot;, &quot;SLOW&quot;))
+    if h.startswith(&quot;{SSHA}&quot;) or h.startswith(&quot;$sha1$&quot;): out.append((&quot;Salted SHA-1&quot;, &quot;weak&quot;))
+    if h.startswith(&quot;$DCC2$&quot;): out.append((&quot;DCC2 (MS Cache)&quot;, &quot;pass-the-hash capable&quot;))
+    if len(h) == 13 and len(set(h)) == 13 and all(c in string.ascii_letters+string.digits for c in h):
+        out.append((&quot;DEScrypt / traditional crypt&quot;, &quot;8-char limit, CRACKED&quot;))
+    return out
+
+for h in candidates:
+    print(f&quot;\n  {h[:60]}{'...' if len(h)&gt;60 else ''}&quot;)
+    for name, note in classify(h):
+        print(f&quot;    -&gt; {name:&lt;26} {note}&quot;)
+    if not classify(h): print(&quot;    -&gt; (no match)&quot;)
+PY
+cat 01-identify.txt
+</code></pre>
+<h2 id="step-2-measure-before-you-commit">Step 2: measure, before you commit</h2>
+<pre><code class="language-bash">{
+  echo &quot;=== hashcat device check ===&quot;
+  hashcat -I 2&gt;/dev/null | grep -E &quot;Device|Backend|Hash mode&quot; | head -12
+  echo
+  echo &quot;=== the numbers that matter ===&quot;
+  echo
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;HASH&quot; &quot;CATEGORY&quot; &quot;SPEED (1 GPU)&quot; &quot;8-char complex PW&quot;
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;md5&quot;    &quot;fast&quot;  &quot;~10^11 / sec&quot;  &quot;minutes&quot;
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;ntlm&quot;   &quot;fast&quot;  &quot;~10^10 / sec&quot;  &quot;minutes&quot;
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;sha256&quot; &quot;fast&quot;  &quot;~10^9  / sec&quot;  &quot;hours&quot;
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;pbkdf2&quot; &quot;medium&quot; &quot;~10^5  / sec&quot; &quot;years&quot;
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;bcrypt \$2b\$&quot; &quot;slow&quot;  &quot;~10^4  / sec&quot; &quot;centuries&quot;
+  printf &quot;  %-14s %-12s %-22s %s\n&quot; &quot;argon2&quot; &quot;slow+mem&quot; &quot;~10^3  / sec&quot; &quot;centuries&quot;
+  echo
+  echo &quot;  A 8-character password from a 62-character alphabet is 2^47.6.&quot;
+  echo &quot;  That is the difference between 'minutes' and 'never'.&quot;
+  echo &quot;  THE FINDING IS: which category is the org using.&quot;
+} 2&gt;&amp;1 | tee 02-speed.txt
+
+# --- benchmark the fast ones locally, for real ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-benchmark.txt
+import hashlib, time, secrets, statistics
+print(&quot;  === measured on THIS machine, single core (a GPU is ~1000x) ===\n&quot;)
+tests = [
+    (&quot;md5&quot;,    lambda p: hashlib.md5(p.encode()).hexdigest()),
+    (&quot;sha1&quot;,   lambda p: hashlib.sha1(p.encode()).hexdigest()),
+    (&quot;sha256&quot;, lambda p: hashlib.sha256(p.encode()).hexdigest()),
+    (&quot;sha512&quot;, lambda p: hashlib.sha512(p.encode()).hexdigest()),
+]
+print(f&quot;  {'algo':&lt;10} {'candidates/sec':&lt;18} {'8-char complex pw (this core)'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*70)
+for name, fn in tests:
+    t = time.perf_counter(); n = 0
+    while time.perf_counter() - t &lt; 0.5:
+        fn(&quot;guesser&quot; + str(n) + &quot;!Aa&quot;); n += 1
+    dt = time.perf_counter() - t
+    rate = n / dt
+    # 62^8 / rate, scaled to one core, then x1000 for a GPU
+    space = 62 ** 8
+    t_gpu = space / (rate * 1000)
+    print(f&quot;  {name:&lt;10} {rate:&gt;15,.0f}   {t_gpu:&gt;18,.0f} s  (~{t_gpu/86400:.0f} days on 1 GPU)&quot;)
+try:
+    import bcrypt
+    t = time.perf_counter(); n = 0
+    while time.perf_counter() - t &lt; 0.5:
+        bcrypt.hashpw(b&quot;guess&quot; + str(n).encode(), bcrypt.gensalt(rounds=8)); n += 1
+    rate = n / (time.perf_counter() - t)
+    t_gpu = (62**8) / (rate * 1000)
+    print(f&quot;  {'bcrypt':&lt;10} {rate:&gt;15,.0f}   {t_gpu:&gt;18,.0f} s  (~{t_gpu/(86400*365):.0f} years on 1 GPU)&quot;)
+except ImportError:
+    print(&quot;  bcrypt     (pip install bcrypt)&quot;)
+print()
+print(&quot;  The ratio between the first row and the last is the entire&quot;)
+print(&quot;  argument for Argon2id over MD5, and it is a 5-figure number.&quot;)
+PY
+cat 03-benchmark.txt
+</code></pre>
+<h2 id="step-3-the-attack-ladder-in-order">Step 3: the attack ladder, in order</h2>
+<pre><code class="language-text">  TRY IN THIS ORDER. Most real passwords die at step 1 or 2.
+
+  1. THE WORDLIST, AS-IS
+     rockyou.txt, or the org's own leaked wordlist from a breach.
+     Tested: 80% of real-world passwords come from the top 10^4.
+
+  2. THE WORDLIST WITH RULES
+     john --rules  or  hashcat -r best64.rule
+     Capitalisation, leet (a -&gt; @, e -&gt; 3), appending digits/years,
+     duplicating. This finds maybe 20% more. It is usually the
+     difference between &quot;one cracked&quot; and &quot;several cracked&quot;.
+
+  3. A MASK
+     hashcat -a 3 ?u?l?l?l?l?l?l?l?l?d?d?d?d
+     Tells hashcat to search the SPACE, not a list. Use when you
+     know the shape: &quot;eight lowercase letters, one capital, four digits&quot;
+     is the single most common corporate pattern.
+
+  4. A TARGETED LIST
+     the org name, the current year, the username, the department,
+     a leaked wordlist. Combine with rules.
+
+  5. A CUSTOM RULES FILE
+     only after the above. Rules are cheap to write and very effective
+     for a specific organisation.
+
+  6. GIVE UP AND WRITE IT UP
+     This is a legitimate outcome. &quot;We cracked 3 of 40 hashes after
+     4 hours; the remaining 37 use bcrypt at cost 12, which is not
+     practically attackable with the resources available. The finding
+     is that 3 of 40 use an unsalted MD5&quot; is a complete and useful
+     report.
+</code></pre>
+<pre><code class="language-bash"># --- john, with rules ---
+john --wordlist=/usr/share/wordlists/rockyou.txt \
+     --rules --format=raw-md5 hashes.txt
+
+# --- hashcat: mode 0 = straight, 3 = brute/mask, best64 rule ---
+hashcat -m 0 -a 0 hashes.txt /usr/share/wordlists/rockyou.txt
+hashcat -m 0 -a 0 hashes.txt rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 0 -a 3 hashes.txt '?u?l?l?l?l?l?l?l?l?d?d?d?d' --increment
+
+# --- hashcat: the session, saved, resumed, and monitored ---
+hashcat --session=aegis -m 1000 hashes.txt rockyou.txt   # -m 1000 = NTLM
+watch -n5 'hashcat --session=aegis --status'
+
+# --- what you should have tried FIRST for a specific org ---
+cat &gt; targeted.txt &lt;&lt;'EOF'
+EOF
+for t in aegis Acme acme2026 Acme2026! acme2026 Password1 Welcome1 Winter2026 \
+         &quot;$company&quot; &quot;${company}123&quot; &quot;${company}!&quot; &quot;P@ssw0rd&quot; &quot;Password123&quot; \
+         &quot;changeme&quot; &quot;changeme!&quot; &quot;letmein&quot; &quot;qwerty123&quot;; do
+  printf '%s\n' &quot;$t&quot; &gt;&gt; targeted.txt
+done
+hashcat -m 0 -a 0 hashes.txt targeted.txt -r /usr/share/hashcat/rules/best64.rule
+wc -l targeted.txt | sed 's/^/  targeted candidates: /'
+</code></pre>
+<h2 id="step-4-a-rules-file-written-for-a-specific-org">Step 4: a rules file, written for a specific org</h2>
+<pre><code class="language-bash">cat &gt; aegis-best.rule &lt;&lt;'EOF'
+# john/hashcat rule syntax: each line is one mutation.
+# 1. uppercase
+:
+# 2. Capitalise
+c
+# 3. lowercase (already covered, listed for completeness)
+l
+# 4. upper
+u
+# 5. toggle
+C
+# 6. leet
+s2@
+s3e
+s1!
+s0o
+s5$
+s7i
+# 7. append common years
+$20$2[0-9][0-9]
+$!^%
+# 8. append common suffixes
+$1$2$3
+$123$
+$!@#$
+$2026
+$2025
+# 9. duplicate
+p1
+p2
+# 10. company-specific
+:Acme
+Acme$
+Acme!$
+s@Acme
+EOF
+wc -l aegis-best.rule | sed 's/^/  rules: /'
+echo
+echo &quot;  Each rule EXPANDS the wordlist. 14 rules over a 14M wordlist&quot;
+echo &quot;  is ~200M candidates, which hashcat chews through at GPU speed.&quot;
+echo &quot;  This is the highest leverage file you will write in an engagement.&quot;
+</code></pre>
+<h2 id="step-5-the-rules-of-engagement-for-cracking">Step 5: the rules of engagement for cracking</h2>
+<pre><code class="language-text">  1. GET WRITTEN PERMISSION. Cracking the client's password hashes is
+     explicitly out of scope in most contracts. If it is not in the
+     ROE, it is not in the engagement.
+
+  2. NEVER USE A RECOVERED PASSWORD.
+     Finding &quot;alice's password is Summer2023!&quot; is a finding about the
+     password POLICY. Logging in as alice is a different act, usually
+     unauthorised, and always a career-ending one.
+
+  3. HASHES YOU DID NOT HAVE LEGAL POSSESSION OF (a breach corpus
+     download, someone's database) are not yours to crack. Ever.
+
+  4. PROTECT THE OUTPUT. Cracked passwords are personal data AND they
+     are the client's credentials. Encrypt the pot file. Delete it on
+     the contractual schedule. Never paste it into a report.
+
+  5. DO NOT CRACK THE SAME HASH TWICE. Keep a pot file and a session
+     so work is not repeated. Cracking a bcrypt hash at cost 14 twice
+     wastes an hour of GPU time you could have spent on the slow hashes.
+
+  6. MEASURE AND REPORT THE POLICY, not the wins. &quot;4 of 41 accounts
+     use a password from the top 10,000; 3 of those are the same
+     password on multiple accounts&quot; is the finding. The individual
+     passwords are evidence you do not include.
+</code></pre>
+<h2 id="step-6-what-goes-in-the-report">Step 6: what goes in the report</h2>
+<pre><code class="language-text">  ## F-xx · Password storage and policy permits offline cracking
+
+  Risk
+    41 of 41 stored passwords use an unsalted fast hash (MD5). All 41
+    were recovered in 4 minutes using a standard wordlist and rules
+    available in every commodity tool. Four users share the same
+    password across multiple accounts, including one shared with the
+    service account.
+
+  Prerequisites
+    Read access to the password store (obtained as an authenticated
+    low-privilege user via F-02).
+
+  Evidence
+    - Hash format identified as unsalted MD5 (no prefix, 32 hex chars)
+    - 4 of 41 cracked with a 14M wordlist plus a 14-rule file
+      (wordlist and rules are in the appendices)
+    - Recovery rate: 10% in 4 minutes, consistent with a top-10k
+      password distribution
+    - Crack results are NOT reproduced in this report and are stored
+      in the encrypted evidence archive, deleted on &lt;date&gt;
+
+  Business impact
+    A single database read - through SQL injection, a backup file, a
+    misconfigured S3 bucket, or a disgruntled employee - reveals every
+    password. Users reuse passwords, so this also threatens other
+    services. Four accounts sharing a password indicates no reuse
+    detection.
+
+  Remediation
+    1. Migrate to Argon2id (or bcrypt at cost &gt;= 12) with per-user
+       salts. [Owner: Platform, Immediate]
+    2. Force a reset on migration; do not import the old hashes
+    3. Enforce MFA on all accounts, especially service and admin
+    4. Enforce a 14-character minimum and check new passwords against
+       a breach corpus (not a simple complexity rule)
+    5. Deploy credential-stuffing detection on all external services
+
+  Re-test
+    Included at +30 days: confirm the new hash format and re-run a
+    controlled crack to demonstrate the change in cost.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hash identification</strong></td>
+<td>Naming the algorithm from the format</td>
+</tr>
+<tr>
+<td><strong>hashid</strong></td>
+<td>The default identification tool</td>
+</tr>
+<tr>
+<td><strong>Wordlist</strong></td>
+<td>A list of candidate passwords</td>
+</tr>
+<tr>
+<td><strong>Rule</strong></td>
+<td>A mutation applied to each wordlist entry</td>
+</tr>
+<tr>
+<td><strong>Mask</strong></td>
+<td>A shape specification for a brute-force space</td>
+</tr>
+<tr>
+<td><strong>Mode</strong></td>
+<td>hashcat's <code>-m</code> code for a hash type</td>
+</tr>
+<tr>
+<td><strong>Pot file</strong></td>
+<td>Where cracked hashes accumulate; do not lose it</td>
+</tr>
+<tr>
+<td><strong>Session</strong></td>
+<td>hashcat's resumable state</td>
+</tr>
+<tr>
+<td><strong>Fast vs slow hash</strong></td>
+<td>Decides whether cracking is possible at all</td>
+</tr>
+<tr>
+<td><strong>Salt</strong></td>
+<td>Per-user random value; defeats rainbow tables</td>
+</tr>
+<tr>
+<td><strong>Pass-the-hash</strong></td>
+<td>Authenticating with the hash, not the password</td>
+</tr>
+<tr>
+<td><strong>Cracking rate</strong></td>
+<td>Candidates per second; the number that matters</td>
+</tr>
+<tr>
+<td><strong><code>-a 0</code>/<code>-a 3</code></strong></td>
+<td>Straight / brute-force attack mode</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-d4 &amp;&amp; cd ~/aegis/labs/cry-d4
+
+# --- build a lab to crack, because cracking someone else's hashes is not the lesson ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-lab.txt
+import hashlib, os, secrets, string
+
+# A realistic corporate password set, generated so we know the answers.
+users = [
+    (&quot;alice&quot;,   &quot;Summer2023!&quot;),
+    (&quot;bob&quot;,     &quot;P@ssw0rd&quot;),
+    (&quot;carol&quot;,   &quot;welcome&quot;),
+    (&quot;dan&quot;,     &quot;qwerty123&quot;),
+    (&quot;erin&quot;,    &quot;Monkey123&quot;),
+    (&quot;frank&quot;,   &quot;Acme2026&quot;),
+    (&quot;grace&quot;,   &quot;letmein&quot;),
+    (&quot;heidi&quot;,   &quot;iloveyou&quot;),
+    (&quot;ivan&quot;,    &quot;123456&quot;),
+    (&quot;judy&quot;,    &quot;Admin@123&quot;),
+]
+rows = []
+for u, p in users:
+    # the WRONG way: unsalted fast hash. This is the finding.
+    rows.append(f&quot;{u}:{hashlib.md5(p.encode()).hexdigest()}&quot;)
+open(&quot;unsalted_md5.txt&quot;,&quot;w&quot;).write(&quot;\n&quot;.join(rows) + &quot;\n&quot;)
+
+# the RIGHT way: per-user salt + slow hash
+try:
+    import bcrypt
+    out = []
+    for u, p in users:
+        salt = bcrypt.gensalt(rounds=12)
+        h = bcrypt.hashpw(p.encode(), salt)
+        out.append(f&quot;{u}:{h.decode()}&quot;)
+    open(&quot;bcrypt12.txt&quot;,&quot;w&quot;).write(&quot;\n&quot;.join(out) + &quot;\n&quot;)
+    print(&quot;  built bcrypt cost-12 hashes for comparison&quot;)
+except ImportError:
+    print(&quot;  (pip install bcrypt for the bcrypt set)&quot;)
+
+print(f&quot;  built {len(users)} lab accounts&quot;)
+print(&quot;  These are SYNTHETIC accounts with KNOWN passwords, generated for&quot;)
+print(&quot;  this exercise. No third-party hash is cracked in this note.&quot;)
+print()
+print(&quot;  the point of the lab: the SAME 10 passwords are&quot;)
+print(&quot;    minutes   against unsalted_md5.txt&quot;)
+print(&quot;    centuries against bcrypt12.txt&quot;)
+print(&quot;  The policy is the finding.&quot;)
+PY
+cat 04-lab.txt
+
+# --- identify them ---
+{
+  echo &quot;=== identify ===&quot;
+  while IFS=: read -r u h; do
+    printf &quot;  %-8s %-20s %s\n&quot; &quot;$u&quot; &quot;${h:0:24}...&quot; &quot;$(hashid --identify &quot;$h&quot; 2&gt;/dev/null | head -1 | cut -d' ' -f2-)&quot;
+  done &lt; unsalted_md5.txt
+} 2&gt;&amp;1 | tee 05-identified.txt
+
+# --- crack the lab MD5 set ---
+{
+  echo &quot;=== crack the synthetic MD5 set ===&quot;
+  # a small lab wordlist built from the lab's own passwords
+  python3 -c &quot;
+import hashlib
+pws = ['Summer2023!','P@ssw0rd','welcome','qwerty123','Monkey123','Acme2026',
+       'letmein','iloveyou','123456','Admin@123','password','dragon','baseball',
+       'trustno1','superman','michael','shadow','master','jennifer','thomas']
+open('lab_wordlist.txt','w').write('\n'.join(pws)+'\n')
+print('  lab wordlist:', len(pws), 'candidates (the answers are in it by design)')&quot;
+  echo
+  t0=$(date +%s)
+  while IFS=: read -r u h; do
+    hit=$(python3 -c &quot;
+import sys,hashlib
+h='$h'
+for p in open('lab_wordlist.txt'):
+    if hashlib.md5(p.strip().encode()).hexdigest()==h: print(p.strip()); break
+&quot; )
+    printf &quot;  %-8s %s\n&quot; &quot;$u&quot; &quot;${hit:-NOT CRACKED}&quot;
+  done &lt; unsalted_md5.txt
+  t1=$(date +%s)
+  echo
+  echo &quot;  elapsed: $((t1-t0)) seconds, single core, 20 candidates.&quot;
+  echo
+  echo &quot;  On a GPU this set is finished before the process starts.&quot;
+  echo &quot;  Against bcrypt cost 12 the same set would take weeks on one core.&quot;
+} 2&gt;&amp;1 | tee 06-cracked.txt
+
+# --- the timing comparison that makes the finding ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 07-cost.txt
+print(&quot;  === the same 10 passwords, two storage schemes ===\n&quot;)
+pws = ['Summer2023!','P@ssw0rd','welcome','qwerty123','Monkey123',
+       'Acme2026','letmein','iloveyou','123456','Admin@123']
+print(f&quot;  {'password':&lt;16} {'MD5 (unsalted)':&lt;20} {'bcrypt cost 12'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*56)
+try:
+    import bcrypt
+    for p in pws:
+        salt = bcrypt.gensalt(rounds=4)          # cheap salt, cost is what we measure
+        t = __import__(&quot;time&quot;).perf_counter()
+        bcrypt.hashpw(p.encode(), salt)
+        d = __import__(&quot;time&quot;).perf_counter() - t
+        print(f&quot;  {p:&lt;16} {'instant':&lt;20} {d*1000:&gt;14.1f} ms  (at cost 4; cost 12 is 256x)&quot;)
+except ImportError:
+    for p in pws: print(f&quot;  {p:&lt;16} {'instant':&lt;20} (pip install bcrypt)&quot;)
+print()
+print(&quot;  cost 12 vs cost 4 is 2^(12-4) = 256x slower.&quot;)
+print(&quot;  bcrypt cost 12 on a GPU: ~10^4 hashes/sec.&quot;)
+print(f&quot;  a 62^8 space is ~2.1e14. At 10^4/sec that is {62**8/10**4/(3600*24*365*100):.0e} centuries.&quot;)
+print()
+print(&quot;  md5 on a GPU: ~10^11/sec. The same space is {62**8/10**11:.0f} seconds = {62**8/10**11/60:.0f} minutes.&quot;)
+print()
+print(&quot;  THE REPORT DOES NOT CONTAIN EITHER NUMBER. It contains the&quot;)
+print(&quot;  recommendation and the evidence archive reference.&quot;)
+PY
+cat 07-cost.txt
+
+# --- check what tools are actually here ---
+{
+  echo &quot;=== tooling ===&quot;
+  for t in hashcat john hashid; do
+    if command -v &quot;$t&quot; &gt;/dev/null 2&gt;&amp;1; then
+      printf &quot;  %-10s %s\n&quot; &quot;$t&quot; &quot;$($t --version 2&gt;&amp;1 | head -1 | cut -c1-50)&quot;
+    else
+      printf &quot;  %-10s not installed\n&quot; &quot;$t&quot;
+    fi
+  done
+  echo
+  echo &quot;=== wordlists ===&quot;
+  for w in /usr/share/wordlists/rockyou.txt /usr/share/wordlists/fasttrack.txt \
+           /usr/share/wordlists/password.lst; do
+    [ -f &quot;$w&quot; ] &amp;&amp; printf &quot;  %-42s %s entries\n&quot; &quot;$w&quot; &quot;$(wc -l &lt; &quot;$w&quot;)&quot; \
+                || printf &quot;  %-42s absent\n&quot; &quot;$w&quot;
+  done
+  echo
+  echo &quot;=== GPU ===&quot;
+  hashcat -I 2&gt;/dev/null | grep -iE &quot;CUDA|OpenCL|ROCm|Device #&quot; | head -6 | sed 's/^/  /' \
+    || echo &quot;  no GPU backend detected (a CPU-only box is ~1000x slower)&quot;
+} 2&gt;&amp;1 | tee 08-tools.txt
+rm -f lab_wordlist.txt unsalted_md5.txt bcrypt12.txt
+</code></pre>
+<p><strong>Step 4 is the honest framing</strong>: the lab accounts are synthetic, generated in the file, with<br />
+the passwords chosen by the script. Nothing third-party is cracked in this note, and the note<br />
+says so at the top.</p>
+<p><strong>Step 7</strong> is the number that goes in the report's <em>recommendation</em> rather than its body: MD5<br />
+instant, bcrypt cost 12 on a GPU ~10⁴/sec against a 62⁸ space — centuries. The finding is the<br />
+policy, not the wins.</p>
+<p><strong>Record:</strong> <code>05-identified.txt</code> and <code>07-cost.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the five steps, and why is step 2 (classify) the one people skip?</li>
+<li>How do you distinguish an unsalted MD5 from a bcrypt hash by eye?</li>
+<li>Why does fast-vs-slow decide whether a crack is feasible?</li>
+<li>Give the attack ladder in order, and which step cracks most real passwords.</li>
+<li>What is a rule file, and what does each line do?</li>
+<li>What is a mask, and when do you reach for it instead of a wordlist?</li>
+<li>Name three things you must not do with a recovered password, and why each is wrong.</li>
+<li>What goes in the report body, and what goes in the encrypted archive instead?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>john/hashcat</strong> → <strong>Cracking</strong> → <strong>Hybrid Attack</strong> → <strong>hashid</strong> →<br />
+<strong>Password Hashing</strong> → <strong>Credential Stuffing</strong> → <strong>Weak RNG</strong>.<br />
+<code>cry-03</code> is where password hashing is designed; this is where it is measured.</p>

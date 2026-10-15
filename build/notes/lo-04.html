@@ -1,0 +1,468 @@
+<h1 id="compilers-linking-and-the-elf-format">Compilers, Linking and the ELF Format</h1>
+<h2 id="summary">Summary</h2>
+<p>A binary you are asked to reverse is the output of a toolchain: source → preprocessor →<br />
+compiler → assembler → <strong>object file</strong> → linker → binary. Every stage leaves a trace, and every<br />
+trace is something you can read.</p>
+<p>Understanding the toolchain is not academic. It tells you why a function is <code>nop</code>-padded, why<br />
+a PLT exists, why a string is in <code>.rodata</code> rather than <code>.text</code>, and what the difference<br />
+between a statically and dynamically linked binary actually buys an attacker.</p>
+<blockquote>
+<p>Companion to <code>lo-01</code> (the file format) and <code>lo-05</code> (the debugger). This<br />
+note is the pipeline between source and bytes.</p>
+</blockquote>
+<h2 id="the-pipeline">The pipeline</h2>
+<pre><code class="language-text">   foo.c
+     |  cpp  -E    preprocessor: expand #include, #define, macros
+     v
+   foo.i           (text, still C)
+     |  gcc  -S    compile to assembly
+     v
+   foo.s
+     |  as         assemble to machine code + relocations
+     v
+   foo.o           OBJECT FILE: code + data + relocation records + symbols
+     |  ld / cc    link: resolve symbols across objects and libraries
+     v
+   a.out           BINARY: sections + entry point + program headers
+</code></pre>
+<p><strong>The object file is the key artefact.</strong> It is not an executable; it is a<br />
+bundle of <em>sections and a list of undefined references</em>, waiting to be<br />
+resolved. Reading one teaches you what a binary will contain, before it<br />
+exists.</p>
+<h2 id="what-the-compiler-decides-and-how-it-reads-to-you">What the compiler decides, and how it reads to you</h2>
+<pre><code class="language-text">  -O0  no optimisation      verbose, spills everything to the stack,
+                            re-reads values.  THE OPTIMISATION FOR RE.
+  -O1  basic                folds constants, keeps the structure
+  -O2  full                 inlines, vectorises, unrolls, reorders.
+                            Functionally identical, structurally unrecognisable.
+  -O3  aggressive           more unrolling, more vectorisation
+  -Os  size                 smaller code, often the same shape as -O2
+  -flto  whole-program      the compiler sees across translation units
+                            and deletes or reorders far more
+
+  REAL-WORLD CONSEQUENCE: most distributed software is -O2 or better.
+  Your reverse engineering of a -O2 binary looks nothing like your
+  reverse engineering of the same source at -O0. Practise at -O0,
+  then learn to cope at -O2.
+</code></pre>
+<pre><code class="language-bash"># The clearest demonstration that this matters
+cat &gt; /tmp/opt.c &lt;&lt;'EOF'
+int f(int a, int b) { int c = a + b; return c * 2; }
+EOF
+for O in 0 1 2 3 s; do
+  gcc -O$O -c /tmp/opt.c -o /tmp/opt$O.o 2&gt;/dev/null
+  printf &quot;  -O%s : %3s bytes of .text\n&quot; &quot;$O&quot; \
+    &quot;$(size -A /tmp/opt$O.o 2&gt;/dev/null | awk '/\.text/{print $2}')&quot;
+done
+echo
+echo &quot;  The sizes differ; the semantics do not. Everything you learn&quot;
+echo &quot;  reverse engineering at -O0 has to be relearned at -O2.&quot;
+rm -f /tmp/opt.c /tmp/opt*.o
+</code></pre>
+<h2 id="static-vs-dynamic-linking-the-security-difference">Static vs dynamic linking — the security difference</h2>
+<pre><code class="language-text">  STATICALLY LINKED
+    all of libc is in the binary
+    + no PLT, no GOT, no lazy binding to think about
+    + everything you need is in one file: great for a RE exercise
+    + the binary cannot be tampered with by swapping a shared library
+    - much larger
+    - loses the operating system's security updates
+
+  DYNAMICALLY LINKED
+    libc.so is loaded by the loader at runtime
+    + small binary, shared library, patch once for all
+    - introduces the PLT and the GOT, which are WRITABLE DATA
+    - an attacker with a write to the GOT can redirect calls
+      (this is what Full RELRO closes)
+
+  IMPACT ON EXPLOITATION:
+    static : ROP straight into a libc function; its address is in the
+             binary and known
+    dynamic: ROP into the PLT stub; the address is known; the GOT
+             resolves it on first call
+</code></pre>
+<h2 id="lazy-binding-and-why-it-matters">Lazy binding, and why it matters</h2>
+<pre><code class="language-text">  LAZY (default):
+    the PLT entry for printf() is a stub that jumps through the GOT.
+    On first call it pushes the relocation index and jumps to
+    ld.so, which resolves the address and WRITES IT INTO THE GOT.
+    After that, the GOT points straight at the real printf.
+
+  CONSEQUENCE: an unused GOT entry points at the PLT resolver, not at
+  a function. So you cannot simply read the GOT to learn libc's base.
+
+  IMMEDIATE (-z now / -Wl,-z,now):
+    all relocations are resolved at load time. The GOT contains real
+  addresses from the moment the program starts.
+
+  THE RELRO ESCALATION:
+    Partial RELRO  : GOT is writable at runtime (needed for lazy binding)
+    Full RELRO     : .got.plt is marked read-only after resolution
+    -&gt; with Full RELRO you canno overwrite the GOT, so ret2plt dies and
+       you need a different technique
+</code></pre>
+<p>This is the mechanical reason behind <code>cs161-04</code>'s "Full RELRO → function<br />
+pointers, hooks, FSOP" line.</p>
+<h2 id="the-got-and-the-plt">The GOT and the PLT</h2>
+<pre><code class="language-text">  GOT (Global Offset Table)  : an array of addresses, one per symbol
+  PLT (Procedure Linkage Table): stubs that jump through GOT entries
+  .got.plt                    : the PLT's part of the GOT, writable
+  .got                        : the data pointers, usually RELRO
+
+  call printf -&gt; pushes the relocation index
+              -&gt; jumps to printf@plt
+              -&gt; jmp [printf@GOT]   &lt;- an INDIRECT JUMP
+                                   &lt;- and indirect jumps are the
+                                      entire basis of control-flow hijack
+</code></pre>
+<h2 id="reading-the-elf">Reading the ELF</h2>
+<pre><code class="language-bash">{
+  echo &quot;=== the header ===&quot;
+  readelf -hW ./somebinary | sed 's/^/  /'
+  echo
+  echo &quot;=== program headers: what the loader maps ===&quot;
+  readelf -lW ./somebinary | sed 's/^/  /'
+  echo
+  echo &quot;=== section headers: the toolchain's organisation ===&quot;
+  readelf -SW ./somebinary | sed 's/^/  /'
+  echo
+  echo &quot;=== dynamic section: what the loader must resolve ===&quot;
+  readelf -dW ./somebinary 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;=== symbols: names survived, and that is most of what you need ===&quot;
+  readelf -sW ./somebinary | head -20 | sed 's/^/  /'
+  echo
+  echo &quot;=== relocations: unresolved references the linker filled in ===&quot;
+  readelf -rW ./somebinary 2&gt;/dev/null | head -15 | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 01-elf.txt
+</code></pre>
+<h2 id="how-to-read-the-header-fields-that-matter">How to read the header fields that matter</h2>
+<pre><code class="language-text">  Class          ELF64 or ELF32
+  Type           EXEC (fixed base) or DYN (PIE - needs ASLR)
+  Machine        x86-64 (EM_X86_64 = 62)
+  Entry          the entry point address - where execution starts
+  Section        where .text, .rodata, .got.plt actually are
+
+  IF YOU KNOW ONLY ONE THING: read `Type`.
+    EXEC  -&gt; no PIE, addresses are fixed, your offsets are absolute
+    DYN   -&gt; PIE, the base is randomised, you need a leak
+</code></pre>
+<h2 id="stripped-binaries-and-how-much-you-lose">Stripped binaries, and how much you lose</h2>
+<pre><code class="language-text">  STRIPPED:  .symtab removed; dynamic symbols (.dynsym) usually survive
+             IF the binary is dynamically linked
+
+  WHAT SURVIVES STRIPPING:
+    - all code
+    - all data
+    - all string constants
+    - .dynsym (dynamic symbols) in a dynamically linked binary
+    - the ELF header, program headers, section headers
+
+  WHAT DOES NOT:
+    - local function names
+    - local variable names
+    - static function symbols
+    - debug info (a separate file: foo.debug, or DWARF in .debug_info)
+
+  CONSEQUENCE FOR RE:
+    stripped + static = the hardest case. You must recover structure
+    from code alone.
+    stripped + dynamic = you still have the imports, which tell you
+    what the program does at a high level.
+</code></pre>
+<pre><code class="language-bash"># What a strip actually removes, demonstrated
+cat &gt; /tmp/s.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+int exported_helper(int x) { return x * 3; }
+static int static_helper(int x) { return x + 1; }
+int main(void) { printf(&quot;%d\n&quot;, exported_helper(static_helper(4))); return 0; }
+EOF
+gcc -O0 -g /tmp/s.c -o /tmp/s
+strip --strip-debug /tmp/s        # keep dynamic symbols, drop local ones
+strip /tmp/s                      # remove everything possible
+for b in /tmp/s; do
+  echo &quot;  after strip: dynamic symbols still present&quot;
+  readelf -sW /tmp/s 2&gt;/dev/null | grep -cE &quot;FUNC&quot; | xargs echo &quot;    FUNC symbols:&quot;
+done
+echo
+echo &quot;  A dynamically linked stripped binary keeps printf@GLIBC as a&quot;
+echo &quot;  dynamic symbol. That single name tells you the program links libc&quot;
+echo &quot;  and can therefore be ROP'd into it. The name survived stripping&quot;
+echo &quot;  for exactly this reason.&quot;
+rm -f /tmp/s.c /tmp/s
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Preprocessor</strong></td>
+<td><code>cpp</code>: expands macros and includes</td>
+</tr>
+<tr>
+<td><strong>Object file (<code>.o</code>)</strong></td>
+<td>Sections plus relocations plus symbols, not runnable</td>
+</tr>
+<tr>
+<td><strong>Relocation</strong></td>
+<td>A reference to be patched at link or load time</td>
+</tr>
+<tr>
+<td><strong>Linker (<code>ld</code>)</strong></td>
+<td>Resolves symbols across objects and libraries</td>
+</tr>
+<tr>
+<td><strong>Static linking</strong></td>
+<td>Library code copied into the binary</td>
+</tr>
+<tr>
+<td><strong>Dynamic linking</strong></td>
+<td>Library loaded at runtime by <code>ld.so</code></td>
+</tr>
+<tr>
+<td><strong>PLT</strong></td>
+<td>Procedure Linkage Table; jump stubs</td>
+</tr>
+<tr>
+<td><strong>GOT</strong></td>
+<td>Global Offset Table; resolved addresses</td>
+</tr>
+<tr>
+<td><strong>Lazy binding</strong></td>
+<td>Resolve a symbol on first call</td>
+</tr>
+<tr>
+<td><strong>Full RELRO</strong></td>
+<td>GOT made read-only after resolution</td>
+</tr>
+<tr>
+<td><strong>PIE / <code>ET_DYN</code></strong></td>
+<td>Position-independent executable; needs a leak</td>
+</tr>
+<tr>
+<td><strong>Strip</strong></td>
+<td>Remove symbol tables</td>
+</tr>
+<tr>
+<td><strong>DWARF</strong></td>
+<td>Debug info format, usually in <code>.debug_*</code></td>
+</tr>
+<tr>
+<td><strong><code>-O0</code></strong></td>
+<td>Unoptimised: spill everything, ideal for RE</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/lo-04 &amp;&amp; cd ~/aegis/labs/lo-04
+
+# --- 1. build the same program at every optimisation level ---
+cat &gt; pipeline.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+int classify(int n) {
+    if (n &lt; 0)   return -1;
+    if (n == 0)  return 0;
+    if (n &lt; 10)  return 1;
+    return 2;
+}
+int main(int argc, char **argv) {
+    int n = argc &gt; 1 ? atoi(argv[1]) : 0;
+    printf(&quot;%d\n&quot;, classify(n));
+    return 0;
+}
+EOF
+
+for O in 0 1 2 3 s; do
+  gcc -O$O -no-pie pipeline.c -o pipe-O$O 2&gt;/dev/null
+done
+
+{
+  echo &quot;=== the same source, five binaries, five different shapes ===&quot;
+  printf &quot;  %-6s %-10s %s\n&quot; &quot;LEVEL&quot; &quot;TEXT BYTES&quot; &quot;STRUCTURE&quot;
+  for O in 0 1 2 3 s; do
+    bytes=$(size pipe-O$O | awk 'NR==2{print $1}')
+    nfun=$(objdump -d pipe-O$O | grep -cE &quot;^\s+[0-9a-f]+ &lt;&quot;)
+    printf &quot;  %-6s %-10s %s function bodies\n&quot; &quot;-O$O&quot; &quot;$bytes&quot; &quot;$nfun&quot;
+  done
+  echo
+  echo &quot;  Then classify() itself, at -O0:&quot;
+  objdump -d --no-show-raw-insn pipe-O0 | sed -n '/&lt;classify&gt;:/,/ret/p' | sed 's/^/    /'
+  echo
+  echo &quot;  ...and at -Os, which is what most distro binaries ship as:&quot;
+  objdump -d --no-show-raw-insn pipe-Os | sed -n '/&lt;classify&gt;:/,/ret/p' | sed 's/^/    /'
+  echo
+  echo &quot;  Same behaviour. Completely different instruction sequence.&quot;
+  echo &quot;  This is why you learn RE on -O0 and then have to relearn it.&quot;
+} 2&gt;&amp;1 | tee 01-opt.txt
+
+# --- 2. inspect an object file - the artefact before the binary ---
+{
+  echo &quot;=== pipeline.o: code + relocations + symbols, nothing runnable ===&quot;
+  gcc -O0 -c pipeline.c -o pipeline.o
+  file pipeline.o | sed 's/^/  /'
+  echo
+  echo &quot;  --- sections (the object file's table of contents) ---&quot;
+  readelf -SW pipeline.o | sed 's/^/  /'
+  echo
+  echo &quot;  --- undefined symbols: what this file still needs ---&quot;
+  readelf -sW pipeline.o | awk '$7==&quot;UND&quot;{print &quot;  &quot;$0}' | sed 's/^/  /'
+  echo
+  echo &quot;  --- relocations: 'put printf's address HERE' ---&quot;
+  readelf -rW pipeline.o | sed 's/^/  /'
+  echo
+  echo &quot;  The object file cannot run. It is a description of what to build.&quot;
+} 2&gt;&amp;1 | tee 02-object.txt
+
+# --- 3. the linker, observed ---
+{
+  echo &quot;=== link step: object + libc -&gt; binary ===&quot;
+  echo &quot;  (gcc pipeline.o -o linked   is shorthand for cc1 + as + ld)&quot;
+  echo
+  echo &quot;  what the linker RESOLVED:&quot;
+  readelf -rW linked 2&gt;/dev/null | head -10 | sed 's/^/  /'
+  echo &quot;  ^ mostly empty now: the linker filled in the addresses.&quot;
+  echo
+  echo &quot;  what the linker DECIDED:&quot;
+  readelf -hW linked | grep -E &quot;Type|Entry&quot; | sed 's/^/  /'
+  echo
+  echo &quot;  and the dynamic entries that describe lazy resolution:&quot;
+  readelf -dW linked | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 03-link.txt
+
+# --- 4. the GOT/PLT mechanism, demonstrated ---
+{
+  echo &quot;=== the PLT stub for a lazily-bound function ===&quot;
+  objdump -d -j .plt -j .plt.sec linked 2&gt;/dev/null | head -25 | sed 's/^/  /'
+  echo
+  echo &quot;  Note the pattern:  push index ; jmp [resolver] ; ... jmp [GOT entry]&quot;
+  echo &quot;  The second jmp is an INDIRECT JUMP. That is the whole basis of&quot;
+  echo &quot;  ret2plt: you overwrite a GOT entry, and the next call goes there.&quot;
+  echo
+  echo &quot;=== the GOT addresses themselves ===&quot;
+  objdump -R linked | head -12 | sed 's/^/  /'
+  echo
+  echo &quot;=== PLT is a section you can find by name ===&quot;
+  readelf -SW linked | grep -E &quot;\.plt|\.got&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== how big is the attack surface? ===&quot;
+  objdump -R linked | wc -l | xargs echo &quot;  writable dynamic relocations:&quot;
+} 2&gt;&amp;1 | tee 04-gotplt.txt
+
+# --- 5. RELRO: the escalation, measured ---
+{
+  echo &quot;=== three builds, three RELRO postures ===&quot;
+  gcc -O0 -no-pie pipeline.c -o relro-none  2&gt;/dev/null
+  gcc -O0 -no-pie -Wl,-z,norelro pipeline.c -o relro-none  2&gt;/dev/null
+  gcc -O0 -no-pie -Wl,-z,relro pipeline.c -o relro-partial 2&gt;/dev/null
+  gcc -O0 -no-pie -Wl,-z,relro,-z,now pipeline.c -o relro-full 2&gt;/dev/null
+
+  printf &quot;  %-14s %s\n&quot; &quot;BINARY&quot; &quot;RELRO STATUS&quot;
+  for b in relro-none relro-partial relro-full; do
+    st=$(readelf -lW $b 2&gt;/dev/null | grep GNU_RELRO &gt;/dev/null &amp;&amp; echo &quot;has GNU_RELRO&quot; || echo &quot;no GNU_RELRO&quot;)
+    bind=$(readelf -dW $b 2&gt;/dev/null | grep -q BIND_NOW &amp;&amp; echo &quot;BIND_NOW (immediate)&quot; || echo &quot;lazy&quot;)
+    printf &quot;  %-14s %s, %s\n&quot; &quot;$b&quot; &quot;$st&quot; &quot;$bind&quot;
+  done
+  echo
+  echo &quot;  CONSEQUENCE FOR EXPLOITATION:&quot;
+  echo &quot;    no RELRO      -&gt; GOT writable, ret2plt works&quot;
+  echo &quot;    partial RELRO  -&gt; .got.plt still writable, ret2plt still works&quot;
+  echo &quot;    full RELRO     -&gt; GOT read-only, ret2plt dead; need vtable,&quot;
+  echo &quot;                     function pointers, or FSOP instead&quot;
+  echo
+  echo &quot;  This is the same escalation table cs161-04 gives, seen from the&quot;
+  echo &quot;  linker rather than from the exploitation side.&quot;
+} 2&gt;&amp;1 | tee 05-relro.txt
+
+# --- 6. strip, and see exactly what you lose ---
+{
+  echo &quot;=== before strip ===&quot;
+  gcc -O0 -g -no-pie pipeline.c -o full
+  printf &quot;  symbols: %s   sections: %s\n&quot; \
+    &quot;$(readelf -sW full 2&gt;/dev/null | grep -c FUNC)&quot; \
+    &quot;$(readelf -SW full | grep -cE '^\s+\[')&quot;
+  echo &quot;  classify present in .symtab? $(readelf -sW full | grep -c 'classify')&quot;
+  echo
+  cp full stripped &amp;&amp; strip stripped
+  echo &quot;=== after strip ===&quot;
+  printf &quot;  symbols: %s   sections: %s\n&quot; \
+    &quot;$(readelf -sW stripped 2&gt;/dev/null | grep -c FUNC)&quot; \
+    &quot;$(readelf -SW stripped | grep -cE '^\s+\[')&quot;
+  echo &quot;  classify in .symtab?       $(readelf -sW stripped | grep -c 'classify')&quot;
+  echo &quot;  classify in .dynsym?       $(readelf -sW --dyn-syms stripped 2&gt;/dev/null | grep -c 'classify')&quot;
+  echo &quot;  printf still visible?      $(readelf -sW --dyn-syms stripped 2&gt;/dev/null | grep -c 'printf')&quot;
+  echo
+  echo &quot;  The local symbol is gone. The dynamic one survives, because the&quot;
+  echo &quot;  loader needs it. That is why stripped dynamic binaries remain&quot;
+  echo &quot;  partially self-describing.&quot;
+} 2&gt;&amp;1 | tee 06-strip.txt
+
+# --- 7. the RE starting point: functions first, never main ---
+cat &gt; 07-starting-point.md &lt;&lt;'EOF'
+# Where to start in an unknown binary
+
+```bash
+# 1. the header. If Type is DYN, you are looking at a PIE binary.
+readelf -hW ./binary | grep -E &quot;Class|Type|Entry&quot;
+
+# 2. is it stripped?
+file ./binary
+readelf -sW ./binary | grep -c FUNC
+
+# 3. dynamic symbols = the program's declared dependencies.
+#    This is a table of contents for behaviour.
+readelf --dyn-syms -W ./binary | grep FUNC | awk '{print &quot;   &quot;, $NF}' | head -20
+
+# 4. imported functions tell you what the program DOES.
+#    printf + fopen + strcmp + malloc = a text-processing CLI.
+#    socket + bind + listen + accept    = a server.
+#    This is triage, and it takes 30 seconds.
+
+# 5. strings: your entry points and your data, all at once.
+strings -a -t x ./binary | head -40
+
+# 6. security posture before you reverse a single instruction
+checksec --file=./binary
+</code></pre>
+<h2 id="the-order-that-works">The order that works</h2>
+<ol>
+<li><strong>Header</strong> — 32 or 64 bit? PIE or not?</li>
+<li><strong>Dynamic symbols</strong> — what does it import? That is a behaviour sketch.</li>
+<li><strong>Strings</strong> — error messages are function descriptions written by<br />
+   the programmer; URLs and paths are targets; format strings are sinks.</li>
+<li><strong>Security posture</strong> — <code>checksec</code> decides your whole exploit strategy.</li>
+<li><strong>Functions</strong> — start at <code>main</code>, follow calls, work down.</li>
+</ol>
+<h2 id="why-strings-before-code">Why strings before code</h2>
+<p>An error message like <code>"failed to open %s"</code> is a developer telling you what<br />
+the function does, with its arguments named. There is no source. This is<br />
+closer to source than any disassembly.<br />
+EOF<br />
+cat 07-starting-point.md<br />
+rm -f pipeline.c pipeline.o pipe-O<em> linked relro-</em> full stripped<br />
+```</p>
+<p><strong>Step 1 is the deliverable</strong>: the same source at five optimisation levels, with the actual<br />
+byte counts and function counts. It makes the argument concrete — you are not reverse<br />
+engineering "a program", you are reverse engineering <em>a specific compilation of it</em>.</p>
+<p><strong>Step 4</strong> shows the PLT stubs and the GOT, which is the mechanical reason <code>ret2plt</code> exists<br />
+and why Full RELRO kills it.</p>
+<p><strong>Record:</strong> <code>01-opt.txt</code> and <code>05-relro.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the five stages of the toolchain and what each adds.</li>
+<li>Why is <code>-O0</code> the optimisation level to practise reverse engineering on?</li>
+<li>What is a relocation, and at which stage is it resolved?</li>
+<li>What is the difference between <code>EXEC</code> and <code>DYN</code>, and what does it cost an attacker?</li>
+<li>Explain lazy binding, and why an unused GOT entry is useless to you.</li>
+<li>What does Full RELRO close, and what do you use instead?</li>
+<li>What survives <code>strip</code>, and why does a stripped dynamic binary remain partly readable?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>ELF/PE Format</strong> → <strong>Static Analysis</strong> → <strong>Lazy Binding</strong> → <strong>GOT/PLT</strong> →<br />
+<strong>PIE / ASLR</strong> → <strong>RELRO</strong>.<br />
+Pairs with <code>lo-01</code> for the format itself and <code>lo-05</code> for the debugger.</p>

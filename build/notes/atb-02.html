@@ -1,0 +1,230 @@
+<h1 id="shell-scripting-and-command-line-automation">Shell Scripting and Command-Line Automation</h1>
+<h2 id="summary">Summary</h2>
+<p>Shell scripts are the connective tissue of security work: recon pipelines, evidence collection,<br />
+repeatable scans. This lecture covers the four things that separate a working script from a<br />
+dangerous one: strict mode, quoting, error handling, and exit codes.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><code>#!/usr/bin/env bash</code> and strict mode <code>set -euo pipefail</code></li>
+<li><strong>Always quote expansions</strong> — <code>"$var"</code>, never <code>$var</code></li>
+<li>Functions, arguments, <code>$?</code>, <code>$#</code>, <code>$@</code>, <code>"$@"</code></li>
+<li>Traps (<code>trap</code>) for cleanup on exit — important when a script is Ctrl+C'd mid-scan</li>
+<li>Idempotence: a script you re-run should be safe</li>
+<li>Logging: every real script writes where it has been and what it found</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Shebang</strong></td>
+<td>The <code>#!</code> interpreter line</td>
+</tr>
+<tr>
+<td><strong>Strict mode</strong></td>
+<td><code>set -euo pipefail</code></td>
+</tr>
+<tr>
+<td><strong>Word splitting</strong></td>
+<td>Unquoted expansions split on whitespace</td>
+</tr>
+<tr>
+<td><strong>Globbing</strong></td>
+<td><code>*</code>/<code>?</code>/<code>[]</code> expansion by the shell</td>
+</tr>
+<tr>
+<td><strong>Exit status</strong></td>
+<td><code>$?</code>; 0 means success</td>
+</tr>
+<tr>
+<td><strong><code>trap</code></strong></td>
+<td>Run a handler on signal or exit</td>
+</tr>
+<tr>
+<td><strong>Idempotent</strong></td>
+<td>Safe to run more than once</td>
+</tr>
+<tr>
+<td><strong>Heredoc</strong></td>
+<td><code>&lt;&lt;EOF</code> inline multi-line text</td>
+</tr>
+<tr>
+<td><strong>Process substitution</strong></td>
+<td><code>&lt;(cmd)</code> as a filename-like argument</td>
+</tr>
+<tr>
+<td><strong><code>mktemp</code></strong></td>
+<td>Create a unique temp file safely</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the four lines every script starts with ---
+cat &gt; /tmp/skel.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG=&quot;/tmp/skel-$(date +%Y%m%d-%H%M%S).log&quot;
+trap 'echo &quot;[!] aborted at $(date -Is)&quot; | tee -a &quot;$LOG&quot; &gt;&amp;2' EXIT INT TERM
+echo &quot;[*] started $(date -Is)&quot; | tee -a &quot;$LOG&quot;
+EOF
+chmod +x /tmp/skel.sh &amp;&amp; /tmp/skel.sh; rm -f /tmp/skel.sh
+
+# --- quoting, the demonstration ---
+V=&quot;two words&quot;
+echo $V; echo &quot;$V&quot;; echo '$V'
+ls $V 2&gt;&amp;1 | head -1; ls &quot;$V&quot; 2&gt;&amp;1 | head -1
+
+# --- exit codes ---
+bash -c 'exit 0'; echo &quot;0 = $?&quot;
+bash -c 'exit 3'; echo &quot;3 = $?&quot;
+bash -c 'ls /nope' 2&gt;/dev/null; echo &quot;ls failure = $?&quot;
+
+# --- traps and signals ---
+# Two things bite everyone who writes cleanup-on-interrupt, and both are
+# demonstrated below rather than asserted.
+echo &quot;=== 1. job control ON: SIGINT reaches the job, the trap fires ===&quot;
+set -m
+bash -c 'trap &quot;echo \&quot;  CAUGHT SIGINT\&quot;&quot; INT; sleep 5' &amp;
+sleep 0.3; kill -INT %1; wait
+set +m
+
+echo &quot;=== 2. job control OFF: the SAME SIGINT is silently ignored ===&quot;
+bash -c 'trap &quot;echo \&quot;  CAUGHT SIGINT\&quot;&quot; INT; sleep 2' &amp;
+sleep 0.3; kill -INT %1; wait
+echo &quot;  ^ nothing printed. A background job in a non-interactive shell has&quot;
+echo &quot;    SIGINT set to ignore, so the trap is never even reached. This is&quot;
+echo &quot;    why a scripted 'send it Ctrl+C' test silently proves nothing.&quot;
+
+echo &quot;=== 3. a trap fires BETWEEN commands, never during one ===&quot;
+bash -c 'trap &quot;echo \&quot;  CAUGHT TERM\&quot;&quot; TERM; sleep 2' &amp;
+sleep 0.3; kill -TERM %1; wait
+echo &quot;  ^ that took ~2s, not 0.3s. The shell was sitting on the child, so&quot;
+echo &quot;    the handler waited for its turn. Long-running children are why&quot;
+echo &quot;    cleanup handlers can appear to hang.&quot;
+
+# --- safe temp files ---
+mktemp -d
+mktemp --tmpdir probe.XXXXXX
+
+# --- argument handling ---
+cat &gt; args.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;  argc   : $#&quot;
+echo &quot;  all    : $*&quot;
+for a in &quot;$@&quot;; do echo &quot;  arg    : $a&quot;; done
+EOF
+chmod +x args.sh &amp;&amp; ./args.sh &quot;one two&quot; three
+rm -f args.sh
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a production-quality reconnaissance script with strict mode, a scope guard,<br />
+traps, logging and meaningful exit codes.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/atb-02 &amp;&amp; cd ~/aegis/labs/atb-02
+
+cat &gt; recon.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+#
+# recon.sh - scoped host discovery for an authorised lab network.
+# Usage: ./recon.sh &lt;cidr&gt;
+# Exit:  0 ok | 2 usage | 3 out of scope | 4 no hosts found
+#
+set -euo pipefail
+IFS=$'\n\t'
+
+usage() { echo &quot;usage: $0 &lt;cidr or ip&gt;&quot; &gt;&amp;2; exit 2; }
+
+in_scope() {
+  case &quot;$1&quot; in
+    127.*|192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+[[ $# -ge 1 ]] || usage
+TARGET=&quot;$1&quot;
+in_scope &quot;$TARGET&quot; || { echo &quot;REFUSING $TARGET: outside RFC1918/loopback. See docs/RULES-OF-ENGAGEMENT.md&quot; &gt;&amp;2; exit 3; }
+
+command -v nmap &gt;/dev/null || { echo &quot;nmap not installed&quot; &gt;&amp;2; exit 5; }
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+OUT=&quot;$HOME/aegis/labs/atb-02/recon-$STAMP&quot;
+mkdir -p &quot;$OUT&quot;
+LOG=&quot;$OUT/run.log&quot;
+
+log() { printf '[%s] %s\n' &quot;$(date +%H:%M:%S)&quot; &quot;$*&quot; | tee -a &quot;$LOG&quot;; }
+
+cleanup() { log &quot;finished, artefacts in $OUT&quot;; }
+trap cleanup EXIT
+trap 'log &quot;interrupted&quot;; exit 130' INT TERM
+
+log &quot;scanning $TARGET&quot;
+nmap -sn &quot;$TARGET&quot; -oN &quot;$OUT/hosts.txt&quot; 2&gt;/dev/null \
+  | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u &gt; &quot;$OUT/alive.txt&quot; || true
+
+COUNT=$(wc -l &lt; &quot;$OUT/alive.txt&quot;)
+log &quot;$COUNT host(s) alive&quot;
+
+if [[ &quot;$COUNT&quot; -eq 0 ]]; then
+  log &quot;nothing alive - is the lab network up? (see docs/LAB-SETUP.md)&quot;
+  exit 4
+fi
+
+while read -r host; do
+  [[ -z &quot;$host&quot; ]] &amp;&amp; continue
+  log &quot;scanning $host&quot;
+  nmap -sT --top-ports 100 -T4 &quot;$host&quot; -oN &quot;$OUT/$host.txt&quot; 2&gt;/dev/null || log &quot;  scan of $host failed, continuing&quot;
+done &lt; &quot;$OUT/alive.txt&quot;
+
+{
+  echo &quot;RECON SUMMARY  $(date -Is)&quot;
+  echo &quot;target: $TARGET   hosts: $COUNT&quot;
+  for f in &quot;$OUT&quot;/*.txt; do
+    [[ &quot;$(basename &quot;$f&quot;)&quot; == &quot;run.log&quot; ]] &amp;&amp; continue
+    [[ &quot;$(basename &quot;$f&quot;)&quot; == &quot;alive.txt&quot; ]] &amp;&amp; continue
+    [[ &quot;$(basename &quot;$f&quot;)&quot; == &quot;hosts.txt&quot; ]] &amp;&amp; continue
+    echo
+    echo &quot;=== $(basename &quot;$f&quot; .txt) ===&quot;
+    grep -E &quot;open|filtered&quot; &quot;$f&quot; || echo &quot;  (no open ports in the top 100)&quot;
+  done
+} &gt; &quot;$OUT/SUMMARY.txt&quot;
+
+log &quot;summary written&quot;
+echo &quot;  $OUT/SUMMARY.txt&quot;
+exit 0
+EOF
+chmod +x recon.sh
+
+echo &quot;=== usage error ===&quot;; ./recon.sh; echo &quot;  exit=$? (expect 2)&quot;
+echo &quot;=== scope guard ===&quot;; ./recon.sh 8.8.8.8; echo &quot;  exit=$? (expect 3)&quot;
+echo &quot;=== loopback, nothing alive ===&quot;; ./recon.sh 127.0.0.0/30; echo &quot;  exit=$? (expect 4)&quot;
+echo &quot;=== your lab range, if built ===&quot;; ./recon.sh 192.168.56.0/24 2&gt;&amp;1 | tail -6; echo &quot;  exit=$?&quot;
+echo
+echo &quot;=== the artefacts ===&quot;
+ls -la ~/aegis/labs/atb-02/recon-*/ | head -12
+cat ~/aegis/labs/atb-02/recon-*/SUMMARY.txt 2&gt;/dev/null | head -20
+
+echo
+echo &quot;=== shellcheck it, if available ===&quot;
+command -v shellcheck &gt;/dev/null &amp;&amp; shellcheck recon.sh || echo &quot;(sudo apt install shellcheck to lint it)&quot;
+</code></pre>
+<p><strong>Three things in that script matter more than the scanning:</strong> the RFC1918 guard (it <em>cannot</em><br />
+scan outside your lab), the traps (Ctrl+C still leaves you a clean artefact directory and an<br />
+honest log), and the exit codes (so <code>recon.sh lab &amp;&amp; notify</code> behaves).</p>
+<p><strong>Record:</strong> <code>~/aegis/labs/atb-02/recon-*/SUMMARY.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does each flag in <code>set -euo pipefail</code> do?</li>
+<li>What goes wrong with <code>rm $dir/</code> versus <code>rm "$dir/"</code>?</li>
+<li>Why add a <code>trap</code> to a script that may be interrupted mid-scan?</li>
+<li>What is idempotence and why does it matter for a recon script?</li>
+<li>Why use <code>mktemp</code> instead of <code>touch /tmp/probe</code>?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Bash Scripting</strong> → <strong>Automation</strong> → <strong>Pipes &amp; Redirection</strong> → <strong>Exploitation Ethics</strong> →<br />
+<strong>Text Processing Tools</strong>.</p>

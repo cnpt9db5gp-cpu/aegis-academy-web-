@@ -1,0 +1,373 @@
+<h1 id="injection-and-malicious-plugin-families">Injection and Malicious Plugin Families</h1>
+<h2 id="summary">Summary</h2>
+<p>Malware families have patterns, and the patterns are in the memory. This note covers the injection<br />
+techniques Volatility detects, the family-specific plugins, and the discipline of attributing a<br />
+sample to a family from memory artefacts alone.</p>
+<p>The framing: <strong>injection is a technique, not a family.</strong> DLL injection,<br />
+process hollowing, reflective loading and APC injection are the four<br />
+common ones; the families are what <em>use</em> them, and the plugin families<br />
+are what identify the user.</p>
+<blockquote>
+<p>Companion to <code>vol-02</code> (the process layer) and <code>for-05</code> (static<br />
+analysis). This note is technique → artefact → family.</p>
+</blockquote>
+<h2 id="the-four-injection-techniques">The four injection techniques</h2>
+<pre><code class="language-text">  TECHNIQUE            WHAT IT DOES              WHAT IT LOOKS LIKE
+  ---------------------------------------------------------------------------
+  DLL INJECTION        LoadLibrary into another
+                       process's address space.
+                       (the classic; Cobalt Strike's default is
+                        reflective, see below)
+
+  REFLECTIVE DLL       The DLL maps itself: allocates, copies
+  INJECTION            sections, fixes relocations, resolves
+                       imports, calls DllMain. It NEVER appears
+                       in the module list, because it was never
+                       registered with the loader.
+                       -&gt; malfind: several RWX regions, one per
+                          section, each starting with MZ-ish bytes
+                          but NOT at offset 0 of a real file
+
+  PROCESS HOLLOWING    Start a real process SUSPENDED, unmap its
+                       image, write a new one, resume.
+                       (Cobalt Strike's spawnto; used where you
+                        need the process to LOOK legitimate)
+
+  APC INJECTION        Queue an APC to a thread and make it run.
+                       Useful for AV evasion because APCs execute
+                       when the thread next waits.
+
+  EARLY BIRD           Inject BEFORE the entry point runs, so the
+  INJECTION            main() has already been patched. Invisible
+                       to any tool that runs inside the process.
+
+  THE VOLATILITY SIGNAL, for all of them:
+    windows.malfind -&gt; a private RWX region
+    windows.dlllist -&gt; a module in the list that is not what the
+                       process should have, or a missing module
+    windows.cmdline -&gt; often empty or the original's (hollowing)
+    windows.malfind.Dump -&gt; carve the region, hand to for-05
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/vol-04 &amp;&amp; cd ~/aegis/labs/vol-04
+
+# --- 1. the technique-to-artefact map ---
+cat &gt; 01-techniques.md &lt;&lt;'MD'
+# Technique → artefact → family
+
+```text
+  INJECTION TECHNIQUE
+    private RWX regions           -&gt; malfind
+    module list disagrees with    -&gt; dlllist
+      the process's known purpose
+    command line is empty or     -&gt; cmdline
+      the original's
+    entry point outside any      -&gt; dlllist + malfind
+      module's address range
+
+  PROCESS HOLLOWING, specifically
+    - a process with a normal name and a normal path
+    - almost NO modules loaded (the real ones were unmapped)
+    - a large RWX region
+    - cmdline empty
+    - THREADS pointing at the RWX region, not at a module
+    -&gt; vol.py windows.malfind --pid &lt;pid&gt;
+    -&gt; vol.py windows.dlllist --pid &lt;pid&gt;     (compare the count)
+    -&gt; a thread whose start address is not in any module
+
+  REFLECTIVE LOADING, specifically
+    - malfind shows MULTIPLE RWX regions (one per section)
+    - the first bytes of a region look like MZ but the PE header
+      offset is wrong, or 'This program cannot be run in DOS mode'
+      appears at a non-zero offset
+    - dlllist does NOT show it (it was never registered)
+    -&gt; carve with malfind.Dump and hand to for-05
+
+  APC INJECTION
+    - very few artefacts in memory; it is mostly a behavioural tell
+    - a thread whose start address is in ntdll (QueueUserAPC's
+      trampoline) rather than in the process's own code
+    -&gt; windows.dlllist: the thread's start is not in any module
+
+  EARLY BIRD
+    - the main() entry point has been patched
+    - malfind finds a RWX region at the entry point
+    - almost nothing else is visible; this is the stealthiest
+MD
+</code></pre>
+<pre><code class="language-bash"># --- 2. the plugin families, and why they exist ---
+cat &gt; 02-families.md &lt;&lt;'MD'
+# Plugin families, and the discipline behind them
+
+```text
+  WHY VOLATILITY HAS FAMILY-SPECIFIC PLUGINS
+
+    A generic plugin can tell you &quot;there is an RWX region&quot;. A family
+    plugin can tell you &quot;this is Cobalt Strike's default reflective
+    loader, and the config is at offset X in the region&quot;.
+
+    The family plugins encode knowledge that took reverse
+    engineering to acquire: the config structure, the marker, the
+    key. That knowledge is per-family and goes stale, which is why
+    there are far fewer of them than generic plugins.
+
+  THE EXAMPLES
+
+    windows.cobaltstrike.*       config extraction from an injected
+                                beacon. The config has the
+                                C2 servers, the sleep time, the
+                                campaign ID, and the public key.
+                                IT IS PLAINTEXT (often XOR 0x2e or
+                                similar). This is the single most
+                                useful family plugin in practice.
+
+    windows.suspicious.*         generic scoring: processes with no
+                                modules, unusual names, parentage
+                                anomalies. A triage shortcut.
+
+    windows.malware.*            ransomware-family markers.
+
+  THE DISCIPLINE, and it is the important part
+
+    A family plugin's output is a HYPOTHESIS, not a conclusion.
+    It parses a structure at an offset that the malware author
+    controls. If the author changes the offset, the plugin returns
+    garbage that may look like a valid config with a nonsense C2.
+
+    THE RULE: a family plugin's config extraction must be
+    corroborated:
+      - the extracted C2 domain appears in windows.netscan
+      - the extracted beacon size matches the socket's packets
+      - the extracted sleep time matches the interval between packets
+      - the extracted key works against something in the image
+
+    If none of those line up, the extraction is wrong. Report it as
+    &quot;a structure consistent with &lt;family&gt; was found at &lt;offset&gt;; the
+    contents did not correlate with observed network traffic and are
+    therefore not treated as the configuration.&quot;
+MD
+</code></pre>
+<pre><code class="language-bash"># --- 3. the triage script ---
+cat &gt; 03-injection-triage.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+VOL=&quot;${VOL:-vol.py}&quot;; IMG=&quot;${1:?usage: ./03-injection-triage.sh memory.raw}&quot;
+mkdir -p dumps
+
+echo &quot;=== 1. malfind: every private RWX region ===&quot;
+$VOL windows.malfind -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  READ THE COLUMNS:&quot;
+echo &quot;    PID      which process owns the region&quot;
+echo &quot;    Start    the address - compare to the module list below&quot;
+echo &quot;    End      the size&quot;
+echo &quot;    Tag      MZ... means it has a PE header (possibly fake)&quot;
+echo &quot;             VEx  means executable and writable&quot;
+echo &quot;             RWX  means private + executable  &lt;- the finding&quot;
+echo
+
+echo &quot;=== 2. for each suspect PID, the module list ===&quot;
+for pid in $($VOL windows.malfind -f &quot;$IMG&quot; 2&gt;/dev/null | awk 'NR&gt;1 &amp;&amp; $7!=&quot;&quot;{print $1}' | sort -un); do
+  echo &quot;  --- pid $pid ---&quot;
+  $VOL windows.pslist -f &quot;$IMG&quot; 2&gt;/dev/null | awk -v p=&quot;$pid&quot; '$1==p{print &quot;    process: &quot;$3&quot;  threads:&quot;$6}' | head -1
+  $VOL windows.dlllist -f &quot;$IMG&quot; --pid &quot;$pid&quot; 2&gt;/dev/null | head -6 | sed 's/^/      /'
+  n=$($VOL windows.dlllist -f &quot;$IMG&quot; --pid &quot;$pid&quot; 2&gt;/dev/null | grep -c &quot;/&quot;)
+  echo &quot;      total modules: $n&quot;
+  [ &quot;$n&quot; -lt 5 ] &amp;&amp; echo &quot;      ^ VERY FEW MODULES. Combined with an RWX region, this is&quot;
+  [ &quot;$n&quot; -lt 5 ] &amp;&amp; echo &quot;        either PROCESS HOLLOWING or a statically-linked binary.&quot;
+  echo
+done
+
+echo &quot;=== 3. the command line of each suspect ===&quot;
+$VOL windows.cmdline -f &quot;$IMG&quot; 2&gt;/dev/null | grep -iE &quot;powershell|cmd|rundll32|mshta|wscript|cscript|regsvr32&quot; \
+  | sed 's/^/  /'
+echo &quot;  ^ a PowerShell with a long base64 argument is an encoded command.&quot;
+echo &quot;    Decode it. It is not encrypted.&quot;
+echo
+
+echo &quot;=== 4. carve the regions and hand them to static analysis ===&quot;
+$VOL windows.malfind.Dump --pid &quot;$pid&quot; -f &quot;$IMG&quot; --dump-dir ./dumps 2&gt;/dev/null
+ls -la dumps/ 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  THESE ARE MALWARE. Do not double-click them. Do not leave them&quot;
+echo &quot;  where a file manager renders a preview. Run them through&quot;
+echo &quot;  for-05's triage.sh, which never executes anything.&quot;
+echo
+echo &quot;=== 5. the family plugins, for corroboration ===&quot;
+$VOL windows.cobaltstrike_scan -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  ^ a family plugin's output is a HYPOTHESIS. Corroborate it&quot;
+echo &quot;    against netscan: does the extracted C2 appear as a live&quot;
+echo &quot;    connection? Does the extracted sleep time match the packet&quot;
+echo &quot;    interval? If not, the extraction is wrong. Say so.&quot;
+EOF
+chmod +x 03-injection-triage.sh
+</code></pre>
+<h2 id="the-technique-map-offline">The technique map, offline</h2>
+<pre><code class="language-python"># --- 4. the decision tree, as code ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-decision-tree.txt
+print(&quot;  === malfind said something. What now? ===\n&quot;)
+
+def diagnose(pid, name, path, module_count, rw_regions,
+             cmdline, threads_in_modules):
+    f = []
+    # 1. the path check, first, because it is the cheapest
+    if path and not path.lower().startswith(
+            (r&quot;c:\windows&quot;, r&quot;c:\program files&quot;, r&quot;c:\program files (x86)&quot;)):
+        if &quot;\\temp\\&quot; in path.lower() or &quot;\\appdata\\&quot; in path.lower():
+            f.append((&quot;HIGH&quot;, &quot;Process binary lives in %TEMP% or %APPDATA%. &quot;
+                              &quot;No legitimate system binary does.&quot;))
+    if name and name.lower() in (&quot;svchost.exe&quot;,&quot;lsass.exe&quot;,&quot;services.exe&quot;,
+                                 &quot;csrss.exe&quot;,&quot;winlogon.exe&quot;) and path \
+       and &quot;\\windows\\system32&quot; not in path.lower():
+        f.append((&quot;CRITICAL&quot;, f&quot;Process named {name} is NOT running from &quot;
+                              &quot;System32. That is process impersonation.&quot;))
+    # 2. the module count, which separates hollowing from injection
+    if module_count &lt; 5 and rw_regions:
+        f.append((&quot;HIGH&quot;, f&quot;{module_count} modules and {len(rw_regions)} RWX &quot;
+                          &quot;regions. This is PROCESS HOLLOWING, or a &quot;
+                          &quot;statically-linked binary.&quot;))
+    elif module_count &gt; 0 and rw_regions:
+        f.append((&quot;HIGH&quot;, f&quot;{len(rw_regions)} RWX region(s) alongside &quot;
+                          f&quot;{module_count} normal modules. This is DLL &quot;
+                          &quot;INJECTION (reflective or classic).&quot;))
+    # 3. the command line
+    if cmdline:
+        cl = cmdline.lower()
+        if &quot;-enc&quot; in cl or &quot;-encodedcommand&quot; in cl:
+            f.append((&quot;HIGH&quot;, &quot;Command line contains -EncodedCommand. &quot;
+                              &quot;Decode it; it is base64 UTF-16LE, not &quot;
+                              &quot;encryption.&quot;))
+        if &quot;bypass&quot; in cl or &quot;noprofile&quot; in cl or &quot;hidden&quot; in cl \
+           or &quot;w hidden&quot; in cl:
+            f.append((&quot;MEDIUM&quot;, &quot;Command line has evasion flags. Individually &quot;
+                                &quot;legitimate; combined, a finding.&quot;))
+        if not cl.strip():
+            f.append((&quot;MEDIUM&quot;, &quot;Empty command line. Hollowed processes &quot;
+                                &quot;often have none.&quot;))
+    # 4. threads outside modules
+    if threads_in_modules is False:
+        f.append((&quot;HIGH&quot;, &quot;A thread's start address is not inside any loaded &quot;
+                          &quot;module. That is APC injection or shellcode.&quot;))
+    return f
+
+cases = [
+    dict(pid=3412, name=&quot;svchost.exe&quot;,
+         path=r&quot;C:\Users\jdoe\AppData\Local\Temp\svchost.exe&quot;,
+         module_count=4, rw_regions=1,
+         cmdline=&quot;svchost.exe -k netsvcs -w&quot;,
+         threads_in_modules=True),
+    dict(pid=1204, name=&quot;notepad.exe&quot;,
+         path=r&quot;C:\Windows\System32\notepad.exe&quot;,
+         module_count=1, rw_regions=2,
+         cmdline=&quot;&quot;, threads_in_modules=False),
+    dict(pid=2280, name=&quot;powershell.exe&quot;,
+         path=r&quot;C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe&quot;,
+         module_count=42, rw_regions=0,
+         cmdline=&quot;powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4A&quot;,
+         threads_in_modules=True),
+    dict(pid=998, name=&quot;chrome.exe&quot;,
+         path=r&quot;C:\Program Files\Google\Chrome\Application\chrome.exe&quot;,
+         module_count=310, rw_regions=3,
+         cmdline=r'&quot;C:\Program Files\Google\Chrome\Application\chrome.exe&quot;',
+         threads_in_modules=True),
+]
+
+for c in cases:
+    pid, name = c[&quot;pid&quot;], c[&quot;name&quot;]
+    print(f&quot;  &quot; + &quot;=&quot;*66)
+    print(f&quot;  PID {pid}  {name}&quot;)
+    print(f&quot;    path        : {c['path']}&quot;)
+    print(f&quot;    modules     : {c['module_count']}&quot;)
+    print(f&quot;    RWX regions : {len(c['rw_regions'])}&quot;)
+    print(f&quot;    cmdline     : {c['cmdline'][:50]}&quot;)
+    print()
+    f = diagnose(**c)
+    if not f:
+        print(&quot;    (nothing stands out - probably benign)&quot;)
+    for sev, reason in f:
+        print(f&quot;    [{sev:&lt;8}] {reason}&quot;)
+    if name.lower() == &quot;chrome.exe&quot; and c[&quot;module_count&quot;] &gt; 300:
+        print()
+        print(&quot;    NOTE: a browser with hundreds of modules and a few RWX&quot;)
+        print(&quot;    regions is JIT COMPILATION. That is the caveat that&quot;)
+        print(&quot;    stops you reporting a browser as malware. Chromium,&quot;)
+        print(&quot;    .NET, WPF, Java, and Firefox all do this.&quot;)
+PY
+cat 04-decision-tree.txt
+
+# --- 5. the family discipline, restated ---
+cat &gt; 05-family-discipline.md &lt;&lt;'EOF'
+# Why a family plugin's output is a hypothesis
+
+```text
+  A family plugin parses a STRUCTURE at an OFFSET THAT THE MALWARE
+  AUTHOR CONTROLS.
+
+    The plugin knows: &quot;Cobalt Strike's default config starts with a
+    0x69 0x69 0x69 0x69 marker, and the C2 list is a length-prefixed
+    array of null-terminated strings after it.&quot;
+
+    The author controls: the marker, the length prefix, the field
+    order, the offset.
+
+  SO: if the author changes the marker, the plugin reads whatever
+  bytes happen to be there and interprets them as a config.
+
+  THE RESULT IS A VALID-LOOKING CONFIG WITH NONSENSE IN IT.
+
+  THAT IS WHY THE CORROBORATION RULE EXISTS:
+
+    A family plugin's output must be corroborated against independent
+    evidence before it appears in a report:
+
+    ┌─────────────────────────────────────────────────────────────┐
+    │ plugin says       corroborate with                          │
+    ├─────────────────────────────────────────────────────────────┤
+    │ C2 domain X       does netscan show a connection to X?      │
+    │ sleep time N      is the packet interval N?                 │
+    │ beacon size S     does the socket's traffic match S?         │
+    │ public key K      does K work against something in memory?  │
+    │ campaign ID C     does C appear in strings elsewhere?       │
+    └─────────────────────────────────────────────────────────────┘
+
+  IF NONE OF THEM LINE UP, THE EXTRACTION IS WRONG. And the report
+  says so, in those words:
+
+    &quot;A structure consistent with &lt;family&gt; was identified at offset
+     &lt;X&gt; within the injected region. Its contents did not correlate
+     with observed network traffic and are therefore not treated as
+     the malware's configuration. This is recorded as an artefact of
+     unknown origin rather than as a positive identification.&quot;
+
+  THAT SENTENCE is longer than &quot;Cobalt Strike confirmed&quot;. And it is
+  the one that survives someone checking your work.
+</code></pre>
+<p>EOF<br />
+cat 05-family-discipline.md<br />
+```</p>
+<p><strong>Step 4 is the deliverable</strong>: the decision tree in code, and the <code>chrome.exe</code> case at the bottom —<br />
+310 modules and 3 RWX regions is <strong>JIT compilation</strong>, and reporting a browser as malware is the<br />
+error that ends a memory-forensics engagement's credibility. The <code>svchost.exe</code> case is the other<br />
+extreme: <em>named <code>svchost.exe</code>, not running from <code>System32</code></em> — that is process impersonation, and<br />
+it's one line to spot.</p>
+<p><strong><code>05-family-discipline.md</code></strong> is the discipline note: a family plugin parses a structure at an<br />
+offset the malware author controls, so its output is a <em>hypothesis</em>. If the extracted C2 doesn't<br />
+appear in <code>netscan</code> and the extracted sleep time doesn't match the packet interval, the<br />
+extraction is wrong — and the note gives you the exact sentence to write instead.</p>
+<p><strong>Record:</strong> <code>04-decision-tree.txt</code> and <code>05-family-discipline.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name four injection techniques and the artefact each leaves.</li>
+<li>How do process hollowing and DLL injection differ in module count and command line?</li>
+<li>What does reflective loading do that makes <code>dlllist</code> blind to it?</li>
+<li>What is the strongest single finding a <code>malfind</code> result can give you?</li>
+<li>Why is APC injection the hardest of the four to detect in memory?</li>
+<li>Why is early bird injection the stealthiest?</li>
+<li>Give the three-step process-impersonation check for a <code>svchost.exe</code>.</li>
+<li>Why is a browser with hundreds of modules and RWX regions <em>not</em> a finding?</li>
+<li>Why must a family plugin's output be corroborated, and against what?</li>
+<li>What sentence do you write when a family plugin's extraction doesn't line up?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Process Injection</strong> → <strong>DLL Injection</strong> → <strong>Malware Triage</strong> →<br />
+<strong>Reverse Engineering</strong> → <strong>Volatility 3</strong>.<br />
+<code>for-05</code> takes the carved region and works out what it actually is.</p>

@@ -1,0 +1,349 @@
+<h1 id="certificates">Certificates</h1>
+<h2 id="summary">Summary</h2>
+<p>A certificate says: <em>this public key belongs to this name, and I, a certificate authority, vouch<br />
+for it</em>. The lecture's argument is about the machinery around that sentence — validation, name<br />
+handling, revocation, and what happens when a CA is wrong or compromised.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Chain of trust</strong>: leaf → intermediate → root, each signing the one below</li>
+<li>A browser ships a <strong>root store</strong>; the chain terminates there</li>
+<li><strong>Validation</strong> must check: chain to a trusted root, name match, validity dates, revocation,<br />
+  key usage, and critical extensions</li>
+<li><strong>Name matching</strong> has been a rich source of bugs: wildcards, null bytes in CN, IDN<br />
+  normalisation, and SANs superseding CN entirely</li>
+<li><strong>Revocation</strong> barely works in practice (OCSP stapling, CRLs) — browsers soft-fail</li>
+<li><strong>Compromised CAs</strong> are the catastrophic failure: one rogue CA can forge any certificate</li>
+<li><strong>Certificate pinning</strong> reduces reliance on the public PKI</li>
+</ul>
+<h2 id="the-validation-checklist">The validation checklist</h2>
+<p>A client MUST check, before trusting a certificate:</p>
+<ol>
+<li><strong>Chain</strong> builds to a root in the local trust store</li>
+<li><strong>Validity dates</strong> include now</li>
+<li><strong>Name matches</strong> the hostname being connected to (SAN, not CN)</li>
+<li><strong>Not revoked</strong> (and, if revocation cannot be checked, behave consistently)</li>
+<li><strong>Basic constraints</strong>: the CA can sign; the leaf cannot</li>
+<li><strong>Key usage / extended key usage</strong> permits this use (serverAuth)</li>
+<li><strong>Critical extensions</strong> are understood</li>
+</ol>
+<p>A client that skips any of these has a vulnerability, not a lenient policy.</p>
+<h2 id="name-matching-where-it-goes-wrong">Name matching, where it goes wrong</h2>
+<pre><code class="language-text">&quot;*.example.com&quot;  matches  a.example.com        -&gt; should match
+&quot;*.example.com&quot;  matches  a.b.example.com      -&gt; SHOULD NOT match
+&quot;www.example.com.evil.com&quot;                      -&gt; obviously a different name
+CN=&quot;victim.com\0evil.com&quot;   (null byte truncation) -&gt; a historical vulnerability
+IDN: &quot;аpple.com&quot; with a Cyrillic 'а'             -&gt; homograph, different name
+</code></pre>
+<p>Modern clients: <strong>SAN only</strong>. CN is ignored unless there is no SAN at all.<br />
+Wildcards match exactly one label. Any deviation is a bug.</p>
+<h2 id="when-the-pki-fails">When the PKI fails</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rogue CA certificate</td>
+<td>forge any certificate</td>
+</tr>
+<tr>
+<td>Miss-issued certificate</td>
+<td>mis-issuance for one domain</td>
+</tr>
+<tr>
+<td>CA compromise</td>
+<td>same as rogue</td>
+</tr>
+<tr>
+<td>Validation bug in a client</td>
+<td>universal MITM</td>
+</tr>
+<tr>
+<td>Revocation not checked</td>
+<td>revoked certs still work</td>
+</tr>
+</tbody>
+</table>
+<p>The PKI is a <em>distributed trust</em> system, and its weakest point is the<br />
+largest number of parties who can issue: roughly a hundred roots, each of<br />
+which can delegate.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Certificate</strong></td>
+<td>CA-signed binding of a public key to an identity</td>
+</tr>
+<tr>
+<td><strong>Chain of trust</strong></td>
+<td>leaf → intermediate → root</td>
+</tr>
+<tr>
+<td><strong>Root CA</strong></td>
+<td>Self-signed, trusted directly</td>
+</tr>
+<tr>
+<td><strong>Intermediate CA</strong></td>
+<td>Signed by a root, signs leaves</td>
+</tr>
+<tr>
+<td><strong>Trust store</strong></td>
+<td>The set of roots a client trusts</td>
+</tr>
+<tr>
+<td><strong>SAN</strong></td>
+<td>Subject Alternative Name; the modern name mechanism</td>
+</tr>
+<tr>
+<td><strong>CN</strong></td>
+<td>Common Name; obsolete for hostnames</td>
+</tr>
+<tr>
+<td><strong>Wildcard certificate</strong></td>
+<td><code>*.example.com</code></td>
+</tr>
+<tr>
+<td><strong>Revocation</strong></td>
+<td>CRL and OCSP; withdrawing a compromised certificate</td>
+</tr>
+<tr>
+<td><strong>Stapling</strong></td>
+<td>The server presenting the OCSP response itself</td>
+</tr>
+<tr>
+<td><strong>CT log</strong></td>
+<td>Certificate Transparency; public log of all issuances</td>
+</tr>
+<tr>
+<td><strong>Wildcard abuse</strong></td>
+<td><code>*.co.uk</code> style certificates</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- inspect a real chain ---
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | grep -E &quot;^ *[0-9] [is]:&quot; | head -6
+
+# --- the leaf, in full ---
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | openssl x509 -noout -text | sed -n '/X509v3 extensions/,/Signature Algorithm/p' | head -30
+
+# --- the fields that matter ---
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -fingerprint -sha256 | head -6
+
+# --- SANs specifically (this is what a client matches against) ---
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | openssl x509 -noout -ext subjectAltName | head -8
+
+# --- verification result, and what it means ---
+echo | openssl s_client -connect example.com:443 2&gt;&amp;1 | grep -i &quot;verify return code&quot;
+# 0 = verified; anything else = the chain did not validate
+
+# --- deliberately break verification and see the difference ---
+echo | openssl s_client -connect example.com:443 -verify_return_error 2&gt;&amp;1 \
+  | grep -iE &quot;verify|error&quot; | head -4
+
+# --- what your own trust store is ---
+ls -la /etc/ssl/certs/ca-certificates.crt
+ls /etc/ssl/certs/ | wc -l | xargs echo &quot;  hashed certs:&quot;
+grep -c &quot;BEGIN CERTIFICATE&quot; /etc/ssl/certs/ca-certificates.crt | xargs echo &quot;  certificates in the bundle:&quot;
+
+# --- certificate transparency, a free recon source ---
+echo &quot;=== CT logs: every certificate ever issued for a domain, publicly ===&quot;
+# The crt.sh web interface, or:&quot;
+curl -s --max-time 10 &quot;https://crt.sh/?q=%25.example.com&amp;output=json&quot; 2&gt;/dev/null \
+  | python3 -c &quot;
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    names = set()
+    for r in d:
+        for n in r.get('name_value','').splitlines():
+            if n: names.add(n)
+    for n in sorted(names)[:20]: print('  ', n)
+except Exception: print('  (crt.sh unreachable or rate limited)')&quot;
+
+# --- expiry hygiene on your own box ---
+{
+  echo &quot;=== certificates expiring within 30 days on this machine ===&quot;
+  find /etc/ssl /etc/ssl/private /usr/local/share/ca-certificates -name &quot;*.crt&quot; -o -name &quot;*.pem&quot; 2&gt;/dev/null \
+  | head -50 | while read -r f; do
+      end=$(openssl x509 -enddate -noout -in &quot;$f&quot; 2&gt;/dev/null | cut -d= -f2)
+      [ -z &quot;$end&quot; ] &amp;&amp; continue
+      days=$(( ( $(date -d &quot;$end&quot; +%s 2&gt;/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+      [ &quot;$days&quot; -lt 30 ] &amp;&amp; printf &quot;  %-50s %4s days\n&quot; &quot;$f&quot; &quot;$days&quot;
+    done
+  echo &quot;  (empty = nothing expiring soon)&quot;
+} 2&gt;&amp;1 | tee 01-expiry.txt
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read a real certificate the way a browser does, and audit your own trust store.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-14 &amp;&amp; cd ~/aegis/labs/mit858-14
+
+T=example.com
+# --- 1. the chain, top to leaf ---
+{
+  echo &quot;=== CHAIN OF TRUST: $T ===&quot;
+  echo | timeout 15 openssl s_client -connect $T:443 -servername $T 2&gt;/dev/null | grep -E &quot;^ *[0-9] [is]:&quot; | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 01-chain.txt
+
+# --- 2. the leaf, and the fields a client checks ---
+{
+  echo &quot;=== LEAF CERTIFICATE ===&quot;
+  echo | timeout 15 openssl s_client -connect $T:443 -servername $T 2&gt;/dev/null \
+    | openssl x509 -noout -subject -issuer -dates 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;=== extensions a client must verify ===&quot;
+  echo | timeout 15 openssl s_client -connect $T:443 -servername $T 2&gt;/dev/null \
+    | openssl x509 -noout -text 2&gt;/dev/null \
+    | sed -n '/X509v3 extensions/,/Signature Algorithm/p' \
+    | grep -E &quot;Basic Constraints|Key Usage|Extended Key|Subject Alternative|Authority Info|CRL&quot; | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 02-leaf.txt
+
+# --- 3. SAN, which is what the hostname is actually matched against ---
+{
+  echo &quot;=== SUBJECT ALTERNATIVE NAMES ===&quot;
+  echo | timeout 15 openssl s_client -connect $T:443 -servername $T 2&gt;/dev/null \
+    | openssl x509 -noout -ext subjectAltName 2&gt;/dev/null | fold -w 76 | sed 's/^/  /'
+  echo
+  echo &quot;  CN is ignored when a SAN exists. Every hostname must appear here.&quot;
+} 2&gt;&amp;1 | tee 03-san.txt
+
+# --- 4. name matching, done correctly ---
+python3 - &lt;&lt;'PY' | tee 04-name-matching.txt
+import fnmatch, re
+
+def match(hostname, pattern):
+    &quot;&quot;&quot;A correct wildcard match: one label only, case-insensitive, IDN-normalised.&quot;&quot;&quot;
+    h = hostname.lower().rstrip(&quot;.&quot;)
+    p = pattern.lower().rstrip(&quot;.&quot;)
+    if p == h:
+        return True
+    if not p.startswith(&quot;*.&quot;):
+        return False
+    # a wildcard covers exactly ONE label
+    return fnmatch.fnmatch(h, p) and h.count(&quot;.&quot;) == p.count(&quot;.&quot;)
+
+cases = [
+    (&quot;a.example.com&quot;,      &quot;*.example.com&quot;,  True),
+    (&quot;a.b.example.com&quot;,    &quot;*.example.com&quot;,  False),   # two labels - must NOT match
+    (&quot;example.com&quot;,        &quot;*.example.com&quot;,  False),   # bare domain - must NOT match
+    (&quot;www.example.com&quot;,    &quot;www.example.com&quot;,True),
+    (&quot;WWW.Example.COM&quot;,    &quot;www.example.com&quot;,True),    # case insensitive
+    (&quot;evil-example.com&quot;,   &quot;*.example.com&quot;,  False),
+    (&quot;www.example.com.evil.com&quot;, &quot;*.example.com&quot;, False),
+]
+print(&quot;  %-26s %-18s %-8s %s&quot; % (&quot;HOSTNAME&quot;,&quot;PATTERN&quot;,&quot;EXPECT&quot;,&quot;ACTUAL&quot;))
+for host, pat, want in cases:
+    got = match(host, pat)
+    print(&quot;  %-26s %-18s %-8s %-6s %s&quot; % (host, pat, want, got, &quot;ok&quot; if got == want else &quot;MISMATCH&quot;))
+print()
+print(&quot;  Two lessons a naive implementation gets wrong:&quot;)
+print(&quot;    a.b.example.com must NOT match *.example.com   (one label only)&quot;)
+print(&quot;    example.com must NOT match *.example.com either (the domain itself is excluded)&quot;)
+PY
+cat 04-name-matching.txt
+
+# --- 5. build your own certificate and see each field ---
+{
+  echo &quot;=== generating a certificate and reading every field ===&quot;
+  openssl req -x509 -newkey rsa:2048 -keyout lab.key -out lab.crt -days 30 -nodes \
+    -subj &quot;/C=US/ST=California/L=SF/O=AEGIS/OU=Lab/CN=aegis-lab.local&quot; \
+    -addext &quot;subjectAltName=DNS:aegis-lab.local,DNS:*.aegis-lab.local,IP:127.0.0.1&quot; 2&gt;/dev/null
+
+  echo &quot;--- subject ---&quot;; openssl x509 -in lab.crt -noout -subject | sed 's/^/  /'
+  echo &quot;--- issuer (self-signed, so identical) ---&quot;; openssl x509 -in lab.crt -noout -issuer | sed 's/^/  /'
+  echo &quot;--- validity ---&quot;; openssl x509 -in lab.crt -noout -dates | sed 's/^/  /'
+  echo &quot;--- SANs ---&quot;; openssl x509 -in lab.crt -noout -ext subjectAltName | sed 's/^/  /'
+  echo &quot;--- fingerprint (the pinning value) ---&quot;; openssl x509 -in lab.crt -noout -fingerprint -sha256 | sed 's/^/  /'
+  echo &quot;--- key usage ---&quot;; openssl x509 -in lab.crt -noout -text | grep -A1 &quot;Key Usage&quot; | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 05-my-cert.txt
+
+# --- 6. serve it, and connect properly ---
+cat &gt; tlsserve.py &lt;&lt;'PY'
+import ssl, socket, threading, os
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(&quot;lab.crt&quot;, &quot;lab.key&quot;)
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind((&quot;127.0.0.1&quot;, 8445)); srv.listen(1)
+def serve():
+    c,_ = srv.accept()
+    with ctx.wrap_socket(c, server_side=True) as s:
+        s.sendall(b&quot;aegis lab\n&quot;)
+threading.Thread(target=serve, daemon=True).start()
+import time; time.sleep(8)
+srv.close()
+PY
+python3 tlsserve.py &amp; SRV=$!
+sleep 1
+{
+  echo &quot;=== connecting with VERIFICATION (should fail: not in the trust store) ===&quot;
+  timeout 5 openssl s_client -connect 127.0.0.1:8445 -servername aegis-lab.local 2&gt;&amp;1 \
+    | grep -iE &quot;verify return code|verify error&quot; | head -3 | sed 's/^/  /'
+  echo
+  echo &quot;=== trusting it explicitly (the correct fix) ===&quot;
+  timeout 5 openssl s_client -connect 127.0.0.1:8445 -CAfile lab.crt -servername aegis-lab.local 2&gt;&amp;1 \
+    | grep -iE &quot;verify return code|Verification&quot; | head -3 | sed 's/^/  /'
+  echo &quot;  0 = verified against the CA we supplied. That is trust, explicitly granted.&quot;
+  echo
+  echo &quot;=== and with the CA in the system store, any client trusts it ===&quot;
+  echo &quot;  (do NOT do this outside a lab: a trusted root can forge anything)&quot;
+} 2&gt;&amp;1 | tee 06-verify.txt
+kill $SRV 2&gt;/dev/null
+rm -f lab.crt lab.key tlsserve.py
+
+# --- 7. the PKI's structural weakness ---
+cat &gt; 07-pki.md &lt;&lt;'EOF'
+# The PKI's structural weakness
+
+The system works by trusting a small number of roots. Each root can
+**delegate** to intermediates. Each intermediate can issue certificates.
+
+**The number of parties who can issue a certificate for your domain is much
+larger than the number of roots.** Roughly a hundred roots, thousands of
+intermediates, and hundreds of thousands of delegated domains.
+
+Consequences:
+- one compromised root can forge any certificate
+- one buggy intermediate can mis-issue for many brands
+- revocation exists precisely because revocation is the only remedy, and it
+  barely works: browsers soft-fail on OCSP failure, because failing closed
+  breaks the internet more often than attacks do
+
+Mitigations layered on top:
+- **Certificate Transparency** (public logs; CT monitoring for unexpected issuance)
+- **Short-lived certificates** (reduces the exploitation window)
+- **Pinning** (bypasses the PKI for known keys)
+- **HSTS preload** (removes the CA from the path for known sites)
+- **DANE / DNSSEC** (binds the expected certificate to the DNS name)
+
+The direction of travel is fewer, shorter-lived, more transparent
+certificates, with pinning and CT doing the work the PKI was supposed to.
+EOF
+cat 07-pki.md
+</code></pre>
+<p><strong>Step 6 is the point</strong>: a self-signed certificate <strong>fails</strong> verification until you explicitly<br />
+trust it with <code>-CAfile</code>. That is the PKI working correctly — trust is granted, never assumed.</p>
+<p><strong>Record:</strong> <code>04-name-matching.txt</code> and <code>07-pki.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What must a client verify before trusting a certificate? Name four checks.</li>
+<li>Why is SAN used instead of CN for hostname matching?</li>
+<li>Why must <code>*.example.com</code> not match <code>a.b.example.com</code>?</li>
+<li>Why do browsers soft-fail when OCSP cannot be reached?</li>
+<li>What does Certificate Transparency give you, and what does it not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Certificate</strong> → <strong>PKI</strong> → <strong>Digital Signature</strong> → <strong>TLS Handshake</strong> →<br />
+<strong>Certificate Transparency</strong> → <strong>DNS Rebinding</strong>.</p>

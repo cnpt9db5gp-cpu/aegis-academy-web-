@@ -1,0 +1,292 @@
+<h1 id="evidence-timeline-and-detection-review">Evidence, Timeline and Detection Review</h1>
+<h2 id="summary">Summary</h2>
+<p>Capstone stage four is the forensic one: you have the objective, and now you have to prove the<br />
+path, timeline it, and say what the client's monitoring would or would not have caught.</p>
+<p>The framing: <strong>the objective was getting the shell. This stage is<br />
+proving how, showing when, and — the part most testers skip — whether<br />
+anyone would have noticed.</strong></p>
+<blockquote>
+<p>Companion to <code>for-01</code>..<code>for-07</code> (the methodology) and <code>ad-08</code> (AD<br />
+detection). This note is the capstone's forensic deliverable.</p>
+</blockquote>
+<h2 id="the-four-deliverables">The four deliverables</h2>
+<pre><code class="language-text">  1. EVIDENCE PACKAGE   every artefact, hashed, with provenance
+  2. TIMELINE            the sequence, with the sources it came from
+  3. ARTEFACT CHECK      what you left behind, and how you verified
+                        it is gone
+  4. DETECTION REVIEW    which of your actions would have generated an
+                        alert, and which would have been invisible
+
+  THE FOURTH IS WHAT DISTINGUISHES THIS STAGE. Anyone can produce a
+  timeline. Saying &quot;the SMB relay generated no event on the domain
+  controller at all, and the Kerberoasting generated only 4769
+  requests to the KDC, which the client's audit policy does not log&quot;
+  is a finding the client cannot get from anyone else.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cap-05 &amp;&amp; cd ~/aegis/labs/cap-05
+mkdir -p evidence/{raw,working} timeline report
+export SCOPE_GUARD=../cap-01/02-scope-guard.py
+
+cat &gt; 01-hash-all.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Hash and record provenance for every artefact in the evidence tree.
+
+Run this at the END of the engagement, not the beginning. The point is
+to record what exists so the report's claims can be checked.
+&quot;&quot;&quot;
+import hashlib, pathlib, json, datetime, sys
+
+def sha256(p, chunk=1 &lt;&lt; 20):
+    h = hashlib.sha256()
+    with open(p, &quot;rb&quot;) as f:
+        for b in iter(lambda: f.read(chunk), b&quot;&quot;): h.update(b)
+    return h.hexdigest()
+
+def main(root, out):
+    root = pathlib.Path(root)
+    rows = []
+    for p in sorted(root.rglob(&quot;*&quot;)):
+        if not p.is_file(): continue
+        if p.name == out: continue
+        st = p.stat()
+        rows.append(dict(
+            path=str(p.relative_to(root)),
+            bytes=st.st_size,
+            sha256=sha256(p),
+            mtime_utc=datetime.datetime.fromtimestamp(
+                st.st_mtime, datetime.timezone.utc).isoformat()))
+    doc = {&quot;generated&quot;: datetime.datetime.now(datetime.timezone.utc).isoformat(),
+           &quot;root&quot;: str(root), &quot;count&quot;: len(rows), &quot;files&quot;: rows}
+    pathlib.Path(out).write_text(json.dumps(doc, indent=2))
+    print(f&quot;  {len(rows)} files hashed -&gt; {out}\n&quot;)
+    for r in rows[:25]:
+        print(f&quot;  {r['sha256'][:16]}...  {r['bytes']:&gt;9}  {r['path']}&quot;)
+    if len(rows) &gt; 25: print(f&quot;  ... and {len(rows)-25} more&quot;)
+    return doc
+
+if __name__ == &quot;__main__&quot;:
+    main(sys.argv[1] if len(sys.argv) &gt; 1 else &quot;evidence&quot;,
+         sys.argv[2] if len(sys.argv) &gt; 2 else &quot;evidence/MANIFEST.json&quot;)
+PY
+python3 01-hash-all.py 2&gt;&amp;1 | tail -20 | tee 02-manifest.txt
+</code></pre>
+<h2 id="the-timeline-and-what-makes-it-defensible">The timeline, and what makes it defensible</h2>
+<pre><code class="language-python">cat &gt; 03-timeline.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Build the capstone timeline from every source, with provenance kept.
+
+The provenance column is the point. Two artefacts at the same second
+from different sources are two facts, and collapsing them loses the
+ability to cross-check.
+&quot;&quot;&quot;
+from datetime import datetime, timezone, timedelta
+import json, pathlib
+
+T0 = datetime(2026, 10, 14, 9, 0, 0, tzinfo=timezone.utc)
+
+# (offset_minutes, source, actor, action, evidence_artefact, confidence)
+EVENTS = [
+ (0,   &quot;authorisation&quot;,   &quot;tester&quot;,   &quot;engagement started; scope guard self-test passed&quot;,
+       &quot;00-AUTHORISATION.md&quot;, &quot;confirmed&quot;),
+ (12,  &quot;ldap-anonymous&quot;, &quot;tester&quot;,   &quot;anonymous LDAP bind succeeded on DC01&quot;,
+       &quot;recon/ldap-anonymous.txt&quot;, &quot;confirmed&quot;),
+ (13,  &quot;ldap-anonymous&quot;, &quot;system&quot;,   &quot;svc-legacy enumerated (preauth disabled)&quot;,
+       &quot;recon/ldap-anonymous.txt&quot;, &quot;confirmed&quot;),
+ (14,  &quot;ldap-anonymous&quot;, &quot;system&quot;,   &quot;SPNs enumerated: svc-backup, svc-web, svc-iis&quot;,
+       &quot;recon/ldap-anonymous.txt&quot;, &quot;confirmed&quot;),
+ (41,  &quot;GetNPUsers&quot;,     &quot;tester&quot;,   &quot;AS-REP harvested for svc-legacy (NO credential used)&quot;,
+       &quot;evidence/raw/asrep.txt&quot;, &quot;confirmed&quot;),
+ (58,  &quot;GetUserSPNs&quot;,    &quot;tester&quot;,   &quot;service tickets requested for svc-backup, svc-web&quot;,
+       &quot;evidence/raw/spns.txt&quot;, &quot;confirmed&quot;),
+ (76,  &quot;hashcat&quot;,        &quot;tester&quot;,   &quot;svc-legacy password cracked (offline)&quot;,
+       &quot;evidence/raw/cracked.txt&quot;, &quot;confirmed&quot;),
+ (95,  &quot;kerberos&quot;,       &quot;tester&quot;,   &quot;authenticated as svc-legacy (AS-REP-recovered password)&quot;,
+       &quot;evidence/raw/logon.txt&quot;, &quot;confirmed&quot;),
+ (112, &quot;ldap-graph&quot;,     &quot;tester&quot;,   &quot;svc-legacy found to be in no privileged group; pivoted &quot;
+                                    &quot;to svc-backup per the recon map&quot;,
+       &quot;evidence/raw/graph.txt&quot;, &quot;confirmed&quot;),
+ (118, &quot;GetUserSPNs&quot;,    &quot;tester&quot;,   &quot;service tickets requested for svc-backup (RC4)&quot;,
+       &quot;evidence/raw/spn-svc-backup.txt&quot;, &quot;confirmed&quot;),
+ (134, &quot;hashcat&quot;,        &quot;tester&quot;,   &quot;svc-backup password cracked (offline)&quot;,
+       &quot;evidence/raw/cracked.txt&quot;, &quot;confirmed&quot;),
+ (140, &quot;smb&quot;,            &quot;tester&quot;,   &quot;authenticated as svc-backup (pass-the-hash, no password)&quot;,
+       &quot;evidence/raw/logon.txt&quot;, &quot;confirmed&quot;),
+ (158, &quot;bloodhound&quot;,     &quot;tester&quot;,   &quot;graph collected as svc-backup; shortest path identified&quot;,
+       &quot;evidence/raw/graph.json&quot;, &quot;confirmed&quot;),
+ (172, &quot;ldap-write&quot;,     &quot;tester&quot;,   &quot;added svc-backup to Domain Admins (reverted at 205)&quot;,
+       &quot;evidence/raw/write.txt&quot;, &quot;confirmed&quot;),
+ (176, &quot;smb&quot;,            &quot;tester&quot;,   &quot;DCSync request to DC01; every NT hash in the forest returned&quot;,
+       &quot;evidence/raw/dcsync.txt&quot;, &quot;confirmed&quot;),
+ (180, &quot;smb&quot;,            &quot;tester&quot;,   &quot;Database connection to SRV01 (10.10.10.20) via the pivot&quot;,
+       &quot;evidence/raw/db.txt&quot;, &quot;confirmed&quot;),
+ (188, &quot;smb&quot;,            &quot;tester&quot;,   &quot;OBJECTIVE MET: read the customer table schema only&quot;,
+       &quot;evidence/raw/db.txt&quot;, &quot;confirmed&quot;),
+ (198, &quot;cleanup&quot;,        &quot;tester&quot;,   &quot;removed svc-backup from Domain Admins&quot;,
+       &quot;evidence/raw/cleanup.txt&quot;, &quot;confirmed&quot;),
+ (205, &quot;cleanup&quot;,        &quot;tester&quot;,   &quot;removed collected tools; verified no residue&quot;,
+       &quot;evidence/raw/cleanup.txt&quot;, &quot;confirmed&quot;),
+ (210, &quot;authorisation&quot;,  &quot;tester&quot;,   &quot;engagement ended&quot;,
+       &quot;00-AUTHORISATION.md&quot;, &quot;confirmed&quot;),
+]
+
+def render(events, t0):
+    out = []
+    out.append(&quot;  &quot; + &quot;=&quot;*96)
+    out.append(&quot;  CAPSTONE TIMELINE  (all times UTC; the lab DC's clock is the reference)&quot;)
+    out.append(&quot;  &quot; + &quot;=&quot;*96)
+    cur = None
+    for off, src, actor, action, artefact, conf in events:
+        ts = t0 + timedelta(minutes=off)
+        if src != cur:
+            out.append(&quot;&quot;)
+            out.append(f&quot;  --- source: {src} &quot; + &quot;-&quot;*(70-len(src)))
+            cur = src
+        flag = &quot;&quot; if conf == &quot;confirmed&quot; else f&quot;  [{conf}]&quot;
+        out.append(f&quot;  {ts:%H:%M}  {actor:&lt;11} {action}{flag}&quot;)
+        out.append(f&quot;          evidence: {artefact}&quot;)
+    out.append(&quot;&quot;)
+    out.append(&quot;  &quot; + &quot;-&quot;*96)
+    out.append(f&quot;  {len(events)} events across &quot;
+               f&quot;{len({e[1] for e in events})} distinct sources, over &quot;
+               f&quot;{(events[-1][0])//60}h{(events[-1][0])%60}m&quot;)
+    return &quot;\n&quot;.join(out)
+
+if __name__ == &quot;__main__&quot;:
+    print(render(EVENTS, T0))
+    pathlib.Path(&quot;timeline/capstone-timeline.txt&quot;).write_text(render(EVENTS, T0))
+PY
+python3 03-timeline.py 2&gt;&amp;1 | tee 04-timeline.txt
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: a timeline with the <strong>provenance column kept</strong>. Two artefacts at<br />
+the same second from different sources are two facts, and collapsing them loses the ability to<br />
+cross-check. And it reads as a narrative — anonymous LDAP at minute 12, AS-REP harvest at 41<br />
+with <em>no credential used</em>, pivot to <code>svc-backup</code> at 112 once you learn <code>svc-legacy</code> is in no<br />
+privileged group, Kerberoast at 134, DCSync at 176, objective at 188, <strong>cleanup at 198 and 205</strong>.</p>
+<p>That last pair is the capstone's real assessment. Getting the shell took 176 minutes; proving you<br />
+left nothing behind took the next 29.</p>
+<p><strong>Record:</strong> <code>04-timeline.txt</code> and <code>02-manifest.txt</code>.</p>
+<h2 id="the-detection-review-which-is-the-part-nobody-asks-for">The detection review, which is the part nobody asks for</h2>
+<pre><code class="language-bash">cat &gt; 05-detection.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;For each action taken, what would the client's monitoring have seen?
+
+The honest answer is frequently &quot;nothing&quot;, and that is the finding.
+&quot;&quot;&quot;
+ACTIONS = [
+ # (action, tier, AD events, host events, would_an_alert_fire)
+ (&quot;Anonymous LDAP bind + full enumeration&quot;, &quot;ad-03&quot;,
+  [&quot;(none - anonymous binds are not logged by default)&quot;], [],
+  &quot;NO. Unless the DC has verbose LDAP logging, which most do not.&quot;),
+ (&quot;AS-REP request for a preauth-disabled account&quot;, &quot;ad-04&quot;,
+  [&quot;4769 Kerberos service ticket operation, or 4768 for the TGT&quot;],
+  [],
+  &quot;MAYBE. 4768/4769 need 'Audit Kerberos Authentication Service' with &quot;
+  &quot;Success enabled, which is NOT the default. Most environments do not &quot;
+  &quot;have it, so this roast is invisible.&quot;),
+ (&quot;TGS-REQ for a service ticket (Kerberoasting)&quot;, &quot;ad-04&quot;,
+  [&quot;4769, one per request&quot;, &quot;4624 only when the ticket is USED&quot;],
+  [],
+  &quot;NO, at the roast stage. The requests are logged only if 4769 is on. &quot;
+  &quot;The USE of the cracked password generates 4768, which is more commonly &quot;
+  &quot;audited - but by then the attack has succeeded.&quot;),
+ (&quot;Cracking the hash offline&quot;, &quot;cry-d4&quot;,
+  [], [],
+  &quot;NO. There is no server contact. The attacker is attacking a string &quot;
+  &quot;they already have, on their own hardware, with no rate limit.&quot;),
+ (&quot;Pass-the-hash over SMB&quot;, &quot;ad-04 / imp-02&quot;,
+  [&quot;4624 logon type 3&quot;, &quot;4672 if privileges assigned&quot;],
+  [&quot;4624 type 3&quot;, &quot;7045 if a service was created (psexec)&quot;],
+  &quot;PARTLY. The logon is there if the DC logs 4624 (common). It looks &quot;
+  &quot;like an ordinary network logon from a workstation on the LAN. &quot;
+  &quot;Without a source-IP alert it is indistinguishable from normal.&quot;),
+ (&quot;LDAP write: adding a user to a group&quot;, &quot;ad-05&quot;,
+  [&quot;5136 directory object modified&quot;],
+  [],
+  &quot;YES, if Advanced Audit Policy &gt; DS Access &gt; Directory Service Changes &quot;
+  &quot;is set to Success. This is NOT on by default on most systems. &quot;
+  &quot;This is the single cheapest detection improvement in the report.&quot;),
+ (&quot;DCSync&quot;, &quot;ad-05&quot;,
+  [&quot;4662 Directory Service Access with one of the three replication GUIDs&quot;,
+   &quot;4663 Attempt to enumerate the DS, once per object&quot;,
+   &quot;5136 where anything is modified&quot;],
+  [],
+  &quot;YES, if Audit Directory Service Access is enabled (default: Success &quot;
+  &quot;and Failure on Domain Controllers, but NOT on member servers). &quot;
+  &quot;This is the highest-fidelity detection available and it is a single &quot;
+  &quot;GPO.&quot;),
+ (&quot;Database read on SRV01&quot;, &quot;-&quot;,
+  [], [&quot;MSSQL login event&quot;, &quot;SQL audit&quot;],
+  &quot;DEPENDS ENTIRELY ON THE APP. Most applications do not audit database &quot;
+  &quot;reads at all. This is a finding about the client, not about you.&quot;),
+ (&quot;Removing the group membership (cleanup)&quot;, &quot;-&quot;,
+  [&quot;5136 directory object modified&quot;],
+  [],
+  &quot;YES, if 5136 is on. Your cleanup is as detectable as your attack, &quot;
+  &quot;which is why the timeline above records it separately.&quot;),
+]
+
+def render():
+    w = 100
+    print(&quot;  &quot; + &quot;=&quot;*w)
+    print(&quot;  DETECTION REVIEW: what the client's monitoring would have seen&quot;)
+    print(&quot;  &quot; + &quot;=&quot;*w)
+    counts = {&quot;YES&quot;:0, &quot;MAYBE&quot;:0, &quot;PARTLY&quot;:0, &quot;NO&quot;:0, &quot;DEPENDS&quot;:0}
+    for action, tier, ad, host, verdict in ACTIONS:
+        print(f&quot;\n  ACTION: {action}   [{tier}]&quot;)
+        print(f&quot;    AD events   : {', '.join(ad) if ad else 'none'}&quot;)
+        print(f&quot;    Host events : {', '.join(host) if host else 'none'}&quot;)
+        print(f&quot;    WOULD AN ALERT FIRE?  {verdict}&quot;)
+        counts[verdict.split()[0].rstrip(':')] = \
+            counts.get(verdict.split()[0].rstrip(':'), 0) + 1
+    print(&quot;\n  &quot; + &quot;-&quot;*w)
+    print(&quot;  SCOREBOARD&quot;)
+    for k, v in counts.items():
+        print(f&quot;    {k:&lt;10} {v} of {len(ACTIONS)} actions&quot;)
+    print()
+    print(&quot;  THE HEADLINE, and it is the finding:&quot;)
+    print(&quot;    The DCSync - the moment of domain compromise - was detectable.&quot;)
+    print(&quot;    The Kerberoasting that preceded it, which took four minutes and&quot;)
+    print(&quot;    recovered a privileged service account password, was NOT.&quot;)
+    print(&quot;    And the offline cracking was not detectable at all, because there&quot;)
+    print(&quot;    is no server to detect it on.&quot;)
+    print()
+    print(&quot;  So the client's detection would have fired AFTER the attack had&quot;)
+    print(&quot;  already succeeded, if it fired at all.&quot;)
+    print()
+    print(&quot;  THE TWO RECOMMENDATIONS THAT FOLLOW, in order:&quot;)
+    print(&quot;    1. Enable Advanced Audit Policy &gt; DS Access &gt; 'Audit Directory&quot;)
+    print(&quot;       Service Changes' = Success. One GPO. Catches the group write.&quot;)
+    print(&quot;    2. Enable 'Audit Kerberos Authentication Service' = Success, and&quot;)
+    print(&quot;       alert on 4768/4769 from a source that is not a domain&quot;)
+    print(&quot;       controller. Catches the roast.&quot;)
+    print()
+    print(&quot;  Both are configuration. Neither requires a purchase. That is why&quot;)
+    print(&quot;  they are the recommendations.&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    render()
+PY
+python3 05-detection.py 2&gt;&amp;1 | tee 06-detection.txt
+</code></pre>
+<p><strong>Step 5 is the capstone's real deliverable</strong>, and the scoreboard is the finding: the <strong>DCSync</strong> —<br />
+the moment of domain compromise — <em>was</em> detectable. The <strong>Kerberoasting</strong> that preceded it, which<br />
+took four minutes and recovered a privileged service account password, was <strong>not</strong>. And the<br />
+offline cracking was not detectable at all, because there is no server to detect it on.</p>
+<p>So the client's detection would have fired <em>after</em> the attack had already succeeded. The two<br />
+recommendations that follow are both a single GPO and neither requires a purchase.</p>
+<p><strong>Record:</strong> <code>06-detection.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the four deliverables of this stage, and which is the distinguishing one?</li>
+<li>Why does the timeline keep the provenance column?</li>
+<li>Name the AD events a group-membership write generates, and is it on by default?</li>
+<li>Which detection is the highest-fidelity available, and how many GPOs is it?</li>
+<li>Why is offline cracking undetectable, and why does that matter?</li>
+<li>Why is your <em>cleanup</em> as detectable as your attack?</li>
+<li>What does the detection review conclude about the ordering of alerts versus success?</li>
+<li>Give the two recommendations, and what do they have in common?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Incident Response</strong> → <strong>Windows Logging</strong> → <strong>Timeline Analysis</strong> →<br />
+<strong>Detection Engineering</strong> → <strong>Evidence Handling</strong>.<br />
+<code>cap-06</code> is the report that contains all of this.</p>

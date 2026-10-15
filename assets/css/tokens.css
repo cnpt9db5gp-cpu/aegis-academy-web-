@@ -1,0 +1,70 @@
+/* ============================================================
+   AEGIS :: DESIGN TOKENS
+   Official-use palette. Serious instrument, not a toy.
+   ============================================================ */
+:root {
+  /* --- substrate --- */
+  --bg:            #070b12;
+  --bg-sunken:     #04070c;
+  --panel:         #0d1622;
+  --panel-2:       #132234;
+  --panel-3:       #18293d;
+
+  /* --- agency colours --- */
+  --fbi-navy:      #1b3a5f;
+  --seal-blue:     #2c5f8d;
+  --seal-blue-lo:  rgba(44, 95, 141, .16);
+
+  /* --- metals & alerts --- */
+  --brass:         #b08d3f;
+  --brass-lo:      #d4af5f;
+  --brass-glow:    rgba(176, 141, 63, .14);
+  --classified:    #a4262c;
+  --classified-lo: #c4383d;
+  --alert:         #b8621b;
+  --cleared:       #4b7f52;
+  --intel:         #4a7f9e;
+
+  /* --- type --- */
+  --ink:           #c9d4e0;
+  --ink-bright:    #e6edf5;
+  --ink-muted:     #7d8fa3;
+  --ink-faint:     #4d5d70;
+
+  /* --- structure --- */
+  --rule:          rgba(201, 212, 224, .10);
+  --rule-strong:   rgba(201, 212, 224, .20);
+  --rule-brass:    rgba(176, 141, 63, .45);
+  --grid-line:     rgba(201, 212, 224, .028);
+
+  /* --- geometry --- */
+  --rail-w:        244px;
+  --banner-h:      34px;
+  --footer-h:      38px;
+  --notch:         9px;
+  --r-sm:           2px;
+  --r-md:           3px;
+
+  /* --- type stacks --- */
+  --font-display: 'Barlow Condensed', 'Oswald', 'Arial Narrow', sans-serif;
+  --font-mono:    'IBM Plex Mono', ui-monospace, 'DejaVu Sans Mono', monospace;
+  --font-body:    'Inter', system-ui, -apple-system, sans-serif;
+
+  /* --- motion: institutional, never bouncy --- */
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  --t-fast: 110ms var(--ease);
+  --t-mid:  200ms var(--ease);
+}
+
+/* Rank tiers carry their own accent so progression is legible at a glance */
+:root {
+  --t0: #7d8fa3;
+  --t1: #4a7f9e;
+  --t2: #2c5f8d;
+  --t3: #7a5ea8;
+  --t4: #b08d3f;
+  --t5: #b8621b;
+  --t6: #a4262c;
+  --t7: #c4383d;
+  --t8: #d4af5f;
+}

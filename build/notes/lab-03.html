@@ -1,0 +1,324 @@
+<h1 id="building-a-domain-lab-for-ad-practice">Building a Domain Lab for AD Practice</h1>
+<h2 id="summary">Summary</h2>
+<p>An AD lab needs three servers, not one, and the reason is the whole of <code>ad-01</code>: a domain is a<br />
+database plus a set of servers. Two domain controllers teach you replication, DCSync<br />
+prerequisites and time synchronisation that a single-DC lab cannot.</p>
+<p>The framing: <strong>build the domain correctly first, including the<br />
+things that are harder rather than easier — delegation, preauth flags,<br />
+service accounts in privileged groups.</strong> A clean AD lab teaches you<br />
+that AD attacks do not work.</p>
+<blockquote>
+<p>Companion to <code>lab-01</code> (the platform) and the whole AD tier. This<br />
+note builds the thing you practise on.</p>
+</blockquote>
+<h2 id="the-topology">The topology</h2>
+<pre><code class="language-text">  ┌───────────────────────────────────────────────────────────────┐
+  │ 192.168.56.0/24          (&quot;external&quot; in the fiction)          │
+  │                                                                │
+  │   KALI (host)          DC01              DC02                 │
+  │   192.168.56.1         .56.10            .56.11                │
+  │                        +10.10.10.5       +10.10.10.6         │
+  │                                                               │
+  │   WKS01                WKS02            SRV01                  │
+  │   .56.20               .56.21           (10.10.10.20 only)    │
+  │   domain-joined        domain-joined    dual-homed            │
+  │   unprivileged         privileged       app + file server     │
+  └───────────────────────────────────────────────────────────────┘
+
+  WHY TWO DCs:
+    - replication, so a DC-only lab never teaches anything about it
+    - time synchronisation, which Kerberos depends on
+    - the ability to TEST a single-DC forest (where DCSync rights are
+      a pure finding) before adding a second
+
+  WHY A DUAL-HOMED HOST:
+    SRV01 is on 10.10.10.0/24 only. Nothing in 192.168.56.0/24 can
+    reach it without a pivot. That makes `ad-06`'s pivoting real.
+
+  WHY A PRIVILEGED WORKSTATION:
+    WKS02 is where an admin should log in, and WKS01 is where they
+    should NOT. The difference between them is the whole of tiered
+    administration, and you cannot practise it in a one-account lab.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/lab-03 &amp;&amp; cd ~/aegis/labs/lab-03
+mkdir -p notes scripts
+
+cat &gt; 01-plan.md &lt;&lt;'EOF'
+# Domain lab plan
+
+```text
+  FOREST      aegis.lab
+  DOMAIN      aegis.lab
+  NETBIOS     AEGIS
+  DOMAIN ADMINISTRATOR password: something you will forget, so write
+  it in notes/ (and that file is chmod 600)
+
+  SERVERS     DC01 (192.168.56.10, 10.10.10.5)  - first DC, also
+               the pivot host into 10.10.10.0/24
+               DC02 (192.168.56.11, 10.10.10.6) - second DC, for
+               replication
+               SRV01 (10.10.10.20)              - app + file server,
+               internal only
+
+  WORKSTATIONS WKS01 (192.168.56.20)  domain-joined, unprivileged
+               WKS02 (192.168.56.21)  domain-joined, the admin's
+
+  USERS
+    alice          unprivileged domain user. The starting point of
+                   every capstone scenario.
+    bob            unprivileged
+    erin           in a privileged group. The target of every
+                   privilege-escalation scenario.
+    svc-backup     service account, in Backup Operators. SPNs set.
+                   Your roasting target.
+    svc-web        service account, in a web-app group, SPNs set.
+    svc-iis        service account for the app tier
+    helpdesk       a group with delegated rights - the realistic
+                   misconfiguration that makes paths long
+
+  THE DELIBERATE MISCONFIGURATIONS
+    These are what you are going to find, and they are realistic:
+
+    1. svc-backup in a privileged group (ad-01: the most common real
+       finding in every assessment)
+    2. helpdesk with GenericAll on a group (bh-02's five-hop path)
+    3. one account with msDS-UserDoesNotNeedPreAuth (ad-04: AS-REP
+       roastable, and findable with NO credentials)
+    4. one account with msDS-AllowedToDelegateTo set (ad-02)
+    5. SMB signing NOT required (imp-03: relayable)
+    6. a weak local administrator password on SRV01
+    7. LAPS not deployed
+
+    WRITE THEM DOWN NOW, with their exact state. When you find one
+    during an exercise you need to know it was intentional.
+EOF
+echo &quot;written: 01-plan.md&quot;
+
+cat &gt; 02-promote.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Promote DC01 to the first domain controller. Run INSIDE the VM.
+# These are Windows commands; this file documents them.
+cat &lt;&lt;'PS1'
+=== ON DC01, as Administrator ===
+
+# 1. name the adapters correctly first. This bites everyone.
+  #    Rename the NIC on 192.168.56.0/24 to &quot;Lab-External&quot;
+  #    Rename the NIC on 10.10.10.0/24   to &quot;Lab-Internal&quot;
+  #    Set the metric: External = 5, Internal = 50
+  #    (so the host's default route goes via External)
+
+# 2. set the time. Kerberos will not work without it.
+  w32tm /config /manualpeerlist:&quot;time.windows.com,0x9&quot; /syncfromflags:manual /update
+  w32tm /resync
+
+# 3. hostname and domain
+  Rename-Computer -NewName DC01 -Restart
+  Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
+  Install-ADForest `
+    -DomainName &quot;aegis.lab&quot; `
+    -DomainNetbiosName &quot;AEGIS&quot; `
+    -InstallDns:$true `
+    -SafeModeAdministratorPassword (ConvertTo-SecureString &quot;LabAdmin!2019&quot; -AsPlainText -Force) `
+    -Force
+
+# 4. FIX THE FUNCTIONAL LEVEL while you are still in a state where
+#    you can, because raising it later is much harder.
+  Set-ADDomain -Identity aegis.lab -ServerMode Win2012R5
+
+# 5. On DC02, join the SAME forest (not a new domain - a child domain
+#    is a different lab):
+  Add-WindowsFeature AD-Domain-Services -IncludeManagementTools
+  Install-ADDomain `
+    -NewDomainName &quot;aegis.lab&quot; `
+    -ParentDomainName &quot;aegis.lab&quot; `
+    -Credential (Get-Credential) `
+    -InstallDns:$true `
+    -SafeModeAdministratorPassword (ConvertTo-SecureString &quot;LabAdmin!2019&quot; -AsPlainText -Force) `
+    -Force
+
+# 6. On WKS01 and WKS02, join:
+  Add-Computer -DomainName aegis.lab -Credential (Get-Credential)
+
+# 7. Point the workstations' DNS at DC01 (192.168.56.10), NOT at
+#    8.8.8.8. This is the single most common lab failure.
+PS1
+EOF
+chmod +x 02-promote.sh
+
+cat &gt; 03-misconfig.ps1 &lt;&lt;'PS1'
+&lt;#
+  The deliberate misconfigurations. Run ONCE on DC01 as Administrator.
+  Documented, reproducible, and reversible.
+
+  Each block creates ONE realistic condition that a real assessment
+  finds. They are the exercises, and they are listed here so that when
+  you find one you know it was put there deliberately.
+#&gt;
+
+# --- 1. a service account in a privileged group ---------------------
+# The most common high-severity finding in real engagements.
+New-ADUser -Name &quot;svc-backup&quot; -SamAccountName &quot;svc-backup&quot; `
+  -Path &quot;OU=ServiceAccounts,DC=aegis,DC=lab&quot; `
+  -Enabled $true -PasswordNeverExpires $true `
+  -AccountPassword (ConvertTo-SecureString &quot;BackupSvc!2019&quot; -AsPlainText -Force)
+Add-ADGroupMember -Identity &quot;Backup Operators&quot; -Members &quot;svc-backup&quot;
+Set-ADServicePrincipalName -Identity &quot;svc-backup&quot; `
+  -HostName &quot;fileserver&quot; -Sets &quot;HOST/dc01.aegis.lab&quot;, &quot;HOST/fileserver&quot;
+Write-Host &quot;1. svc-backup: in Backup Operators, with SPNs. Roastable.&quot;
+
+# --- 2. an account that does not require preauth ---------------------
+# AS-REP roastable. FINDABLE WITH NO CREDENTIALS. (ad-04)
+New-ADUser -Name &quot;svc-legacy&quot; -SamAccountName &quot;svc-legacy&quot; `
+  -Path &quot;OU=ServiceAccounts,DC=aegis,DC=lab&quot; `
+  -Enabled $true `
+  -AccountPassword (ConvertTo-SecureString &quot;Legacy2019!&quot; -AsPlainText -Force)
+Set-ADObject -Identity &quot;svc-legacy&quot; -Replace @{
+  msDS-UserDoesNotNeedPreAuth = $true }
+Write-Host &quot;2. svc-legacy: preauth disabled. Roasts with no credential.&quot;
+
+# --- 3. unconstrained delegation -------------------------------------
+# THE finding that has been Critical in every assessment of every large
+# Windows estate since 2010. (ad-02)
+Set-ADObject -Identity &quot;WEB01&quot; -Replace @{
+  msDS-AllowedToDelegateTo = &quot;KEY USE FOR ALL TRUSTED AUTHENTICATION&quot; }
+Write-Host &quot;3. WEB01: unconstrained delegation. TGTs for every user.&quot;
+
+# --- 4. RC4 Kerberos, so roasting works ------------------------------
+# Modern Windows defaults to AES-only. Removing this means your lab
+# does not reproduce the roasting exercise. (ad-04)
+Set-ADObject -Identity &quot;svc-backup&quot; -Replace @{
+  msDS-SupportedEncryptionTypes = 0x4 }    # RC4 only
+Set-ADObject -Identity &quot;svc-web&quot;    -Replace @{
+  msDS-SupportedEncryptionTypes = 0x4 }
+Write-Host &quot;4. svc-backup and svc-web: RC4 only. Roastable.&quot;
+
+# --- 5. the helpdesk misconfiguration, a realistic long path ---------
+# GenericAll on a group, which chains into privilege. (bh-02)
+$helpdesk = New-ADGroup -Name &quot;helpdesk&quot; -GroupCategory Security `
+  -Path &quot;OU=Groups,DC=aegis,DC=lab&quot; -PassThru
+$itSupport = Get-ADGroup -Identity &quot;IT Support&quot;
+$acl = Get-Acl &quot;AD:\$itSupport.DistinguishedName&quot;
+$rule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+  $helpdesk, &quot;GenericAll&quot;, &quot;Allow&quot;)
+$acl.AddAccessRule($rule)
+Set-Acl &quot;AD:\$itSupport.DistinguishedName&quot; $acl
+Add-ADGroupMember -Identity $helpdesk -Members &quot;alice&quot;, &quot;bob&quot;
+Write-Host &quot;5. helpdesk: GenericAll on 'IT Support'. alice can add herself.&quot;
+
+# --- 6. a gMSA in a privileged group (the readGMSAPassword target) --
+New-ADServiceAccount -Name &quot;gmsa-files&quot; `
+  -Path &quot;OU=ServiceAccounts,DC=aegis,DC=lab&quot; `
+  -DNSHostName &quot;gmsa-files.aegis.lab&quot; `
+  -RestrictToSingleComputer $true -KerberosEncryptionType AES256, AES128
+Add-ADGroupMember -Identity &quot;Backup Operators&quot; -Members &quot;gmsa-files$&quot;
+Write-Host &quot;6. gmsa-files$: a 120-character password in a privileged&quot;
+Write-Host &quot;   group. Readable with ReadGMSAPassword. Uncrackable, and&quot;
+Write-Host &quot;   irrelevant, because you can just read it. (bh-02)&quot;
+
+# --- 7. and the accounts --------------------------------------------
+foreach ($n in @(&quot;alice&quot;,&quot;bob&quot;,&quot;erin&quot;,&quot;svc-web&quot;,&quot;svc-iis&quot;)) {
+  $pw = switch ($n) {
+    &quot;alice&quot; {&quot;Summer2019!&quot;}; &quot;bob&quot; {&quot;Winter2019!&quot;}
+    &quot;erin&quot; {&quot;Admin2019!&quot;}; &quot;svc-web&quot; {&quot;WebSvc!2019&quot;}
+    &quot;svc-iis&quot; {&quot;IisSvc!2019&quot;}
+  }
+  New-ADUser -Name $n -SamAccountName $n -Path &quot;OU=Users,DC=aegis,DC=lab&quot; `
+    -Enabled $true -PasswordNeverExpires $true `
+    -AccountPassword (ConvertTo-SecureString $pw -AsPlainText -Force)
+}
+New-ADGroup -Name &quot;IT Support&quot; -GroupCategory Security `
+  -Path &quot;OU=Groups,DC=aegis,DC=lab&quot;
+Add-ADGroupMember -Identity &quot;IT Support&quot; -Members &quot;erin&quot;
+Set-ADServicePrincipalName -Identity &quot;svc-web&quot; `
+  -HostName &quot;web01&quot; -Sets &quot;HTTP/web01.aegis.lab&quot;
+Set-ADServicePrincipalName -Identity &quot;svc-iis&quot; `
+  -HostName &quot;web01&quot; -Sets &quot;HTTP/web02.aegis.lab&quot;
+
+Write-Host &quot;&quot;
+Write-Host &quot;==============================================&quot;
+Write-Host &quot; LAB MISCONFIGURATIONS IN PLACE&quot;
+Write-Host &quot; 1. svc-backup in Backup Operators + SPNs + RC4&quot;
+Write-Host &quot; 2. svc-legacy: preauth disabled&quot;
+Write-Host &quot; 3. WEB01: unconstrained delegation&quot;
+Write-Host &quot; 4. two service accounts: RC4 only&quot;
+Write-Host &quot; 5. helpdesk: GenericAll on IT Support&quot;
+Write-Host &quot; 6. gmsa-files$ in Backup Operators&quot;
+Write-Host &quot; 7. erin in IT Support (alice can add herself)&quot;
+Write-Host &quot;==============================================&quot;
+Write-Host &quot;TAKE A SNAPSHOT NOW: 04-PRE-EXERCISE&quot;
+PS1
+echo &quot;written: 03-misconfig.ps1&quot;
+</code></pre>
+<h2 id="verifying-the-lab">Verifying the lab</h2>
+<pre><code class="language-bash">cat &gt; 04-verify.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Does the lab do what you think it does? Run this after building it.
+DC=&quot;${1:-192.168.56.10}&quot;
+U=&quot;${2:-alice}&quot;; P=&quot;${3:-Summer2019!}&quot;
+case &quot;$(echo &quot;$DC&quot; | cut -d. -f1)&quot; in
+  192.168.56.*|10.10.10.*) ;;
+  *) echo &quot;REFUSED: $DC not in the lab range&quot;; exit 3 ;;
+esac
+NC=$(ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base defaultNamingContext \
+     2&gt;/dev/null | grep -m1 &quot;^defaultNamingContext:&quot; | awk '{print $2}')
+echo &quot;[scope] $DC in range; anonymous unless stated&quot;
+echo
+echo &quot;=== 1. the forest exists and is a single domain ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC}&quot; -s base \
+  &quot;(objectClass=DomainDNS)&quot; dc dnsHostName forestFunctionalityLevel 2&gt;/dev/null \
+  | grep -E &quot;^[a-zA-Z]+:&quot; | sed 's/^/  /'
+echo
+echo &quot;=== 2. THE MISCONFIGURATIONS, each one confirmed ===&quot;
+echo &quot;  1. svc-backup in a privileged group:&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC}&quot; &quot;(cn=svc-backup)&quot; memberOf 2&gt;/dev/null \
+  | grep &quot;^memberOf:&quot; | sed 's/^/       /'
+echo &quot;  2. preauth-disabled accounts (the AS-REP roast list):&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC}&quot; \
+  &quot;(userAccountControl:1.2.840.113556.1.4.803:=1048576)&quot; \
+  sAMAccountName 2&gt;/dev/null | grep &quot;^sAMAccountName:&quot; | sed 's/^/       /'
+echo &quot;  3. delegation:&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC}&quot; &quot;(msDS-AllowedToDelegateTo=*)&quot; \
+  sAMAccountName msDS-AllowedToDelegateTo 2&gt;/dev/null \
+  | grep -E &quot;^(sAMAccountName|msDS):&quot; | sed 's/^/       /'
+echo &quot;  4. RC4-only service accounts:&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC}&quot; &quot;(servicePrincipalName=*)&quot; \
+  sAMAccountName msDS-SupportedEncryptionTypes 2&gt;/dev/null \
+  | paste - - 2&gt;/dev/null | sed 's/^/       /'
+echo &quot;  5. the helpdesk GenericAll (needs a credential to see):&quot;
+ldapsearch -x -D &quot;CN=$U,$NC&quot; -w &quot;$P&quot; -H &quot;ldap://$DC&quot; \
+  -b &quot;CN=IT Support,OU=Groups,$NC&quot; -s base nTSACL 2&gt;/dev/null &gt;/dev/null \
+  &amp;&amp; echo &quot;       (readable - the ACL is queryable)&quot; \
+  || echo &quot;       (cannot read nTSACL; check your tooling)&quot;
+echo &quot;  6. SMB signing on the DC (this is the imp-03 finding):&quot;
+nmap -p 445 --script smb2-security-mode &quot;$DC&quot; 2&gt;/dev/null \
+  | grep -i &quot;signing&quot; | sed 's/^/       /'
+echo
+echo &quot;  VERDICT: if items 1-5 returned data, the lab is ready.&quot;
+echo &quot;  Item 6 should say 'not required' - that IS the finding.&quot;
+EOF
+chmod +x 04-verify.sh
+./04-verify.sh 192.168.56.10 2&gt;&amp;1 | tee 05-verify.txt
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>03-misconfig.ps1</code> creates six deliberate misconfigurations, each<br />
+labelled with the tier note it exercises — and each <strong>realistic</strong>. <code>svc-backup</code> in Backup Operators<br />
+is "the most common high-severity finding in real engagements"; <code>helpdesk</code> with <code>GenericAll</code> is<br />
+<code>bh-02</code>'s five-hop path; the gMSA in a privileged group is uncrackable <em>and irrelevant</em>, because<br />
+you can just read the password with <code>ReadGMSAPassword</code>.</p>
+<p><strong><code>04-verify.sh</code></strong> confirms each one, and the last check deliberately expects the <em>failure</em> —<br />
+SMB signing "not required" <strong>is</strong> the finding.</p>
+<p><strong>Record:</strong> <code>03-misconfig.ps1</code> and <code>05-verify.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does the lab need two domain controllers rather than one?</li>
+<li>What does each server in the topology contribute?</li>
+<li>Why is the dual-homed host the pivot path, and what is on the far side of it?</li>
+<li>Why is a privileged and an unprivileged workstation needed separately?</li>
+<li>Name the six deliberate misconfigurations and which tier note each exercises.</li>
+<li>Why must the lab keep RC4 Kerberos support on the service accounts?</li>
+<li>Why is a gMSA in a privileged group a <em>worse</em> problem than a weak service password?</li>
+<li>What must be true about the workstations' DNS configuration?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Active Directory</strong> → <strong>Lab Environment</strong> → <strong>Virtualisation</strong> →<br />
+<strong>Privilege Escalation (Windows)</strong> → <strong>Kerberoasting</strong>.<br />
+<code>lab-04</code> captures the traffic; <code>cap-01</code> is the plan that uses all of this.</p>

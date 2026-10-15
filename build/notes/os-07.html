@@ -1,0 +1,334 @@
+<h1 id="file-systems">File Systems</h1>
+<h2 id="summary">Summary</h2>
+<p>A filesystem is three layers that are often confused: the <strong>API</strong> (open/read/write/stat), the<br />
+<strong>on-disk format</strong> (how bytes are laid out so they survive a reboot), and the <strong>implementation</strong><br />
+(inodes, directories, allocation, caching).</p>
+<p>Security lives in the seams: symlink races, TOCTOU on path lookups, incorrect permission<br />
+checks, and recovering deleted files.</p>
+<h2 id="the-on-disk-layout">The on-disk layout</h2>
+<pre><code class="language-text">superblock        filesystem metadata: size, counts, free-block pointers
+block 0           unused
+inodes            one per file: mode, uid, size, block pointers, timestamps
+data blocks       file contents
+bitmaps           which inodes and blocks are in use
+</code></pre>
+<p>In xv6 this is ~50 lines in <code>fs.c</code> and you can read the whole thing in an afternoon. That is the<br />
+recommended approach — a real, tiny, complete filesystem.</p>
+<h2 id="inodes">Inodes</h2>
+<p>An inode holds metadata, not the name:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Security relevance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mode</td>
+<td>Permission bits; <code>setuid</code>/<code>setgid</code> live here</td>
+</tr>
+<tr>
+<td>uid / gid</td>
+<td>Owner identity</td>
+</tr>
+<tr>
+<td>nlink</td>
+<td>Link count — 0 means deleted but still open</td>
+</tr>
+<tr>
+<td>size</td>
+<td>Needed for bounds checks</td>
+</tr>
+<tr>
+<td>atime/mtime/ctime</td>
+<td>Forensics; tampering is anti-forensics</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Permissions live in the inode, not the directory entry.</strong> That is why hard links share<br />
+permissions, and why <code>chmod</code> affects every name pointing at the inode.</p>
+<h2 id="directories">Directories</h2>
+<p>A directory is just a file whose entries are <code>(name, inode number)</code>. Consequences:</p>
+<ul>
+<li><strong>No inherent ordering</strong>, no guarantee of uniqueness unless the implementation enforces it</li>
+<li><strong><code>.</code> and <code>..</code> entries</strong> are conventional</li>
+<li>Deletion removes a name; the inode survives while <code>nlink &gt; 0</code> or a process holds it open</li>
+</ul>
+<h2 id="path-resolution">Path resolution</h2>
+<pre><code>/var/log/syslog
+  ↓ resolve &quot;/&quot;      in the root inode's data blocks
+  ↓ lookup &quot;var&quot;     in that directory
+  ↓ lookup &quot;log&quot;     ...
+  ↓ lookup &quot;syslog&quot;
+</code></pre>
+<p>Each step does a <strong>lookup</strong> and returns an inode. This multi-step nature is the source of the<br />
+most important filesystem race:</p>
+<p><strong>TOCTOU (time-of-check to time-of-use):</strong> a path is validated, then opened. Between the two, an<br />
+attacker can replace a component with a symlink.</p>
+<pre><code class="language-c">if (access(&quot;/tmp/upload/ok&quot;, F_OK) == 0) {     // check
+    fopen(&quot;/tmp/upload/ok&quot;, &quot;w&quot;);              // use  &lt;- different state
+}
+</code></pre>
+<p>The fix is to operate on <strong>file descriptors</strong> (<code>openat</code>, <code>O_NOFOLLOW</code>, <code>fstat</code> on the fd) rather<br />
+than paths. This is a Tier 1 privilege escalation path and a Tier 4 web path traversal cousin.</p>
+<h2 id="links">Links</h2>
+<table>
+<thead>
+<tr>
+<th>Link</th>
+<th>Points to</th>
+<th>Survives deletion of the name?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hard</strong> (<code>ln a b</code>)</td>
+<td>The same inode</td>
+<td>Yes, while any name remains</td>
+</tr>
+<tr>
+<td><strong>Symbolic</strong> (<code>ln -s a b</code>)</td>
+<td>A path string</td>
+<td>No — becomes dangling</td>
+</tr>
+</tbody>
+</table>
+<p>A symlink is attacker-controllable text. Applications that chroot but follow symlinks are<br />
+classically escapable, which is why <code>O_NOFOLLOW</code> exists.</p>
+<h2 id="deletion-and-recovery">Deletion and recovery</h2>
+<p><code>rm</code> removes the directory entry. The data blocks become free but are usually <strong>not overwritten</strong>.<br />
+Anything that still holds the inode open keeps reading it.</p>
+<pre><code class="language-bash">lsof +L1        # deleted files still held open by processes
+ls -l /proc/*/fd | grep deleted
+debugfs -R &quot;lsdel&quot; /dev/sda1      # ext inode recovery (lab VM only)
+</code></pre>
+<p>This is the mechanism behind every "I deleted the evidence" failure, and the basis of file<br />
+carving in Tier 6.</p>
+<h2 id="permissions-and-access-control">Permissions and access control</h2>
+<pre><code>-rwxr-xr--   rwx r-x r--
+  │   │   └── others
+  │   └────── group
+  └────────── owner
+</code></pre>
+<p>Beyond the bits: <strong>umask</strong> (what new files get), <strong>ACLs</strong> (per-user exceptions), <strong>capabilities</strong><br />
+(specific authority), <strong>SELinux/AppArmor</strong> (mandatory access control).</p>
+<p>A complete check must read all four. Most "the file is not writable" bugs in a pentest are<br />
+really an ACL or a capability you did not check.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Superblock</strong></td>
+<td>Filesystem-wide metadata</td>
+</tr>
+<tr>
+<td><strong>Inode</strong></td>
+<td>Per-file metadata record</td>
+</tr>
+<tr>
+<td><strong>Block</strong></td>
+<td>Fixed-size storage unit</td>
+</tr>
+<tr>
+<td><strong>Directory</strong></td>
+<td>A file of (name → inode) entries</td>
+</tr>
+<tr>
+<td><strong>Hard link</strong></td>
+<td>Another name for the same inode</td>
+</tr>
+<tr>
+<td><strong>Symlink</strong></td>
+<td>A file containing a path</td>
+</tr>
+<tr>
+<td><strong>TOCTOU</strong></td>
+<td>Check-then-use race on paths</td>
+</tr>
+<tr>
+<td><strong><code>O_NOFOLLOW</code></strong></td>
+<td>Open symlinks as symlinks, do not traverse</td>
+</tr>
+<tr>
+<td><strong><code>openat</code></strong></td>
+<td>Open relative to a directory fd — race-resistant</td>
+</tr>
+<tr>
+<td><strong>umask</strong></td>
+<td>Bits stripped when creating files</td>
+</tr>
+<tr>
+<td><strong>ACL</strong></td>
+<td>Per-user permissions beyond owner/group/other</td>
+</tr>
+<tr>
+<td><strong>Link count</strong></td>
+<td>Names pointing at an inode; 0 = unlinked</td>
+</tr>
+<tr>
+<td><strong>Carving</strong></td>
+<td>Recovering files by signature after deletion</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- read your own filesystem layout ---
+# --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+findmnt
+lsblk -f
+df -Th
+stat /etc/passwd              # inode number, link count, times
+ls -lai /etc | head
+
+# --- links ---
+ln /etc/hosts /tmp/hosts-link &amp;&amp; stat -c '%i %h %n' /etc/hosts /tmp/hosts-link
+rm /tmp/hosts-link
+ln -s /etc/hosts /tmp/symlink &amp;&amp; ls -l /tmp/symlink &amp;&amp; readlink /tmp/symlink
+rm /tmp/symlink
+
+# --- deleted but open ---
+sudo lsof +L1 2&gt;/dev/null | head
+ls -l /proc/*/fd 2&gt;/dev/null | grep -i deleted | head
+
+# --- permissions, all layers ---
+namei -l /etc/shadow          # walk the path, component by component
+getfacl -p /etc/passwd 2&gt;/dev/null
+lsattr /etc/passwd
+sudo sysctl fs.suid_dumpable
+
+# --- why was I inotify'd? ---
+sudo inotifywait -m /etc 2&gt;/dev/null &amp;
+touch /etc/aegis-test &amp;&amp; sleep 1 &amp;&amp; rm -f /etc/aegis-test
+jobs
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> demonstrate the three layers and produce a real TOCTOU race.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-07 &amp;&amp; cd ~/aegis/labs/os-07
+
+# --- 1. the layout ---
+{
+  echo &quot;=== mounts ===&quot;; findmnt -T / -o TARGET,SOURCE,FSTYPE,OPTIONS | head -3
+  echo; echo &quot;=== /etc/passwd stat ===&quot;; stat /etc/passwd
+  echo; echo &quot;=== first 5 inodes in /etc ===&quot;; ls -lai /etc | head -6
+  echo; echo &quot;=== why can't I read /etc/shadow? ===&quot;
+  namei -l /etc/shadow
+  getfacl -p /etc/shadow 2&gt;/dev/null | head -6
+} &gt; 01-layout.txt; cat 01-layout.txt
+
+# --- 2. hard link vs symlink ---
+{
+  echo &quot;=== hard link: same inode, survives deleting one name ===&quot;
+  ln /etc/hosts hard-link
+  stat -c '  inode=%i links=%h name=%n' /etc/hosts hard-link
+  rm hard-link; echo &quot;  (hard-link removed; /etc/hosts unaffected)&quot;
+
+  echo
+  echo &quot;=== symlink: stores a PATH, breaks when the target moves ===&quot;
+  ln -s /etc/hosts soft-link
+  stat -c '  inode=%i links=%h name=%n' soft-link
+  readlink soft-link
+  rm soft-link
+} 2&gt;&amp;1 | tee 02-links.txt
+
+# --- 3. THE TOCTOU RACE, written out ---
+cat &gt; race.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;fcntl.h&gt;
+
+int main(int argc, char **argv) {
+    const char *path = argv[1] ? argv[1] : &quot;/tmp/aegis-race/target&quot;;
+
+    /* CHECK: does the file look safe? */
+    if (access(path, F_OK) != 0) { printf(&quot;check: not found\n&quot;); return 1; }
+    printf(&quot;check: %s exists\n&quot;, path);
+
+    /* USE: a different syscall, a different moment, different result */
+    FILE *f = fopen(path, &quot;r&quot;);
+    if (!f) { printf(&quot;use: open failed (%s) - the state changed between check and use\n&quot;,
+                     strerror(errno)); return 2; }
+    printf(&quot;use: opened successfully\n&quot;);
+    fclose(f);
+    return 0;
+}
+EOF
+sed -i '5a #include &lt;string.h&gt;\n#include &lt;errno.h&gt;' race.c
+gcc -o race race.c
+mkdir -p /tmp/aegis-race &amp;&amp; echo &quot;legitimate content&quot; &gt; /tmp/aegis-race/target
+./race /tmp/aegis-race/target
+
+# the race: swap a regular file for a symlink between check and use
+mkdir -p /tmp/aegis-race-secret &amp;&amp; echo &quot;secret&quot; &gt; /tmp/aegis-race-secret/target
+( sleep 0.02; rm -f /tmp/aegis-race/target; ln -s /tmp/aegis-race-secret/target /tmp/aegis-race/target ) &amp;
+for i in $(seq 1 200); do ./race /tmp/aegis-race/target &gt;/dev/null 2&gt;&amp;1; done
+wait
+echo &quot;200 attempts made; the race window is real even if you did not win it.&quot;
+echo &quot;The fix is not 'retry faster' - it is openat() + O_NOFOLLOW on a directory fd.&quot;
+rm -rf /tmp/aegis-race /tmp/aegis-race-secret
+
+# --- 4. the correct pattern ---
+cat &gt; race-safe.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;string.h&gt;
+int main(int argc, char **argv) {
+    int dir = open(argv[1], O_RDONLY | O_DIRECTORY);
+    if (dir &lt; 0) { perror(&quot;open dir&quot;); return 1; }
+    /* operate relative to the fd, and refuse to follow symlinks */
+    int fd = openat(dir, &quot;target&quot;, O_RDONLY | O_NOFOLLOW);
+    if (fd &lt; 0) { printf(&quot;refused: %s\n&quot;, strerror(errno)); return 2; }
+    char buf[128]; ssize_t n = read(fd, buf, sizeof(buf)-1);
+    if (n &gt; 0) { buf[n] = 0; printf(&quot;read: %s&quot;, buf); }
+    close(fd); close(dir);
+    return 0;
+}
+EOF
+gcc -o race-safe race-safe.c
+mkdir -p /tmp/aegis-safe &amp;&amp; echo &quot;legitimate&quot; &gt; /tmp/aegis-safe/target
+./race-safe /tmp/aegis-safe
+rm -f /tmp/aegis-safe/target &amp;&amp; ln -s /etc/passwd /tmp/aegis-safe/target
+./race-safe /tmp/aegis-safe        # O_NOFOLLOW blocks the swap
+rm -rf /tmp/aegis-safe
+
+# --- 5. deleted but still open ---
+sudo bash -c 'rm -f /var/log/dpkg.log' 2&gt;/dev/null
+echo &quot;held-open deleted files on this box:&quot;
+sudo lsof +L1 2&gt;/dev/null | head -5
+echo &quot;(a process holding an fd keeps reading deleted data - this is how 'deleted' files are recovered)&quot;
+</code></pre>
+<p><strong>Step 3 versus step 4 is the whole lesson.</strong> Retrying is not a fix; <code>openat</code> + <code>O_NOFOLLOW</code> is.<br />
+You will write this exact pattern again in Tier 4 (path traversal) and Tier 6 (evidence).</p>
+<p><strong>Record:</strong> <code>race.c</code> and <code>race-safe.c</code> side by side. That contrast is the whole lecture.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the three layers of a filesystem, and which is security-relevant?</li>
+<li>Where do file permissions live: the directory entry or the inode?</li>
+<li>What is TOCTOU, and why does it exist in path resolution?</li>
+<li>How do hard links and symlinks differ under deletion?</li>
+<li>Why is <code>rm</code> usually insufficient to destroy evidence?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Filesystem Tree</strong> → <strong>Inode</strong> → <strong>Symlink</strong> → <strong>Race Condition (TOCTOU)</strong> →<br />
+<strong>Temp File Attacks</strong> → <strong>File Carving</strong>.</p>

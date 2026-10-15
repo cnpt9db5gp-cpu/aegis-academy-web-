@@ -1,0 +1,361 @@
+<h1 id="file-carving-and-hidden-data">File Carving and Hidden Data</h1>
+<h2 id="summary">Summary</h2>
+<p>Every file system loses data. A file that is deleted leaves its content on the disk until<br />
+overwritten. The discipline is knowing <strong>where data can hide</strong> — in slack space, in unallocated<br />
+clusters, in alternate data streams, inside other files — and how to extract it without corrupting<br />
+the evidence.</p>
+<p>The framing: <strong>the file system's view of a file is not the only view of<br />
+its bytes.</strong> NTFS has slack, streams, and resident data; a PNG can<br />
+contain an entire ZIP; an email client stores attachments in its own<br />
+format.</p>
+<blockquote>
+<p>Companion to <code>for-02</code> (timeline) and <code>for-01</code> (get the image first).<br />
+All work is on a read-only working copy.</p>
+</blockquote>
+<h2 id="where-data-hides">Where data hides</h2>
+<pre><code class="language-text">  ON THE DISK, UNALLOCATED
+    SLACK SPACE (NTFS)
+      the last cluster of a file. A 3 KB file in a 4 KB cluster has
+      1 KB of slack, which contains whatever was there before. The
+      file system never touches it. Deleted data lands here.
+
+    UNALLOCATED CLUSTERS
+      clusters freed by a deletion, before anything reused them.
+      The richest source of deleted files, and the first thing
+      overwritten by normal use.
+
+    THE $MFT's RESIDENT DATA
+      files under ~700 bytes are stored inside their own $MFT entry
+      rather than in a cluster. A deleted resident file's content is
+      still in the $MFT until the entry is reused.
+
+  INSIDE OTHER FILES (carving)
+    APPENDED   a JPEG with a ZIP appended past the EOI marker
+    PREPENDED   a ZIP with a GIF before the PK signature
+    EMBEDDED    an Office document with an OLE object inside it
+    A PNG WITH A ZIP INSIDE, which is how many polyglots work
+
+  IN METADATA
+    ALTERNATE DATA STREAMS (NTFS)
+      every file has a $DATA stream plus named streams:
+        file.txt:hidden              an arbitrary stream
+        file.txt:Zone.Identifier      the MOTW
+      ADS are invisible in Explorer, invisible to `cat`, and they
+      survive copying with some tools and not others.
+
+    THE MFT ITSELF
+      $MFT is a file. Its size is in its own $MFT entry. Parsing it
+      with a full parser beats grepping.
+
+    THE USN JOURNAL
+      $UsnJrnl:$J is a change journal, tens of MB, recording every
+      file create/rename/delete. It is evidence in its own right.
+
+  INSIDE THE OS'S OWN DATABASES
+    the $MFT, $LogFile, $Secure, $UsnJrnl
+    Event logs, Prefetch, SRUM/DATABASE, Amcache, ShimCache
+    browser SQLite databases, the jump lists, LNK files
+    Recycle Bin, $Recycle.Bin's own $I/$R pairs
+    hiberfil.sys, pagefile.sys, swapfile.sys
+</code></pre>
+<h2 id="the-techniques">The techniques</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/for-04 &amp;&amp; cd ~/aegis/labs/for-04
+mkdir -p work/{carved,streams,db,exports}
+
+cat &gt; 00-procedure.md &lt;&lt;'EOF'
+# Procedure
+
+```bash
+# 1. NEVER touch the image. Analyse a working copy.
+cp ../cases/AEGIS-2026-001/images/EV-001.dd work/EV-001-work.dd
+chmod 0444 ../cases/AEGIS-2026-001/images/EV-001.dd   # the original
+#    work/EV-001-work.dd stays writable, because some tools insist
+
+# 2. Read the layout FIRST, or the offsets are meaningless.
+mmls work/EV-001-work.dd                    # partitions
+fsstat work/EV-001-work.dd                 # file system details
+# -&gt; note: offset of the partition, cluster size, block size
+#    sleuthkit tools accept -o &lt;offset-in-bytes&gt;
+
+# 3. Extract the partition (blkls) so you are not re-deriving the
+#    offset on every command.
+blkls -o $OFFSET work/EV-001-work.dd &gt; work/partition.dd
+
+# 4. Everything below operates on work/partition.dd
+```
+
+```text
+  THE RULE: icat over mounting, mkfs copy over dd, and a working copy
+  over the original. Every one of those is a habit that has saved an
+  investigation.
+```
+EOF
+cat &gt; 00-procedure.md
+
+# --- 1. slack and unallocated ---
+cat &gt; 01-slack.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Slack and unallocated space. Read-only against a working copy.
+IMG=&quot;${1:?usage: ./01-slack.sh &lt;working-copy.dd&gt; [offset-bytes]}&quot;
+OFF=&quot;${2:-0}&quot;
+echo &quot;=== the file system, which tells you the slack size ===&quot;
+fsstat -o &quot;$OFF&quot; &quot;$IMG&quot; 2&gt;&amp;1 | grep -iE &quot;cluster size|block size|sector size&quot; | sed 's/^/  /'
+echo &quot;  ^ slack is the difference between cluster size and file size.&quot;
+echo &quot;    A 4 KB cluster and a 3 KB file leaves 1 KB of slack, which the&quot;
+echo &quot;    file system never touches.&quot;
+echo
+echo &quot;=== the unallocated space, as raw bytes to a file ===&quot;
+blkls -o &quot;$OFF&quot; &quot;$IMG&quot; &gt; work/unalloc.bin 2&gt;/dev/null \
+  &amp;&amp; ls -la work/unalloc.bin | sed 's/^/  /'
+echo &quot;  (blkls writes unallocated clusters. On a real disk this is GBs.)&quot;
+echo
+echo &quot;=== what is IN there? (carving, covered in 02) ===&quot;
+echo &quot;  bulk_extractor -o work/carved -S 8KB work/unalloc.bin&quot;
+echo
+echo &quot;=== the MFT's own resident data (small deleted files) ===&quot;
+icat -o &quot;$OFF&quot; &quot;$IMG&quot; 0 2&gt;/dev/null | head -c 1024 | xxd | head -6 | sed 's/^/  /'
+echo &quot;  ^ the MFT's first 1024 bytes. Resident file content lives here.&quot;
+EOF
+chmod +x 01-slack.sh
+
+# --- 2. carving ---
+cat &gt; 02-carve.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Carving: find files by their magic bytes, in unallocated space.
+# The tools do this well; the KNOWLEDGE is knowing what each misses.
+IMG=&quot;${1:?usage: ./02-carve.sh &lt;unalloc.bin or working-copy.dd&gt;}&quot;
+mkdir -p work/carved
+
+echo &quot;=== 1. bulk_extractor - feature-based, finds text too ===&quot;
+echo &quot;  (installed on this box)&quot;
+bulk_extractor -o work/carved -S 8KB &quot;$IMG&quot; 2&gt;&amp;1 | tail -5 | sed 's/^/  /'
+echo
+echo &quot;  WHAT IT PRODUCES:&quot;
+echo &quot;    carved/    files found by signature&quot;
+echo &quot;    feature_files/  TEXT: emails, URLs, passwords, credit-card-like&quot;
+echo &quot;    telephone-numbers/  cookie-jar-like strings&quot;
+echo &quot;    wordlist/  a wordlist built from the text it found&quot;
+echo &quot;  The FEATURE FILES are the point. A carving tool that only&quot;
+echo &quot;  finds JPEGs misses an entire C2 URL in a .txt.&quot;
+echo
+echo &quot;=== 2. scalpel / foremost - signature-only, fast ===&quot;
+echo &quot;  (scalpel is installed; foremost is not)&quot;
+scalpel -c scalpel.cfg &quot;$IMG&quot; -o work/carved-scalpel 2&gt;&amp;1 | tail -5 | sed 's/^/  /'
+echo
+echo &quot;=== 3. binwalk - EMBEDDED files inside other files ===&quot;
+echo &quot;  (installed)&quot;
+echo &quot;  binwalk work/carved/report.doc    # what is inside this file&quot;
+echo &quot;  binwalk -e work/carved/firmware.bin  # EXTRACT the embedded files&quot;
+echo
+echo &quot;  binwalk is for EMBEDDING, not carving. A firmware image with a&quot;
+echo &quot;  squashfs and a JFFS2 inside it, or a ZIP with a PDF inside,&quot;
+echo &quot;  is binwalk's job.&quot;
+echo
+echo &quot;=== 4. what every carver misses ===&quot;
+echo &quot;    - files with a damaged header (a JPEG with a broken SOI)&quot;
+echo &quot;    - files split across a fragment (carving works per-run)&quot;
+echo &quot;    - data inside a file's slack, not at a file boundary&quot;
+echo &quot;    - encrypted or compressed content that happens to contain&quot;
+echo &quot;      a signature at the wrong offset&quot;
+echo &quot;  A carver finds CANDIDATES. Confirm with 'file' and with a&quot;
+echo &quot;  viewer before you call something a JPEG.&quot;
+echo
+echo &quot;=== 5. confirm the carved output ===&quot;
+file work/carved/* 2&gt;/dev/null | head -15 | sed 's/^/  /'
+EOF
+chmod +x 02-carve.sh
+
+# --- 3. ADS, and the other hiding places ---
+cat &gt; 03-hideouts.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# The places data hides that are not &quot;deleted files&quot;.
+IMG=&quot;${1:?usage: ./03-hideouts.sh &lt;working-copy.dd&gt; [offset]}&quot;
+OFF=&quot;${2:-0}&quot;
+echo &quot;=== ALTERNATE DATA STREAMS ===&quot;
+echo &quot;  NTFS gives every file a \$DATA stream plus named streams.&quot;
+echo &quot;  Explorer will not show them. cat will not read them.&quot;
+echo &quot;  They are the classic hiding place, and they are STILL there.&quot;
+echo
+echo &quot;  enumerate with sleuthkit (ls -l shows *:name for streams):&quot;
+fls -o &quot;$OFF&quot; -r -p -l &quot;$IMG&quot; 2&gt;/dev/null | grep -E '\*:' | sed 's/^/  /' | head -20
+echo
+echo &quot;  read one:&quot;
+echo &quot;    icat -o $OFF '$IMG' &lt;inode&gt; 'hidden' &gt; out.bin&quot;
+echo
+echo &quot;  Zone.Identifier is the MOTW. Its presence means the file came&quot;
+echo &quot;  from the internet. Its ABSENCE on a downloaded file is itself&quot;
+echo &quot;  a finding (it was stripped, which requires a tool).&quot;
+echo
+echo &quot;=== $MFT, $LogFile, \$Secure, \$UsnJrnl ===&quot;
+for f in '$MFT' '$LogFile' '$Secure' '$UsnJrnl:\$J' '$Recycle.Bin'; do
+  inum=$(fls -o &quot;$OFF&quot; -r -p &quot;$IMG&quot; 2&gt;/dev/null | grep -F &quot;$f&quot; | head -1 \
+         | sed -E 's/.*\(([0-9]+)\).*/\1/')
+  if [ -n &quot;$inum&quot; ]; then
+    sz=$(icat -o &quot;$OFF&quot; &quot;$IMG&quot; &quot;$inum&quot; 2&gt;/dev/null | wc -c)
+    printf &quot;  %-18s inode %-8s %s bytes\n&quot; &quot;$f&quot; &quot;$inum&quot; &quot;$sz&quot;
+  fi
+done
+echo &quot;  ^ these are FILES in the file system. They are large, they&quot;
+echo &quot;    contain structured history, and they survive deletion of&quot;
+echo &quot;    the things they describe.&quot;
+echo
+echo &quot;=== THE RECYCLE BIN ===&quot;
+echo &quot;  \$Recycle.Bin\\S-1-5-21-...\\\$I0000001.TXT is the METADATA&quot;
+echo &quot;  (original path, size, deletion time, in binary)&quot;
+echo &quot;  \$Recycle.Bin\\S-1-5-21-...\\\$R0000001.TXT is the CONTENT&quot;
+echo &quot;  Delete with Shift means the bytes are still there.&quot;
+echo
+echo &quot;=== THE JUMP LISTS ===&quot;
+echo &quot;  %APPDATA%\\Microsoft\\Windows\\Recent\\AutomaticDestinations&quot;
+echo &quot;  LNK files that record what was opened FROM Explorer, including&quot;
+echo &quot;  files that were opened and then deleted.&quot;
+echo &quot;  These are the best 'what did this user do' source on disk.&quot;
+echo
+echo &quot;=== THE OS DATABASES ===&quot;
+for d in 'Windows/System32/winevt/Logs' \
+         'Windows/Prefetch' \
+         'Windows/AppCompat/Programs/Amcache.hve' \
+         'Windows/AppCompat/Programs/ShimCache' \
+         'Windows/System32/config/SYSTEM' \
+         'Windows/System32/config/SOFTWARE' \
+         'Windows/System32/config/SAM' \
+         'Windows/System32/windowscache' \
+         'Windows/System32/config/SOFTWARE' \
+         'Users' ; do
+  inum=$(fls -o &quot;$OFF&quot; -r -p &quot;$IMG&quot; 2&gt;/dev/null | grep -i -F &quot;$d&quot; | head -1 \
+         | sed -E 's/.*\(([0-9]+)\).*/\1/')
+  [ -n &quot;$inum&quot; ] &amp;&amp; echo &quot;  present: $d (inode $inum)&quot;
+done
+echo
+echo &quot;  Every one of those is parsed by a different tool. The EXIF in&quot;
+echo &quot;  a JPEG, the SQLite in a browser history, the EVT in the event&quot;
+echo &quot;  logs: each needs its own parser, and no generic tool does all.&quot;
+EOF
+chmod +x 03-hideouts.sh
+
+# --- 4. offline: ADS, demonstrated ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-ads.txt
+print(&quot;  === alternate data streams, and why they are a real hiding place ===\n&quot;)
+print(&quot;  EVERY NTFS FILE HAS AT LEAST ONE STREAM:&quot;)
+print()
+print(&quot;    report.docx:\$DATA           the content you see&quot;)
+print(&quot;    report.docx:Zone.Identifier  where it came from (the MOTW)&quot;)
+print(&quot;    report.docx:anything         arbitrary, up to the volume's limit&quot;)
+print()
+print(&quot;  WHY THEY MATTER:&quot;)
+print()
+print(&quot;    1. Explorer DOES NOT SHOW THEM. A stream named 'hidden' is&quot;)
+print(&quot;       invisible in the file properties, in a directory listing,&quot;)
+print(&quot;       and to `cat file`.&quot;)
+print()
+print(&quot;    2. Size tools report only \$DATA. A 400 KB file with 40 MB in&quot;)
+print(&quot;       an ADS reports as 400 KB.&quot;)
+print()
+print(&quot;    3. They survive certain copies. Copying with Explorer or&quot;)
+print(&quot;       robocopy preserves them; some tools and some archive&quot;)
+print(&quot;       formats do not. So a file that 'lost' its stream on&quot;)
+print(&quot;       transfer is evidence it WAS transferred.&quot;)
+print()
+print(&quot;    4. THE MOTW IS THE USEFUL ONE EVEN WHEN HARMLESS:&quot;)
+print(&quot;       Zone.Identifier holds the download URL.&quot;)
+print(&quot;         Contents: \&quot;[ZoneTransfer]\&quot;&quot;)
+print(&quot;         ZoneId=3&quot;)
+print(&quot;         HostUrl=https://cdn.example.com/payload.exe&quot;)
+print(&quot;       ZoneId 3 = internet. ZoneId 4 = restricted.&quot;)
+print(&quot;       A downloaded executable with ZoneId=3, next to a file&quot;)
+print(&quot;       with no Zone.Identifier at all, means someone stripped it.&quot;)
+print()
+print(&quot;  === THE DETECTION ===&quot;)
+print()
+print(&quot;    enumerate:  icat &lt;image&gt; &lt;inode&gt; 'Zone.Identifier'&quot;)
+print(&quot;    or:         getfattr -d -m - file (on a live Linux mount)&quot;)
+print(&quot;    or:         fls -l &lt;image&gt; | grep ':'&quot;)
+print()
+print(&quot;  === THE MOTW AS A FINDING ===&quot;)
+print()
+print(&quot;  NOT: 'there are ADS on the system.'&quot;)
+print()
+print(&quot;  YES: 'Executables in C:\\Users\\&lt;user&gt;\\Downloads lack the&quot;)
+print(&quot;       Zone.Identifier alternate data stream that Windows&quot;)
+print(&quot;       attaches to every downloaded file. Every other downloaded&quot;)
+print(&quot;       executable in the same directory has it. The streams&quot;)
+print(&quot;       were removed, which requires a tool and intent.'&quot;)
+print()
+print(&quot;  That is a finding. The first version is trivia.&quot;)
+PY
+cat 04-ads.txt
+
+# --- 5. the confirmation step ---
+cat &gt; 05-confirm.md &lt;&lt;'EOF'
+# Confirming a carve
+
+</code></pre>
+<p>A carver produces CANDIDATES. A candidate is not a finding.</p>
+<p>THE CONFIRMATION CHAIN, in order:<br />
+    1. file work/carved/xyz.1<br />
+       "the signature matched" - that is all you know so far</p>
+<pre><code>2. exiftool work/carved/xyz.1
+   does the internal metadata agree with the extension?
+   a "JPEG" whose Exif says a different make and model is either
+   a mis-named file or something with a header prepended
+
+3. open it in a viewer (or: strings | head)
+   does it render? is there a JPEG comment marker? do the
+   dimensions in the header match what renders?
+
+4. check the offset
+   binwalk shows where the signature was found. A JPEG at
+   offset 0 is a JPEG. A JPEG at offset 2,000,000 in a .doc is
+   an EMBEDDED object, and that is a different finding with a
+   different meaning.
+
+5. hash it, and record the offset it came from
+   "carved from unallocated space at offset 0x4A2F000" is a
+   reproducible statement. "found a JPEG somewhere" is not.
+</code></pre>
+<pre><code>
+```bash
+# the confirmation, as commands
+file work/carved/xyz.1
+exiftool work/carved/xyz.1 | head -20
+binwalk work/carved/xyz.1
+sha256sum work/carved/xyz.1
+echo &quot;offset: from the bulk_extractor/scalpel log, or binwalk's output&quot;
+</code></pre>
+<pre><code class="language-text">  AND THE HONEST FRAMING WHEN YOU CANNOT CONFIRM:
+    &quot;A 2.3 MB region at unallocated offset 0x4A2F000 begins with a
+     valid JPEG SOI marker and contains a complete JFIF APP0 segment,
+     but the image data is truncated. This is consistent with a
+     partially-overwritten or partially-recovered JPEG. It is
+     recorded as an artefact of unknown origin rather than as a
+     recovered file.&quot;
+
+  That sentence is longer than &quot;found a broken jpg&quot; and infinitely
+  more useful to whoever reads the report.
+</code></pre>
+<p>EOF<br />
+cat 05-confirm.md<br />
+```</p>
+<p><strong>Step 4 is the deliverable</strong>: the alternate data stream demonstration, and the reframing at the<br />
+bottom. <em>"There are ADS on the system"</em> is trivia. <em>"Executables in Downloads lack the<br />
+<code>Zone.Identifier</code> stream that every other downloaded file has — the streams were removed, which<br />
+requires a tool and intent"</em> is a finding. Same evidence, different sentence.</p>
+<p><strong><code>05-confirm.md</code></strong> is the discipline note: a carver produces candidates, and the honest<br />
+framing when you <em>can't</em> confirm one is a specific sentence rather than "found a broken jpg".</p>
+<p><strong>Record:</strong> <code>04-ads.txt</code> and <code>05-confirm.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is NTFS slack space, and why does deleted data land there?</li>
+<li>Where do resident files (&lt;700 bytes) live, and why is that interesting?</li>
+<li>Give six places data hides that are not deleted files.</li>
+<li>What does an alternate data stream give you that the file's size does not?</li>
+<li>What is <code>Zone.Identifier</code>, what does <code>ZoneId=3</code> mean, and what is its absence a finding?</li>
+<li>Why does <code>bulk_extractor</code> find things <code>foremost</code> does not?</li>
+<li>What is binwalk for, and how does it differ from a carver?</li>
+<li>Why is "found a JPEG somewhere" not a finding, and what makes one?</li>
+<li>Why do <code>$MFT</code> and <code>$UsnJrnl:$J</code> survive deletion of the things they describe?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>File Forensics</strong> → <strong>Slack Space</strong> → <strong>Alternate Data Streams</strong> →<br />
+<strong>Timeline Analysis</strong> → <strong>NTFS</strong>.<br />
+<code>for-05</code> takes a carved file and works out what it is.</p>

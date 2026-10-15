@@ -1,0 +1,451 @@
+<h1 id="post-exploitation-and-privilege-escalation">Post-Exploitation and Privilege Escalation</h1>
+<h2 id="summary">Summary</h2>
+<p>Post-exploitation answers a single question: <strong>what does this access actually give me?</strong> A shell<br />
+is a capability. A finding is an impact. This lecture is the translation step, and it is where<br />
+most of the value in a pentest report is produced.</p>
+<p>The discipline is restraint. The instinct after gaining access is to go<br />
+further; the professional behaviour is to go <em>exactly</em> far enough to name the<br />
+impact, and then stop.</p>
+<blockquote>
+<p>Companion to <code>cs161-05</code> (privilege separation, the design side). This note<br />
+is the offensive side, applied to a live Linux host you own.</p>
+</blockquote>
+<h2 id="the-post-exploitation-loop">The post-exploitation loop</h2>
+<pre><code class="language-text">  1. ORIENT        who am I, where am I, what is this box?
+  2. LOCALISE      enumerate users, groups, sudo rights, services
+  3. EXPLOIT       escalate from current to root, minimally
+  4. IMPACT        what does root on this box mean for the business?
+  5. RESET         note what you changed, and change it back
+</code></pre>
+<p>Step 5 is the one nobody teaches and the one that saves you a call.</p>
+<h2 id="linux-enumeration-the-questions-in-order">Linux enumeration: the questions, in order</h2>
+<pre><code class="language-bash"># --- 1. ORIENT ---
+whoami; id; hostname; hostname -I
+uname -a; cat /etc/os-release
+pwd; echo $SHELL; echo $PATH
+ps -ef --forest | head -30
+ss -tulnp
+last | head -5                 # who has been on this box
+
+# --- 2. LOCALISE: what is this user's authority? ---
+sudo -l                                     # THE most important command
+cat /etc/sudoers /etc/sudoers.d/* 2&gt;/dev/null
+id; groups
+ls -la ~ ; ls -la ~/                        # readable SSH keys
+cat ~/.ssh/id_rsa ~/.ssh/authorized_keys 2&gt;/dev/null   # do not exfiltrate
+
+# --- 3. LOCALISE: what does the host itself expose? ---
+ls -l /etc/passwd; awk -F: '$3==0{print &quot;UID 0:&quot;, $1}' /etc/passwd   # root accounts
+find / -perm -4000 -type f 2&gt;/dev/null     # SUID binaries
+find / -perm -2000 -type f 2&gt;/dev/null     # SGID binaries
+getcap -r / 2&gt;/dev/null                     # file capabilities
+mount | grep -E &quot;nfs|cifs&quot;                  # mounted remote filesystems
+cat /etc/crontab; ls -la /etc/cron*        # scheduled tasks
+systemctl list-timers --no-pager 2&gt;/dev/null
+docker ps 2&gt;/dev/null; ls -la /.dockerenv   # am I in a container?
+
+# --- 4. what would make this a FINDING, not a curiosity? ---
+# A readable shadow file, an exposed key, a writable service file, a
+# cron job running as root, an NFS mount with no_root_squash.
+</code></pre>
+<h2 id="sudo-l-and-why-it-is-the-whole-game"><code>sudo -l</code>, and why it is the whole game</h2>
+<pre><code class="language-text">  (ALL) NOPASSWD: ALL           -&gt; instant root. Report it. Done.
+  (root) NOPASSWD: /usr/bin/vi -&gt; run `sudo vi /etc/shadow`, `!sh` from vi
+  (ALL) NOPASSWD: /usr/bin/find-&gt; `sudo find . -exec /bin/sh \; -quit`
+  (ALL) NOPASSWD: /var/backups -&gt; read/write as root; edit a backup
+  (dev) NOPASSWD: /opt/...    -&gt; writable path, escalate via the service
+</code></pre>
+<p><strong>Interpretation matters more than the command.</strong> <code>sudo -l</code> showing a<br />
+NOPASSWD rule for <code>vi</code> is a Critical finding whose <em>proof</em> is a one-line<br />
+escalation, not a whole chain. Knowing which NOPASSWD binaries are<br />
+"escape hatches" is the entire skill.</p>
+<pre><code class="language-bash"># The classic GTFOBins pattern, demonstrated on a deliberately permissive rule
+sudo -l 2&gt;/dev/null | sed 's/^/  /'
+# If output contains NOPASSWD for any of: vi vim less more nano awk perl
+# python ruby tar find docker systemctl env, note it. Those are escapes.
+</code></pre>
+<h2 id="suid-correctly-understood">SUID, correctly understood</h2>
+<pre><code class="language-text">  An SUID binary runs with the privileges of its OWNER.
+  If it is owned by root, the caller becomes root for its duration.
+
+  Therefore: any SUID binary that
+    - executes another program (find, env, tar, awk), or
+    - loads a library from a writable path, or
+    - inherits an environment variable that changes behaviour
+  is a privilege escalation primitive.
+
+  The check that matters:
+    1. find SUID files                       -&gt; who owns it?
+    2. is it owned by root?                  -&gt; yes, so it is a candidate
+    3. can it be made to execute my input?   -&gt; yes, so it is a finding
+    4. is there a modern patch?              -&gt; if yes, report + fix path
+</code></pre>
+<p>Not every SUID binary is exploitable. Modern distro SUID sets are<br />
+deliberately minimal. But a <em>custom</em> SUID binary written by an application<br />
+team is almost always exploitable, and that is where you look.</p>
+<h2 id="kernel-exploitation-the-last-resort">Kernel exploitation: the last resort</h2>
+<pre><code class="language-text">  KERNEL EXPLOIT REQUIRES:
+    1. a specific vulnerable kernel version
+    2. matching exploit source for that version
+    3. matching C compiler / headers / offset tools
+    4. knowledge of protections in play (SMEP, SMAP, KASLR, hardened usercopy)
+    5. frequently, offsets for that exact build
+
+  ON A MODERN SYSTEM: expect this to fail. Most hardened kernels (Ubuntu,
+  Debian, Kali's own) patch the local privesc chains continuously.
+
+  THEREFORE the professional order is:
+    1. sudo misconfiguration        -&gt; almost always succeeds
+    2. SUID / capability misconfig  -&gt; usually succeeds
+    3. writable service / cron file -&gt; usually succeeds
+    4. credential in a readable file-&gt; common in real engagements
+    5. kernel exploit               -&gt; a report item, not a plan
+
+  A pentest that escalates via kernel exploit when a sudo rule was
+  available has wasted the client's time and yours.
+</code></pre>
+<h2 id="writing-back-your-changes">Writing back your changes</h2>
+<pre><code class="language-text">  THINGS THAT PERSIST AFTER A SHELL:
+    - files you wrote                       -&gt; remove
+    - history entries                       -&gt; clear, and say so
+    - cron jobs / at jobs you created       -&gt; remove
+    - SSH keys you added to authorized_keys -&gt; remove
+    - users you created                     -&gt; remove
+    - systemd units or services you added   -&gt; stop, disable, remove
+    - binaries you replaced                 -&gt; restore from package
+
+  THINGS THAT DO NOT PERSIST (but you must confirm):
+    - running processes you started
+    - open sockets you opened
+    - kernel keyrings you touched
+
+  RECORD IT IN THE DIARY:
+    &quot;14:02 created /tmp/poc, executed as root, removed at 14:09.
+     14:02 added a key for testing, removed at 14:05.&quot;
+  This is not optional. It is the difference between a clean engagement
+  and a client having to reimage a server.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Post-exploitation</strong></td>
+<td>Determining impact of obtained access</td>
+</tr>
+<tr>
+<td><strong>Privilege escalation</strong></td>
+<td>Gaining higher authority</td>
+</tr>
+<tr>
+<td><strong>Vertical escalation</strong></td>
+<td>Low user to root/Admin</td>
+</tr>
+<tr>
+<td><strong>Horizontal escalation</strong></td>
+<td>User A to user B's resources</td>
+</tr>
+<tr>
+<td><strong>SUID</strong></td>
+<td>Execute with the file owner's privileges</td>
+</tr>
+<tr>
+<td><strong>SGID</strong></td>
+<td>Execute / inherit with the group</td>
+</tr>
+<tr>
+<td><strong>File capability</strong></td>
+<td>Fine-grained privileges without SUID root</td>
+</tr>
+<tr>
+<td><strong><code>sudo -l</code></strong></td>
+<td>Enumerate permitted sudo rights</td>
+</tr>
+<tr>
+<td><strong>GTFOBins</strong></td>
+<td>A catalogue of binaries usable for privilege escalation</td>
+</tr>
+<tr>
+<td><strong>no_root_squash</strong></td>
+<td>NFS option that maps root to root — critical</td>
+</tr>
+<tr>
+<td><strong>Container escape</strong></td>
+<td>From a container to the host</td>
+</tr>
+<tr>
+<td><strong>Kernel exploit</strong></td>
+<td>Privilege escalation via a kernel vulnerability</td>
+</tr>
+<tr>
+<td><strong>CVE</strong></td>
+<td>Common Vulnerabilities and Exposures identifier</td>
+</tr>
+<tr>
+<td><strong>Shell history</strong></td>
+<td>Persistent record of commands run</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/tcm-05 &amp;&amp; cd ~/aegis/labs/tcm-05
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. the orient script, written once and reused everywhere ---
+cat &gt; orient.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Everything you should know about a box, in the first 30 seconds.
+echo &quot;=== IDENTITY ===&quot;
+id; whoami; hostname; hostname -I 2&gt;/dev/null
+echo; echo &quot;=== SYSTEM ===&quot;
+uname -a; grep PRETTY /etc/os-release 2&gt;/dev/null
+uptime
+echo; echo &quot;=== NETWORK ===&quot;
+ip -br a; ip route | head -5
+ss -tulnp 2&gt;/dev/null | head -15
+echo; echo &quot;=== PROCESSES ===&quot;
+ps -ef --forest 2&gt;/dev/null | head -20
+echo; echo &quot;=== CONTAINER? ===&quot;
+[ -f /.dockerenv ] &amp;&amp; echo &quot;  /.dockerenv present - INSIDE A CONTAINER&quot; || echo &quot;  not in a container&quot;
+cat /proc/1/cgroup 2&gt;/dev/null | head -3
+echo; echo &quot;=== AUTHORITY ===&quot;
+sudo -n -l 2&gt;/dev/null &amp;&amp; echo &quot;  ^ passwordless sudo available&quot;
+groups
+echo; echo &quot;=== WHAT IS READABLE HERE ===&quot;
+ls -la ~ 2&gt;/dev/null | head -10
+EOF
+chmod +x orient.sh
+./orient.sh 2&gt;&amp;1 | tee 01-orient.txt
+
+# --- 2. local enumeration: the full set, explained ---
+cat &gt; 02-localise.md &lt;&lt;'EOF'
+# Local enumeration, with reasoning
+
+| Command | Question it answers | Finding if... |
+|---|---|---|
+| `sudo -l` | What can this user do as root? | any NOPASSWD rule on an escape-hatch binary |
+| `find / -perm -4000` | Are there SUID binaries? | any custom/non-standard one |
+| `getcap -r /` | Do any files carry capabilities? | `cap_sys_admin`, `cap_dac_read_search` |
+| `mount` | Are remote filesystems mounted? | NFS with `no_root_squash` |
+| `cat /etc/crontab` | What runs on a schedule? | a job you can write to |
+| `systemctl list-timers` | What else is scheduled? | same, less visible |
+| `ls -la ~/` | What did the user leave? | SSH private keys, passwords, .aws |
+| `awk -F: '$3==0' /etc/passwd` | How many root accounts? | more than one |
+| `ps -ef` | What runs, as whom? | anything you can influence |
+| `docker ps` | Am I containerised? | mounted docker socket |
+| `cat /proc/1/cgroup` | Which container am I in? | container id for the escape |
+
+## Order matters
+Work outside-in. The user directory first (cheap, usually decisive), then
+sudo (cheap, usually decisive), then SUID (cheap), then services (expensive),
+then the kernel (last, and usually a report item instead).
+EOF
+echo &quot;written: 02-localise.md&quot;
+
+# --- 3. the SUID audit ---
+{
+  echo &quot;=== SUID binaries on this host ===&quot;
+  echo &quot;  A SUID-root binary executes with root privileges for its caller.&quot;
+  echo &quot;  If it can be made to run another program, that is an escalation.&quot;
+  echo
+  find / -perm -4000 -type f 2&gt;/dev/null | while read -r f; do
+    own=$(stat -c %U &quot;$f&quot; 2&gt;/dev/null)
+    if [ &quot;$own&quot; = &quot;root&quot; ]; then tag=&quot;ESCAPE-HATCH CANDIDATE&quot;; else tag=&quot;owned by $own&quot;; fi
+    printf &quot;  %-60s %s\n&quot; &quot;$f&quot; &quot;$tag&quot;
+  done
+  echo
+  echo &quot;=== the canonical escape-hatch list ===&quot;
+  echo &quot;  These execute other programs or load libraries:&quot;
+  for b in find env awk perl python ruby tar vi vim less more nano \
+           docker systemctl nsenter busybox; do
+    if command -v &quot;$b&quot; &gt;/dev/null 2&gt;&amp;1; then
+      printf &quot;  %-12s present at %s\n&quot; &quot;$b&quot; &quot;$(command -v $b)&quot;
+    fi
+  done
+  echo
+  echo &quot;  If any of the above is granted NOPASSWD sudo, escalation is trivial.&quot;
+} 2&gt;&amp;1 | tee 03-suid.txt
+
+# --- 4. what an escalation actually looks like, in its minimal form ---
+cat &gt; 04-escalation.md &lt;&lt;'EOF'
+# Minimal escalation proofs
+
+Each of these is a *demonstration*, not a payload. The report contains the
+command; the target contains the consequence.
+
+## From a NOPASSWD sudo rule
+```bash
+sudo -l | grep NOPASSWD          # the finding
+sudo -u root /bin/bash -c 'id'  # the proof (only if permitted)
+</code></pre>
+<h2 id="from-a-writable-service-file">From a writable service file</h2>
+<pre><code class="language-bash">ls -l /etc/systemd/system/app.service   # writable by your user?
+cat /etc/systemd/system/app.service     # what does it run as?
+# finding: a user-writable unit that runs as root is immediate root
+</code></pre>
+<h2 id="from-a-cron-job-you-can-write">From a cron job you can write</h2>
+<pre><code class="language-bash">cat /etc/cron.d/app                    # root-owned, writable?
+ls -l /var/spool/cron/crontabs/$(whoami)
+# finding: user crontab entries run as the user, but /etc/cron.d
+# entries often run as root - check the file, not the name
+</code></pre>
+<h2 id="from-an-nfs-mount">From an NFS mount</h2>
+<pre><code class="language-bash">mount | grep nfs
+# if no_root_squash is set:
+sudo -u#-1 id     # maps to uid -1, which many NFS stacks treat as root
+</code></pre>
+<h2 id="from-a-container">From a container</h2>
+<pre><code class="language-bash">ls -la /var/run/docker.sock           # mounted? -&gt; host root
+cat /proc/1/cgroup
+# finding: docker socket mounted into the container is a full host escape
+</code></pre>
+<h2 id="from-a-kernel-cve">From a kernel CVE</h2>
+<pre><code class="language-bash">uname -r
+# check for a matching local privesc in your resources; if none, this is
+# a REPORT ITEM, not a plan. Do not spend the day.
+</code></pre>
+<h2 id="what-goes-in-the-report">What goes in the report</h2>
+<ul>
+<li>the misconfiguration (the finding)</li>
+<li>the minimal command that demonstrates it (the evidence)</li>
+<li>the fix (remove the rule / drop the SUID bit / fix ownership)<br />
+EOF<br />
+echo "written: 04-escalation.md"</li>
+</ul>
+<h1 id="-5-impact-the-translation-from-capability-to-finding-">--- 5. impact: the translation from capability to finding ---</h1>
+<p>cat &gt; 05-impact.md &lt;&lt;'EOF'</p>
+<h1 id="from-capability-to-finding">From capability to finding</h1>
+<table>
+<thead>
+<tr>
+<th>What you did</th>
+<th>What you write</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>got a shell on the web server</td>
+<td><strong>Medium</strong> — Unauthenticated remote code execution on WEB-01</td>
+</tr>
+<tr>
+<td>escalated to root on it</td>
+<td><strong>High</strong> — Local privilege escalation on WEB-01, any account becomes root</td>
+</tr>
+<tr>
+<td>read the application config, found a DB password</td>
+<td><strong>High</strong> — Database reachable with a credential in a web-readable file</td>
+</tr>
+<tr>
+<td>read the customer table</td>
+<td><strong>Critical</strong> — Full customer database exposed to an unauthenticated attacker</td>
+</tr>
+<tr>
+<td>pivoted to 40 hosts</td>
+<td><strong>Critical</strong> — Flat internal network; the web server foothold compromises everything</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-rule">The rule</h2>
+<p>Severity is a function of <strong>what an attacker gains</strong>, not of what you did.<br />
+Report the end of the chain, not the middle of it.</p>
+<h2 id="what-you-stop-at">What you stop at</h2>
+<p>Prove that you <em>can</em> read the table. Do not read the table.<br />
+Prove that you <em>can</em> pivot to the file server. Do not pivot.<br />
+The client does not need the data. They need to know it is there.<br />
+EOF<br />
+echo "written: 05-impact.md"</p>
+<h1 id="-6-clean-up-after-yourself-and-prove-it-">--- 6. clean up after yourself, and prove it ---</h1>
+<p>cat &gt; 06-cleanup.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash">!/usr/bin/env bash</h1>
+<h1 id="post-engagement-cleanup-verification-run-it-and-put-the-output-in-the-report">Post-engagement cleanup verification. Run it, and put the output in the report.</h1>
+<p>echo "=== files modified in the last N hours outside package paths ==="<br />
+find / -xdev -mmin -180 -type f \<br />
+     -not -path "/proc/<em>" -not -path "/sys/</em>" -not -path "/run/<em>" \<br />
+     -not -path "/tmp/</em>" -not -path "/var/log/<em>" \<br />
+     -not -path "/home/</em>/.cache/*" 2&gt;/dev/null | head -20</p>
+<p>echo; echo "=== scheduled tasks you might have added ==="<br />
+systemctl list-timers --no-pager 2&gt;/dev/null | tail -5<br />
+crontab -l 2&gt;/dev/null | sed 's/^/  /'</p>
+<p>echo; echo "=== processes not belonging to a package ==="<br />
+ps -eo pid,user,etimes,cmd --sort=-etimes | awk 'NR==1 || $3 &lt; 600' | head -10</p>
+<p>echo; echo "=== shell history ==="<br />
+for h in ~/.bash_history ~/.zsh_history; do<br />
+  [ -f "$h" ] &amp;&amp; echo "  $h: $(wc -l &lt; "$h") lines, $(stat -c %y "$h")"<br />
+done<br />
+echo "  (state in the report whether history was cleared and who authorised it)"</p>
+<p>echo; echo "=== SSH keys ==="<br />
+ls -la ~/.ssh/ 2&gt;/dev/null<br />
+ssh-keygen -lf ~/.ssh/authorized_keys 2&gt;/dev/null | sed 's/^/  /'</p>
+<p>echo; echo "=== new users ==="<br />
+awk -F: '$3&gt;=1000 &amp;&amp; $3&lt;65534 {print "  " $1}' /etc/passwd<br />
+EOF<br />
+chmod +x 06-cleanup.sh<br />
+./06-cleanup.sh 2&gt;&amp;1 | tee 06-cleanup.txt</p>
+<h1 id="-7-linpeas-read-it-dont-just-run-it-">--- 7. LINPEAS: read it, don't just run it ---</h1>
+<p>cat &gt; 07-linpeas.md &lt;&lt;'EOF'</p>
+<h1 id="reading-linpeas-before-you-run-it">Reading LinPEAS before you run it</h1>
+<p>LinPEAS (and PrivescSpawn, pspy, and every other enumeration framework)<br />
+runs hundreds of checks. That is a problem for two reasons:</p>
+<ol>
+<li>
+<p><strong>Noise.</strong> Several hundred commands against a production host can trip<br />
+   monitoring, and the client may call you. Confirm in the ROE that<br />
+   enumeration tooling is permitted.</p>
+</li>
+<li>
+<p><strong>Interpretation.</strong> A green "YES" is not a finding. The script finds<br />
+<em>conditions</em>; you must convert them to <em>impact</em>.</p>
+</li>
+</ol>
+<h2 id="how-to-use-one-properly">How to use one properly</h2>
+<pre><code class="language-bash"># 1. read what it will do, before doing it
+head -40 /usr/share/linpeas/linpeas.sh
+
+# 2. run it once, capture everything, work OFFLINE afterwards
+sudo bash /usr/share/linpeas/linpeas.sh -a &gt; ~/aegis/labs/tcm-05/linpeas.txt 2&gt;&amp;1
+
+# 3. grep the output for the conditions that mean something
+grep -iE &quot;sudo.*NOPASSWD|sgid|interesting|dirty|escalat|exploit&quot; linpeas.txt | head -30
+
+# 4. verify EVERY hit manually before it goes in a report
+#    LinPEAS false positives are common and embarrassing
+</code></pre>
+<h2 id="the-manual-checks-linpeas-automates-do-these-first-by-hand">The manual checks LinPEAS automates — do these first by hand</h2>
+<ul>
+<li><code>sudo -l</code></li>
+<li><code>find / -perm -4000</code></li>
+<li><code>cat /etc/crontab</code></li>
+<li><code>mount</code> for NFS</li>
+<li><code>ls -la ~</code> for credentials</li>
+</ul>
+<p>If those five give you nothing, LinPEAS probably will too, and you have<br />
+learned five skills instead of one tool invocation.<br />
+EOF<br />
+echo "written: 07-linpeas.md"<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: an actual SUID audit of this machine, sorted into<br />
+escape-hatch candidates versus ordinary binaries. Every one of those candidates is a<br />
+prerequisite for a finding, and knowing which binaries matter is the difference between<br />
+running a tool and understanding escalation.</p>
+<p><strong>Step 6</strong> produces the artifact that makes a client trust the report: proof that you left<br />
+nothing behind.</p>
+<p><strong>Record:</strong> <code>03-suid.txt</code> and <code>06-cleanup.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Give the five-step post-exploitation loop.</li>
+<li>Why is <code>sudo -l</code> usually the highest-value command on a Linux box?</li>
+<li>Name five SUID binaries that are privilege-escalation primitives, and why.</li>
+<li>Why is a kernel exploit a report item rather than a plan on a modern distro?</li>
+<li>What is the professional order of escalation techniques, and why?</li>
+<li>List six things that persist after a shell and need removal.</li>
+<li>How do you convert "I read the customer table" into a finding sentence?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Escalation (Linux)</strong> → <strong>SUID</strong> → <strong>sudo / RBAC</strong> → <strong>Kernel Exploitation</strong> →<br />
+<strong>Reverse Shell</strong> → <strong>Pivoting</strong>.<br />
+<code>tcm-06</code> continues from the foothold this note produces.</p>

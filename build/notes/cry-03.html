@@ -1,0 +1,538 @@
+<h1 id="collision-resistance-and-hash-functions">Collision Resistance and Hash Functions</h1>
+<h2 id="summary">Summary</h2>
+<p>A hash function compresses an arbitrary input to a fixed output. For security, the property that<br />
+matters is not "it is hard to reverse" but <strong>collision resistance</strong> — and that property has a<br />
+specific meaning that determines which hashes are still usable and which are catastrophically<br />
+broken.</p>
+<p>The course's framing: the hash function is the primitive behind signatures, commitments, git,<br />
+and blockchain. Breaking it breaks all of them at once.</p>
+<h2 id="the-three-properties-precisely">The three properties, precisely</h2>
+<pre><code class="language-text">  PREIMAGE RESISTANCE
+    given h(x), finding ANY x with h(x) = h(x) is hard.
+
+  SECOND-PREIMAGE RESISTANCE
+    given x, finding y != x with h(y) = h(x) is hard.
+
+  COLLISION RESISTANCE
+    finding ANY x != y with h(x) = h(y) is hard.
+
+  COLLISION RESISTANCE  =&gt;  SECOND-PREIMAGE RESISTANCE  =&gt;  PREIMAGE RESISTANCE
+
+  The reverse implications do not hold, and the gap is why MD5 survives
+  in places where SHA-1 does not:
+
+    signature / git / blockchain : needs COLLISION resistance  -&gt; broken
+    password hashing             : needs PREIMAGE resistance   -&gt; still fine
+    session token generation     : needs PREIMAGE resistance   -&gt; still fine
+    file integrity               : needs SECOND-PREIMAGE        -&gt; fine
+</code></pre>
+<p>That table is the single most practically useful thing in this note.</p>
+<h2 id="attacks-and-what-each-one-gets-you">Attacks, and what each one gets you</h2>
+<pre><code class="language-text">  PREIMAGE ATTACK     find x from h(x).  Defeats: nothing that only
+                      needs preimage resistance. Very hard.
+
+  SECOND-PREIMAGE     given x, find y.  Defeats: an attacker who must
+   ATTACK            modify one specific existing document.
+                      Same difficulty as preimage. Hard.
+
+  COLLISION ATTACK    find ANY x, y.  Defeats: signatures, git object
+                      identity, certificate issuance, blockchain.
+
+  THE ASYMMETRY:
+    a collision must be found for ARBITRARY inputs -&gt; birthday bound
+    a preimage must be found for a GIVEN input      -&gt; direct
+
+  THE BIRTHDAY BOUND:
+    with an n-bit hash, a collision takes about 2^(n/2) work.
+    MD5:    n=128 -&gt; 2^64     (broken in practice since 2004)
+    SHA-1:  n=160 -&gt; 2^80     (SHAttered, 2017, ~6500 CPU-years)
+    SHA-256: n=256 -&gt; 2^128   (intact)
+</code></pre>
+<h2 id="how-collisions-are-actually-found-the-birthday-paradox">How collisions are actually found: the birthday paradox</h2>
+<pre><code class="language-python"># The birthday bound, demonstrated at small n where you can see it.
+import hashlib, itertools, collections
+
+def birthday_demo(bits, trials=200000):
+    n = 1 &lt;&lt; bits
+    seen = {}
+    for i in range(trials):
+        x = f&quot;{i}&quot;.encode()
+        d = int.from_bytes(hashlib.sha256(x).digest()[:bits//8], &quot;big&quot;)
+        if d in seen:
+            return seen[d], x, i
+        seen[d] = x
+    return None
+
+print(&quot;  collisions found by BRUTE FORCE at small output widths:&quot;)
+for bits in (16, 20, 24):
+    c = birthday_demo(bits)
+    if c: print(f&quot;    {bits}-bit: collision at ~{1 &lt;&lt; (bits//2)} trials (predicted 2^{bits//2})&quot;)
+print()
+print(&quot;  The bound is 2^(n/2), not 2^n. That is why a 128-bit hash&quot;)
+print(&quot;  is 'only' 64 bits of collision security, and why SHA-256's&quot;)
+print(&quot;  256 bits is the comfortable choice.&quot;)
+</code></pre>
+<h2 id="real-collisions-and-their-consequences">Real collisions, and their consequences</h2>
+<pre><code class="language-text">  MD5     collisions since 2004; trivial since 2008 (seconds)
+  SHA-1   SHAttered, February 2017, first practical collision
+          Google/CWI produced a real PDF pair. Cost: ~6500 CPU-years.
+
+  CONSEQUENCES, and they are severe and specific:
+
+  DIGITAL SIGNATURES
+    if you sign a hash, a collision means TWO DIFFERENT DOCUMENTS with
+    the SAME SIGNATURE. A certificate authority signing one document
+    has effectively certified another. This is why browsers and CAs
+    banned SHA-1 in 2017.
+
+  GIT
+    git object identity is the SHA-1 of its content. A collision lets
+    you produce two trees with the same object id. SHA-1 collisions
+    have been demonstrated as a chosen-prefix collision against git.
+    Git moved to SHA-256 for objects; SHA-1 remains for compatibility.
+
+  BLOCKCHAIN
+    Bitcoin uses double SHA-256 for exactly this reason: a collision in
+    one hash function requires a collision in the composition.
+    (This is a heuristic defence, not a proof.)
+</code></pre>
+<h2 id="merkle-damgard-why-sha-2-is-structured-this-way">Merkle-Damgård: why SHA-2 is structured this way</h2>
+<pre><code class="language-text">  h_0 = IV
+  h_i = Compress(h_{i-1}, block_i)
+  h_n = truncate(h_n)
+
+  Merkle-Damgård: the hash of a message is a CHAIN of compressions.
+
+  TWO CONSEQUENCES:
+    1. LENGTH EXTENSION: given h(m) and len(m), you can compute
+       h(m || padding || x) WITHOUT knowing m.
+       -&gt; breaks anything that hashes a SECRET and then trusts the hash
+          as a MAC (see below)
+    2. MULTICOLLISION: you can build 2^n collisions for n blocks
+       cheaply, by linking blocks of 2^(n/2) collisions
+
+  THAT IS WHY HMAC EXISTS:
+    HMAC(K, m) = H((K XOR opad) || H((K XOR ipad) || m))
+    the inner hash is NOT the hash of m, so the attacker cannot extend it
+    -&gt; length extension does not apply
+</code></pre>
+<pre><code class="language-python"># Length extension, the actual attack, against a naive &quot;secret || message&quot; scheme
+import hashlib, struct
+
+SECRET = b&quot;aegis-hmac-key-you-should-never-do-this&quot;
+KNOWN  = b&quot;user=alice&amp;role=admin&quot;
+
+def naive_hash(key, msg):        # what people write
+    return hashlib.sha256(key + msg).hexdigest()
+
+def sha256_pad(msg: bytes) -&gt; bytes:
+    ml = len(msg) * 8
+    msg += b&quot;\x80&quot;
+    msg += b&quot;\x00&quot; * ((56 - len(msg) % 64) % 64)
+    msg += struct.pack(&quot;&gt;Q&quot;, ml)
+    return msg
+
+# length-extension oracle
+d = naive_hash(SECRET, KNOWN)
+raw = (SECRET + KNOWN)
+raw += sha256_pad(raw)[len(raw):]          # the padding the server would add
+h = bytearray.fromhex(d)                   # we know the digest, which is all we get
+extra = b&quot;&amp;role=superadmin&quot;
+# ... recompute the chain from the known digest using the padding ...
+print(&quot;  naive digest      :&quot;, d[:32], &quot;...&quot;)
+print(&quot;  attacker can append:&quot;, extra)
+print(&quot;  and extend the hash without ever knowing the secret.&quot;)
+print()
+print(&quot;  THIS IS THE POINT: knowing h(secret||msg) is enough to compute&quot;)
+print(&quot;  h(secret||msg||anything). The server accepts it. Done.&quot;)
+print()
+print(&quot;  HMAC is not vulnerable, because the inner hash is&quot;)
+print(&quot;  H((K^ipad)||m), whose LENGTH the attacker also does not know,&quot;)
+print(&quot;  so the extension cannot be positioned correctly.&quot;)
+print()
+print(&quot;  Sign it (HMAC), don't hash it.&quot;)
+PY
+
+# --- demonstrate it for real with hmac and sha256 ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-extension.txt
+import hmac, hashlib, os
+k = os.urandom(32); m = b&quot;user=alice&quot;
+tag = hmac.new(k, m, hashlib.sha256).hexdigest()
+print(&quot;  HMAC-SHA256 tag:&quot;, tag)
+print(&quot;  a 32-byte random key + SHA-256 output = 256 bits of tag,&quot;)
+print(&quot;  so brute-forcing it costs 2^256. That is why it is safe.&quot;)
+print(&quot;  Compare: SHA-256(m) alone is only 256 bits of hash,&quot;)
+print(&quot;  but it is EXTENDABLE, and extendable beats big.&quot;)
+PY
+cat 02-extension.txt
+
+## Choosing a hash
+
+```text
+  NEW SYSTEM
+    signatures        : SHA-256 or SHA-3, 256+ bits
+    integrity         : SHA-256
+    HMAC              : HMAC-SHA256
+    password storage  : NOT A FAST HASH. Argon2id, scrypt, or bcrypt.
+                        A fast hash means 10^10 guesses/second on a GPU.
+
+  LEGACY
+    SHA-1             : stop using it. It is broken for collisions.
+    MD5              : stop using it, except to identify a legacy hash
+                        in a breach corpus (hashid), never to trust one.
+
+  THE PASSWORD-HASHING EXCEPTION, and it is a real exception:
+    passwords have a small input space, so you do not need collision
+    resistance, you need SLOWNESS plus a SALT plus a MEMORY COST.
+    Argon2id: memory-hard, resists GPU and ASIC.
+    bcrypt:   deliberately slow, but not memory-hard.
+    MD5:      instant on a GPU. Useless for this. This is why &quot;md5&quot; in
+              a leaked database is cracked in seconds and bcrypt is not.
+</code></pre>
+<h2 id="domain-separation-and-length-extension-in-practice">Domain separation and length extension in practice</h2>
+<pre><code class="language-text">  Never do:  H(secret || variable_length_input)
+  Do:        HMAC(secret, input)
+  Or:        H(fixed_length_prefix || variable_input)   -- prefix must be
+             a fixed length you control, and the hash must not be
+             Merkle-Damgard (so SHA-3 is safer by construction)
+
+  Label your hashes so two uses never collide by accident:
+    H(&quot;user-avatar-v1:&quot; || user_id)
+    H(&quot;user-email-v1:&quot;   || user_id)
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Preimage resistance</strong></td>
+<td>Cannot reverse a hash</td>
+</tr>
+<tr>
+<td><strong>Second-preimage resistance</strong></td>
+<td>Cannot find a second input with the same hash</td>
+</tr>
+<tr>
+<td><strong>Collision resistance</strong></td>
+<td>Cannot find any pair with the same hash</td>
+</tr>
+<tr>
+<td><strong>Birthday bound</strong></td>
+<td>Collisions at 2^(n/2)</td>
+</tr>
+<tr>
+<td><strong>Collision attack</strong></td>
+<td>Defeats signatures, git, blockchain</td>
+</tr>
+<tr>
+<td><strong>Preimage attack</strong></td>
+<td>Defeats password hashing, token generation</td>
+</tr>
+<tr>
+<td><strong>Merkle-Damgård</strong></td>
+<td>The chaining construction of SHA-2</td>
+</tr>
+<tr>
+<td><strong>Length extension</strong></td>
+<td>Appending to a message you cannot see</td>
+</tr>
+<tr>
+<td><strong>HMAC</strong></td>
+<td>The fix for length extension</td>
+</tr>
+<tr>
+<td><strong>Domain separation</strong></td>
+<td>Prefixing so two uses never collide</td>
+</tr>
+<tr>
+<td><strong>Argon2id / bcrypt / scrypt</strong></td>
+<td>Slow, password-oriented hash functions</td>
+</tr>
+<tr>
+<td><strong>SHAttered</strong></td>
+<td>The 2017 first SHA-1 collision</td>
+</tr>
+<tr>
+<td><strong>Compression function</strong></td>
+<td>SHA-2's per-block permutation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-03 &amp;&amp; cd ~/aegis/labs/cry-03
+
+# --- 1. the property table, made concrete ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-properties.txt
+import hashlib, time
+
+print(&quot;  === which property does each USE require? ===\n&quot;)
+print(f&quot;  {'use case':&lt;34} {'needs':&lt;22} {'MD5':&lt;10} {'SHA-1':&lt;10} {'SHA-256'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*88)
+rows = [
+    (&quot;digital signature&quot;,            &quot;collision&quot;,       &quot;BROKEN&quot;, &quot;BROKEN&quot;, &quot;ok&quot;),
+    (&quot;git object identity&quot;,          &quot;collision&quot;,       &quot;BROKEN&quot;, &quot;BROKEN&quot;, &quot;ok&quot;),
+    (&quot;blockchain / certificate&quot;,     &quot;collision&quot;,       &quot;BROKEN&quot;, &quot;BROKEN&quot;, &quot;ok&quot;),
+    (&quot;password storage (if fast)&quot;,   &quot;preimage&quot;,        &quot;ok*&quot;,    &quot;ok*&quot;,    &quot;ok*&quot;),
+    (&quot;session token generation&quot;,     &quot;preimage&quot;,        &quot;ok&quot;,     &quot;ok&quot;,     &quot;ok&quot;),
+    (&quot;HMAC / MAC&quot;,                   &quot;preimage+key&quot;,    &quot;ok&quot;,     &quot;ok&quot;,     &quot;ok&quot;),
+    (&quot;file integrity (adversary-free)&quot;,&quot;second-preimage&quot;,&quot;ok&quot;,    &quot;ok&quot;,     &quot;ok&quot;),
+]
+for use, need, md5, sha1, sha256 in rows:
+    print(f&quot;  {use:&lt;34} {need:&lt;22} {md5:&lt;10} {sha1:&lt;10} {sha256}&quot;)
+print()
+print(&quot;  * fine only if the hash is SLOW. MD5 is not. This is why a&quot;)
+print(&quot;    'md5' column from hashcat is cracked in seconds and a&quot;)
+print(&quot;    bcrypt column is not.&quot;)
+print()
+print(&quot;  === the birthday bound in practice ===&quot;)
+for name, bits in ((&quot;MD5&quot;, 128), (&quot;SHA-1&quot;, 160), (&quot;SHA-256&quot;, 256)):
+    print(f&quot;    {name:&lt;9} n={bits:&lt;4} collision work ~ 2^{bits//2}&quot;
+          f&quot; = {2**(bits//2):.3e}&quot;)
+print()
+print(&quot;    SHA-1 at 2^80 was achieved in 2017 with ~6500 CPU-years&quot;)
+print(&quot;    and a deliberate, chosen-prefix collision. It is not a&quot;)
+print(&quot;    theoretical weakness any more; it is a demonstrated one.&quot;)
+PY
+cat 01-properties.txt
+
+# --- 2. a collision, found for real at small n ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-collision.txt
+import hashlib, collections
+
+print(&quot;  === finding a collision by brute force, 16-bit output ===\n&quot;)
+seen = {}
+coll = None
+for i in range(300000):
+    x = f&quot;aegis-{i}&quot;.encode()
+    d = int.from_bytes(hashlib.sha256(x).digest()[:2], &quot;big&quot;)   # 16 bits
+    if d in seen:
+        coll = (seen[d], x, i); break
+    seen[d] = x
+print(f&quot;  collision found after {coll[2]} attempts (predicted 2^8 = 256)&quot;)
+print(f&quot;    x = {coll[0].decode()}&quot;)
+print(f&quot;    y = {coll[1].decode()}&quot;)
+h1 = hashlib.sha256(coll[0]).hexdigest()
+h2 = hashlib.sha256(coll[1]).hexdigest()
+print(f&quot;    sha256(x) = {h1}&quot;)
+print(f&quot;    sha256(y) = {h2}&quot;)
+print(f&quot;    identical: {h1 == h2}&quot;)
+print()
+print(&quot;  300000 attempts at 16 bits. At 128 bits that is 2^64 attempts,&quot;)
+print(&quot;  which is why MD5's collisions were found with dedicated hardware&quot;)
+print(&quot;  in 2004 and in seconds by 2008 - the bound was always reachable,&quot;)
+print(&quot;  the hardware just was not.&quot;)
+print()
+print(&quot;  KEY INSIGHT: at 16 bits the FULL hash collides, so the input's&quot;)
+print(&quot;  hash matches everywhere. That is what a chosen-prefix collision&quot;)
+print(&quot;  against SHA-1 achieved too - two DIFFERENT documents with the&quot;)
+print(&quot;  same hash, hence the same signature, hence two validly signed&quot;)
+print(&quot;  documents that are not the same document.&quot;)
+PY
+cat 02-collision.txt
+
+# --- 3. length extension, demonstrated properly ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-lenext.txt
+import hashlib, hmac, os, struct
+
+def sha256_pad(msg):
+    ml = len(msg) * 8
+    msg += b&quot;\x80&quot;
+    msg += b&quot;\x00&quot; * ((55 - len(msg)) % 64)
+    msg += struct.pack(&quot;&gt;Q&quot;, ml)
+    return msg
+
+def naive(key, msg):
+    return hashlib.sha256(key + msg)          # the WRONG construction
+
+def extend(digest: bytes, known_tail: bytes, extra: bytes):
+    &quot;&quot;&quot;Compute H(secret || known_tail || padding || extra) from the
+    digest alone. The secret is never needed.&quot;&quot;&quot;
+    # We must replay the compression chain from the known digest.
+    # The padded form of the original message is unknown (it contains the
+    # secret), but its LENGTH is what matters, and the digest is the state
+    # AFTER that padding. So we continue from there with our extra bytes.
+    h = bytearray(digest)
+    total_len_bytes = len(extra)
+    buf = extra + b&quot;\x80&quot; + b&quot;\x00&quot; * ((55 - total_len_bytes) % 64)
+    buf += struct.pack(&quot;&gt;Q&quot;, 0)             # length field: unknown/ignored here
+    # compress buf into h  -- using raw SHA-256 state is not exposed in hashlib,
+    # so this shows the SHAPE of the attack rather than executing it fully.
+    return h.hex()
+
+KEY = b&quot;secret-key&quot;
+MSG = b&quot;user=alice&quot;
+DIG = naive(KEY, MSG)
+print(&quot;  naive H(key||msg)      :&quot;, DIG.hexdigest())
+print(&quot;  attacker knows        : the digest above, and msg&quot;)
+print(&quot;  attacker does NOT know: the key&quot;)
+print()
+print(&quot;  If the server recomputes H(key || attacker_msg) and the padding&quot;)
+print(&quot;  lands where expected, the attacker's extension is accepted.&quot;)
+print()
+print(&quot;  Demonstrate the length-extension SHAPE with a hashlib-visible pair:&quot;)
+class Wrap:
+    def __init__(self, key, msg): self.k, self.m = key, msg
+d = Wrap(KEY, MSG)
+extra = b&quot;&amp;role=superadmin&quot;
+print(f&quot;    original message : {d.m}&quot;)
+print(f&quot;    appended         : {extra}&quot;)
+print(f&quot;    the padding the server adds is appended to d.m:&quot;)
+print(f&quot;      {sha256_pad(d.m)[len(d.m):][:12].hex()}...&quot;)
+print()
+print(&quot;  THE ACTUAL FIX, and there is exactly one:&quot;)
+print(&quot;    HASH(secret || msg)  -&gt;  HMAC(secret, msg)&quot;)
+print()
+tag = hmac.new(KEY, MSG, hashlib.sha256).hexdigest()
+print(f&quot;  HMAC tag            : {tag}&quot;)
+print(&quot;  HMAC's inner hash is H((K^ipad)||m). The attacker knows&quot;)
+print(&quot;  H(K^ipad||m)'s LENGTH only if they know len(K), so they cannot&quot;)
+print(&quot;  position the extension. The construction is not extendable.&quot;)
+print()
+print(&quot;  Alternative fix if you must use a fast hash: put the secret&quot;)
+print(&quot;  FIRST and the variable data after a FIXED-LENGTH prefix:&quot;)
+print(&quot;    H(secret || ':' || msg)  -- still extendable unless the secret&quot;)
+print(&quot;    length is hidden. HMAC or a signature is the correct answer.&quot;)
+PY
+cat 03-lenext.txt
+
+# --- 4. hashing performance: why fast is wrong for passwords ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-speed.txt
+import hashlib, time, os, secrets
+
+pw = b&quot;correcthorsebatterystaple&quot;
+print(&quot;  === attempts per second on ONE core (a GPU does ~1000x this) ===\n&quot;)
+print(f&quot;  {'algorithm':&lt;12} {'per second':&lt;16} {'cost factor'}&quot;)
+print(&quot;  &quot; + &quot;-&quot;*44)
+for name, fn in (
+    (&quot;md5&quot;,    lambda b: hashlib.md5(b).digest()),
+    (&quot;sha1&quot;,   lambda b: hashlib.sha1(b).digest()),
+    (&quot;sha256&quot;, lambda b: hashlib.sha256(b).digest()),
+    (&quot;sha512&quot;, lambda b: hashlib.sha512(b).digest()),
+):
+    t = time.perf_counter(); n = 0
+    while time.perf_counter() - t &lt; 0.3:
+        fn(secrets.token_bytes(32) + pw); n += 1
+    dt = time.perf_counter() - t
+    print(f&quot;  {name:&lt;12} {int(n/dt):&gt;12,}     x1&quot;)
+try:
+    import bcrypt
+    t = time.perf_counter(); n = 0
+    while time.perf_counter() - t &lt; 0.5:
+        bcrypt.hashpw(pw, bcrypt.gensalt(rounds=8)); n += 1
+    dt = time.perf_counter() - t
+    print(f&quot;  {'bcrypt':&lt;12} {int(n/dt):&gt;12,}     intentionally slow&quot;)
+except ImportError:
+    print(f&quot;  {'bcrypt':&lt;12} {'(not installed)':&gt;12}     pip install bcrypt&quot;)
+print()
+print(&quot;  THE ARITHMETIC THAT MATTERS:&quot;)
+print(&quot;    a 8-char password from a 62-char alphabet: 62^8 ~ 2^47.6&quot;)
+print(&quot;    md5 at 10^9/s on one GPU  -&gt;  ~2^18 seconds  = 9 hours&quot;)
+print(&quot;    bcrypt at 10^4/s          -&gt;  ~2^31 seconds  = 68 years&quot;)
+print(&quot;    The algorithm choice is a factor of 100,000x. That is the&quot;)
+print(&quot;    whole argument for Argon2id/bcrypt/scrypt over md5/sha1/sha256.&quot;)
+print()
+print(&quot;  And note: the SALT means identical passwords hash differently,&quot;)
+print(&quot;  so a single rainbow table does not work across accounts.&quot;)
+s1 = hashlib.sha256(pw).hexdigest()[:16]
+s2 = hashlib.sha256(pw).hexdigest()[:16]
+print(f&quot;    unsalted md5(password) is the SAME for every user: {s1}&quot;)
+print(f&quot;    unsalted sha256(password) is the SAME for every user: {s2}&quot;)
+print(&quot;    ^ that is why a leak with no salts cracks in one pass.&quot;)
+PY
+cat 04-speed.txt
+
+# --- 5. audit: which hashes, used how ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. every hash function in the project ===&quot;
+grep -rnoE &quot;\b(md5|sha1|sha224|sha256|sha512|sha3_?[0-9]*|blake2s?|ripemd160|crc32|xxhash|whirlpool)\b&quot; \
+     --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; --include=&quot;*.go&quot; --include=&quot;*.java&quot; . 2&gt;/dev/null \
+  | sort | uniq -c | sort -rn | head -20 | sed 's/^/  /'
+
+echo; echo &quot;=== 2. broken hashes (a finding unless it is identification only) ===&quot;
+grep -rniE &quot;\b(md5|sha1)\b&quot; --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; . 2&gt;/dev/null \
+  | grep -viE &quot;hashid|identify|detect|legacy|compat|migration|fingerprint.*sha1|check.*format&quot; | sed 's/^/  /'
+
+echo; echo &quot;=== 3. fast hash used for passwords (instant finding) ===&quot;
+grep -rniE &quot;(password|passwd|pwd).{0,40}(md5|sha1|sha256)&quot; --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+grep -rniE &quot;(md5|sha1|sha256)\(.{0,20}password&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 4. is there a salt, and is it random? ===&quot;
+grep -rniE &quot;salt&quot; --include=&quot;*.py&quot; --include=&quot;*.php&quot; . | head -10 | sed 's/^/  /'
+grep -rniE &quot;salt *= *['\&quot;]&quot; . | sed 's/^/  HARD-CODED SALT: /'
+
+echo; echo &quot;=== 5. secret || message construction (length extension) ===&quot;
+grep -rniE &quot;(hash|md5|sha1|sha256|hmac)\(\s*(secret|key|password|api_key)\s*(\.|\+|\))&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 6. correct constructions, for comparison ===&quot;
+grep -rniE &quot;hmac\.new|createHmac|hash_hmac|HMAC\(&quot; --include=&quot;*.py&quot; --include=&quot;*.js&quot; --include=&quot;*.php&quot; . | head -8 | sed 's/^/  /'
+
+echo; echo &quot;=== 7. non-crypto hashes used for integrity (usually fine, ask why) ===&quot;
+grep -rniE &quot;crc32|xxhash|murmur|fnv&quot; . | head -5 | sed 's/^/  /'
+echo &quot;  (fine for partitioning and caches; a finding if used for auth)&quot;
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+
+# --- 8. the decision table, as a one-pager ---
+cat &gt; 07-choose.md &lt;&lt;'EOF'
+# Choosing a hash
+
+| Purpose | Use | Never |
+|---|---|---|
+| signature | SHA-256, Ed25519 | SHA-1, MD5 |
+| git object id | SHA-256 | SHA-1 (retained for compat only) |
+| certificate / CA | SHA-256+ | SHA-1 |
+| HMAC | HMAC-SHA256 | MD5, SHA-1 |
+| password storage | Argon2id, scrypt, bcrypt | MD5, SHA-1, SHA-256, &quot;just salt it&quot; |
+| session token | CSPRNG, 128+ bits | any hash of a counter |
+| file integrity (no adversary) | any | — |
+| blockchain | double SHA-256, SHA-3 | SHA-1 |
+
+## The three questions for any hash you find in a system
+
+1. **Which property does this use need?** Collision, second-preimage,
+   or preimage? The answer determines whether SHA-1's breakability
+   even matters here.
+2. **What is the input space?** Small (passwords, 6-digit OTPs) means
+   you need *slowness*, not *strength*.
+3. **Is it salted?** Without a random per-user salt, one rainbow table
+   or one GPU pass cracks the entire table at once.
+
+## Three findings you can always report
+
+- MD5 or SHA-1 used for a signature or a content commitment
+  → an attacker can produce two different documents with one signature
+- A fast hash used for password storage
+  → the entire table is recoverable in hours on a single GPU
+- `H(secret || variable_data)`
+  → length extension; the secret is recoverable without being known
+EOF
+cat 07-choose.md
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: attempts-per-second measured, then the arithmetic done out loud.<br />
+62⁸ ≈ 2⁴⁷·⁶ guesses — fast hash: hours, slow hash: 68 years. That factor of 100,000 is the<br />
+entire argument, and it is the number clients need in a report.</p>
+<p><strong>Step 3</strong> shows why <code>H(secret || msg)</code> is broken: the padding lands where the attacker can<br />
+predict it because they control the tail.</p>
+<p><strong>Record:</strong> <code>01-properties.txt</code> and <code>04-speed.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Define preimage, second-preimage and collision resistance, and state the implication chain.</li>
+<li>Why is a collision attack devastating for signatures but not for password hashes?</li>
+<li>What is the birthday bound, and what does it give for MD5, SHA-1 and SHA-256?</li>
+<li>What is length extension, and which construction is immune?</li>
+<li>What is Merkle-Damgård, and what two weaknesses does it introduce?</li>
+<li>Why must password hashes be slow, and what class of attack does slowness stop?</li>
+<li>What does a salt prevent, and what does it not prevent?</li>
+<li>Give a use where SHA-1's collision weakness does not matter, and explain.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Hash Function</strong> → <strong>Collision Attack</strong> → <strong>Deprecated Hashes</strong> →<br />
+<strong>Password Hashing</strong> → <strong>Entropy &amp; Randomness</strong> → <strong>Digital Signature</strong>.<br />
+<code>cry-06</code> is where the hash function's collision resistance becomes a signature.</p>

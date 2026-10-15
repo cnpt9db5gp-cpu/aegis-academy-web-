@@ -1,0 +1,183 @@
+<h1 id="mac-addressing-arp-and-the-switching-table">MAC Addressing, ARP and the Switching Table</h1>
+<h2 id="summary">Summary</h2>
+<p>How a host actually finds "who has that IP?" — and how that question, being unauthenticated,<br />
+produces the most useful Layer 2 attack there is.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>MAC address</strong>: 48 bits, OUI + NIC-specific. Locally administered bit for virtual MACs</li>
+<li><strong>The ARP cache</strong> is a local shortcut so you do not ask for every frame</li>
+<li><strong>ARP request</strong> is a broadcast: "who has 192.168.56.101? tell 192.168.56.5"</li>
+<li><strong>ARP reply</strong> is unicast and <strong>unsolicited by design</strong> — any host may send one at any time</li>
+<li><strong>The switch CAM table</strong> is learned from the source address of every frame it sees</li>
+<li><strong>ARP spoofing</strong> = send ARPs claiming someone else's IP, poisoning every cache in the broadcast<br />
+  domain</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>OUI</strong></td>
+<td>First 3 bytes: vendor identifier</td>
+</tr>
+<tr>
+<td><strong>ARP request / reply</strong></td>
+<td>Broadcast query / unicast answer</td>
+</tr>
+<tr>
+<td><strong>ARP cache</strong></td>
+<td>Host's IP→MAC table</td>
+</tr>
+<tr>
+<td><strong>ARP table</strong></td>
+<td>Sometimes a separate, older table in Linux</td>
+</tr>
+<tr>
+<td><strong>CAM table</strong></td>
+<td>Switch's MAC→port table</td>
+</tr>
+<tr>
+<td><strong>ARP poisoning</strong></td>
+<td>Forging ARPs to intercept traffic</td>
+</tr>
+<tr>
+<td><strong>Gratuitous ARP</strong></td>
+<td>Unsolicited ARPs announcing a change</td>
+</tr>
+<tr>
+<td><strong>Static ARP entry</strong></td>
+<td>A manually pinned entry (defensive)</td>
+</tr>
+<tr>
+<td><strong>ARP scan</strong></td>
+<td>Probing to enumerate live hosts</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the ARP cache, on this machine ---
+ip neigh show
+ip neigh show nud all 2&gt;/dev/null | head
+cat /proc/net/arp
+
+# --- entries stuck in a bad state mean something odd ---
+ip neigh show | grep -E &quot;FAILED|INCOMPLETE&quot;
+
+# --- populate it and watch ---
+ip neigh flush all 2&gt;/dev/null
+ping -c1 192.168.56.1 &gt;/dev/null 2&gt;&amp;1
+ip neigh show | head
+
+# --- arp tools ---
+command -v arping arp-scan arpwatch ettercap bettercap
+sudo arping -c 2 127.0.0.1 2&gt;/dev/null | head -5
+ip -br addr show vboxnet0 2&gt;/dev/null
+
+# --- watch ARP traffic (needs root) ---
+sudo tcpdump -i vboxnet0 -n arp 2&gt;/dev/null | head -10
+
+# --- read a switch's CAM table, if you have one ---
+#   show mac address-table   (Cisco IOS)
+#   show mac address-table   (switch&gt; show mac address-table)
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> populate and read an ARP cache, then observe a real ARP exchange on the wire.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/ccna-02 &amp;&amp; cd ~/aegis/labs/ccna-02
+
+# --- 1. empty it, then fill it deliberately ---
+{
+  echo &quot;=== flush ===&quot;
+  sudo ip neigh flush all 2&gt;/dev/null
+  ip neigh show | head
+  echo &quot;  (entries: $(ip neigh show | wc -l))&quot;
+  echo
+  echo &quot;=== generate traffic to specific neighbours ===&quot;
+  for h in 192.168.56.1 127.0.0.1; do ping -c1 -W1 $h &gt;/dev/null 2&gt;&amp;1; done
+  echo &quot;=== ARP cache after ===&quot;
+  ip neigh show
+} 2&gt;&amp;1 | tee 01-arp.txt
+
+# --- 2. decode /proc/net/arp (MAC is little-endian in the kernel table) ---
+echo
+echo &quot;=== /proc/net/arp, raw ===&quot;
+head -4 /proc/net/arp
+echo &quot;--- decoded ---&quot;
+awk 'NR&gt;1 {split($4,a,&quot;:&quot;); printf &quot;  %-16s flags=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n&quot;,
+  $1, $3,
+  strtonum(&quot;0x&quot; substr(a[1],7,2)), strtonum(&quot;0x&quot; substr(a[1],5,2)),
+  strtonum(&quot;0x&quot; substr(a[1],3,2)), strtonum(&quot;0x&quot; substr(a[1],1,2)),
+  strtonum(&quot;0x&quot; a[2]), strtonum(&quot;0x&quot; substr(a[3],7,2))}' /proc/net/arp
+
+# --- 3. WATCH THE EXCHANGE (the core of this lecture) ---
+# terminal 1:
+#   sudo tcpdump -i vboxnet0 -n -e arp
+# terminal 2:
+#   ip neigh flush all; ping -c1 192.168.56.1
+echo
+echo &quot;Run in two terminals:&quot;
+echo &quot;  T1: sudo tcpdump -i vboxnet0 -n -e arp&quot;
+echo &quot;  T2: ip neigh flush all &amp;&amp; ping -c1 192.168.56.1&quot;
+echo
+echo &quot;You will see: ARP request (who has X?) BROADCAST, then ARP reply UNICAST.&quot;
+echo &quot;Both are unsigned. Either could be forged by anyone on the segment.&quot;
+
+# --- 4. record it ---
+sudo timeout 12 tcpdump -i vboxnet0 -n -e arp -c 10 2&gt;/dev/null | tee 02-arp-traffic.txt &amp;
+TCAP=$!
+sleep 1
+ip neigh flush all 2&gt;/dev/null
+ping -c2 -W1 192.168.56.1 &gt;/dev/null 2&gt;&amp;1
+sleep 3; kill $TCAP 2&gt;/dev/null; wait 2&gt;/dev/null
+cat 02-arp-traffic.txt
+
+# --- 5. THE DEFENCE, and why it breaks forwarding ---
+echo
+echo &quot;=== defensive: static ARP entries ===&quot;
+sudo ip neigh add 192.168.56.1 lladdr 02:00:00:00:00:01 dev vboxnet0 nud permanent 2&gt;/dev/null \
+  &amp;&amp; echo &quot;  pinned 192.168.56.1&quot; || echo &quot;  (no vboxnet0 on this host - expected on a laptop)&quot;
+ip neigh show
+sudo ip neigh flush dev vboxnet0 2&gt;/dev/null || true
+
+# --- 6. an ARP scan of your own lab segment (authorised only) ---
+if ip -br addr show vboxnet0 &gt;/dev/null 2&gt;&amp;1; then
+  echo &quot;=== scanning your own host-only lab network ===&quot;
+  sudo arp-scan --interface=vboxnet0 --localnet 2&gt;/dev/null | tee 03-arpscan.txt
+  echo &quot;Every line here is a host on an isolated network you own.&quot;
+else
+  echo &quot;No host-only adapter on this machine - build the lab first (docs/LAB-SETUP.md).&quot;
+fi
+</code></pre>
+<p><strong>Step 3 is the one to actually perform in two terminals.</strong> Watching a broadcast request and a<br />
+unicast reply, with the MAC visible in the destination field, is the moment ARP stops being a<br />
+table in a textbook.</p>
+<p><strong>Record:</strong> <code>02-arp-traffic.txt</code> and <code>03-arpscan.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the structure of a 48-bit MAC address?</li>
+<li>Why is an ARP reply allowed to be unsolicited?</li>
+<li>What does a switch do with a frame from an unknown source MAC?</li>
+<li>Why does ARP spoofing require only Layer 2 adjacency?</li>
+<li>How does a static ARP entry defend against poisoning, and what does it cost you?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>ARP</strong> → <strong>MAC Address</strong> → <strong>Man-in-the-Middle</strong> → <strong>Arp Spoofing</strong> → <strong>Ethernet Frame</strong> →<br />
+<strong>Switching</strong>.</p>

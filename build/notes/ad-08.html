@@ -1,0 +1,260 @@
+<h1 id="detection-signing-ldap-policies-and-logging">Detection: Signing, LDAP Policies and Logging</h1>
+<h2 id="summary">Summary</h2>
+<p>Every note in this course ends with a finding. This one is the other half: what a defender needs<br />
+to see one happening, and why most environments have none of it.</p>
+<p>The framing that makes it actionable: <strong>detection is a set of specific<br />
+events with specific values.</strong> Not "monitor Active Directory". These<br />
+seven event IDs, with these filter values, cover the entire tier.</p>
+<h2 id="the-seven-events-that-matter">The seven events that matter</h2>
+<pre><code class="language-text">  4662  Directory Service Access. The DCSync detection.
+        Filter: ObjectType=domainDNS AND the ObjectAccess UNKNOWN GUID is
+        one of the three replication rights.
+
+  4663  DS Replica. Anyone enumerating the domain at volume.
+        Filter: a user running this in bulk.
+
+  5136  Directory object MODIFIED. The early-warning system.
+        Filter: objectClass in (domainDNS, user, computer, group) AND
+        the attribute changed in (sPN, msDS-AllowedToDelegateTo,
+        msDS-UserDoesNotNeedPreAuth, msDS-SupportedEncryptionTypes,
+        servicePrincipalName, member, nTSGeneralInfo).
+        A new sPN or a delegation flag appearing is an ATTACK, not a
+        change. This is the earliest reliable signal you have.
+
+  4624  Logon. Filter: LogonType in (3, 9) from an unusual source;
+        LogonType 9 (NewCredentials) is pass-the-hash over WinRM;
+        LogonType 2 (Interactive) on a server is unusual.
+
+  4672  Special privileges assigned at logon. Filter: SeDebugPrivilege,
+        SeImpersonatePrivilege, SeTcbPrivilege.
+        ANY 4672 with SeDebugPrivilege from a workstation is worth
+        an immediate alert.
+
+  4688  Process creation. Filter: mimikatz, or rundll32 with
+        comsvcs.dll + MiniDump, or any PowerShell with -enc/-nop,
+        or a service creation (7045).
+
+  4768/4769/4771  Kerberos: TGT request (4768) with a
+        RC4-encryption type (23) from a host that normally uses AES
+        (17/18), TGS request (4769) with an unusual encryption type,
+        and pre-authentication failed (4771) in volume.
+</code></pre>
+<h2 id="the-policy-controls-that-generate-the-detections">The policy controls that generate the detections</h2>
+<pre><code class="language-text">  AUDIT POLICY - must be enabled, most are not by default:
+
+    DC Audit Policies &gt; DS Access
+      Audit Directory Service Access    : SUCCESS, FAILURE   &lt;- 4662
+      Audit Directory Service Changes   : SUCCESS           &lt;- 5136
+    DC Audit Policies &gt; Object Access
+      Audit File System                 : SUCCESS           &lt;- NTDS/SAM reads
+    DC Audit Policies &gt; Privilege Use
+      Audit Sensitive Privilege Use    : SUCCESS           &lt;- 4679 token assign
+      Audit Other Privilege Use Events  : SUCCESS           &lt;- 4672
+
+  ADVANCED AUDIT POLICY &gt; Audit Credential Validation
+      Audit Kerberos Authentication Service : SUCCESS       &lt;- 4768/4769/4771
+      Audit Kerberos Service Ticket Operations : SUCCESS
+
+  Log file sizes: the Security log must be large enough that a week of
+  4663 enumeration does not roll it. Most default to 20 MB and lose
+  the attack.
+
+  Advance audit policy: DIRECTORY SERVICE ACCESS must be Force Subcategory
+  settings to override, or a local policy overrides it.
+</code></pre>
+<h2 id="the-smb-and-ldap-relay-controls">The SMB and LDAP relay controls</h2>
+<pre><code class="language-text">  THE CONTROLS, and the event that proves each is off:
+
+  SMB SIGNING REQUIRED
+    enables Microsoft network client/server digital signing
+    proves it: 4769 Kerberos with ticket encryption 0x7 (RC4) is the
+    fallback to NTLM; more directly, look at the GPO result. A host
+    that authenticates with NTLM when SMB signing is &quot;required&quot; for
+    that host is misconfigured.
+
+  LDAP SIGNING REQUIRED
+    enables LDAP client signing
+    without it, an LDAP relay gets you authentication.
+
+  LDAP CHANNEL BINDING (KB5012122)
+    signed TLS with channel binding. This is what stopped the main
+    relay vector in 2020 and it is now default-on for Windows Server
+    2022 and patched everywhere.
+
+  &quot;LONG LOGON TICKETS&quot; / &quot;Kerberos extended protection&quot;
+    DC-side: Set &quot;KDC-force AES, and for NTLM, the KDC will not issue
+    to servers that don't support extended protection&quot;
+    this closes KDC-coerced NTLM downgrade, which was CVE-2020-1350's
+    sibling class.
+
+  THE COMMON FINDING: these are set &quot;required&quot; but with an exception
+  list, and the exceptions are the vulnerable hosts.
+</code></pre>
+<h2 id="building-the-detections">Building the detections</h2>
+<pre><code class="language-sql">-- KQL: the DCSync alert (4662 + the three GUIDs)
+SecurityEvent
+| where EventID == 4662
+| where ObjectType == &quot;domainDNS&quot;
+| where ObjectAccess in (
+    &quot;1131f6aa-9c07-11d1-f79f-00c04fc2dcd2&quot;,   -- Replicating Directory Changes
+    &quot;1131f6ad-9c07-11d1-f79f-00c04fc2dcd2&quot;,   -- ...In Filtered Set
+    &quot;89e95b76-444d-4c62-991a-0facbeda640c&quot;)   -- DS-Replication-Get-Changes
+| project TimeGenerated, SubjectUserName, SubjectDomainName, IpAddress, WorkstationName
+</code></pre>
+<pre><code class="language-sql">-- KQL: roast preparation - someone is setting up Kerberoasting
+SecurityEvent
+| where EventID == 5136
+| where ObjectClass in (&quot;user&quot;, &quot;computer&quot;)
+| where AttributeLDAPDisplayName in (
+    &quot;servicePrincipalName&quot;,
+    &quot;msDS-AllowedToDelegateTo&quot;,
+    &quot;msDS-UserDoesNotNeedPreAuth&quot;,
+    &quot;msDS-SupportedEncryptionTypes&quot;,
+    &quot;msDS-SecurityHistory&quot;)
+| project TimeGenerated, ObjectDN, SubjectUserName, IpAddress, AttributeValue
+</code></pre>
+<pre><code class="language-sql">-- KQL: enumeration at volume (a network map being built)
+SecurityEvent
+| where EventID == 4663
+| summarize Hits = count() by SubjectUserName, IpAddress, bin(TimeGenerated, 5m)
+| where Hits &gt; 500
+</code></pre>
+<pre><code class="language-sql">-- KQL: pass-the-hash and credential dumping
+SecurityEvent
+| where (EventID == 4624 and LogonType in (3, 9))
+    or (EventID == 4672 and PrivilegeList has &quot;SeDebugPrivilege&quot;)
+    or (EventID == 7045)
+| project TimeGenerated, EventID, SubjectUserName, IpAddress, LogonType, ServiceFileName, PrivilegeList
+</code></pre>
+<pre><code class="language-sql">-- KQL: the relay signal - NTLM where it should be Kerberos
+SecurityEvent
+| where EventID == 4769
+| where ServiceName == &quot;cifs&quot; or ServiceName == &quot;ldap&quot; or ServiceName == &quot;http&quot;
+| where TicketEncryptionType == 0x7
+| summarize Count = count() by IpAddress, ServiceName
+| where Count &gt; 20
+</code></pre>
+<h2 id="the-hardening-baseline-measurable">The hardening baseline, measurable</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>What it stops</th>
+<th>Measured by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SMB signing required</td>
+<td>SMB relay</td>
+<td><code>Get-SmbServerConfiguration EnableSMB2Protocol</code> + a signing audit</td>
+</tr>
+<tr>
+<td>LDAP signing required</td>
+<td>LDAP relay</td>
+<td>4769 with NTLM</td>
+</tr>
+<tr>
+<td>Channel binding enforced</td>
+<td>LDAP relay (the main one)</td>
+<td>KB5012122 deployment</td>
+</tr>
+<tr>
+<td>Extended protection (long logon tickets)</td>
+<td>KDC-coerced NTLM</td>
+<td>DC registry <code>KdcNotSupportedEncryptionTypes</code></td>
+</tr>
+<tr>
+<td>Credential Guard</td>
+<td>LSASS dumping</td>
+<td><code>Get-CimInstance -ClassName Win32_DeviceGuard</code></td>
+</tr>
+<tr>
+<td>Protected Users</td>
+<td>ticket theft, DPAPI roaming</td>
+<td>group membership</td>
+</tr>
+<tr>
+<td>LAPS</td>
+<td>local admin reuse</td>
+<td>per-machine uniqueness</td>
+</tr>
+<tr>
+<td>Audit DS Access</td>
+<td>DCSync</td>
+<td>4662</td>
+</tr>
+<tr>
+<td>Audit DS Changes</td>
+<td>roast prep</td>
+<td>5136</td>
+</tr>
+<tr>
+<td>Removed unused replication rights</td>
+<td>DCSync</td>
+<td>ACL review</td>
+</tr>
+<tr>
+<td>Short ticket lifetimes</td>
+<td>smaller stolen-ticket window</td>
+<td><code>-krbtgt</code> / domain policy</td>
+</tr>
+<tr>
+<td>Audit Credential Validation</td>
+<td>Kerberos attacks</td>
+<td>4768/4769</td>
+</tr>
+</tbody>
+</table>
+<h2 id="reporting-to-a-client-who-cannot-see-any-of-it">Reporting to a client who cannot see any of it</h2>
+<pre><code class="language-text">## F-xx · Active Directory attacks would not be visible to your SIEM
+
+Risk
+  The engagement reached domain administrator. Not one of the required
+  events was being logged with a value your SIEM could alert on. The
+  three directory replication events that would identify a DCSync are
+  not logged. Directory object modifications are not logged, so the
+  creation of the service principal name used for roasting would not
+  have been visible. Credential validation events are logged but at
+  the default verbosity, which does not include the ticket encryption
+  type, so an RC4 downgrade would not have appeared.
+
+  The practical effect: an attacker who followed the same path we did
+  would have had no telemetry to alert on, at any point, on any host.
+
+Evidence
+  Enumeration of your Advanced Audit Policy settings on DC01 and DC02,
+  and a review of the Security event log contents for the engagement
+  window. See Appendix A for the full policy export.
+
+Business impact
+  Mean time to detect and respond to a domain compromise is
+  unbounded. This is the finding that would have mattered most if
+  another actor had been present.
+
+Remediation
+  1. Enable Audit Directory Service Access (Success/Failure) and
+     Directory Service Changes (Success) on both DCs    [Security, Immediate]
+  2. Enable Audit Credential Validation with the Verbose success
+     setting                                        [Security, Immediate]
+  3. Raise the Security log size to [X] MB with rollover to external
+     storage                                       [Security, Immediate]
+  4. Implement the four alerts in Appendix B          [Security, 1 sprint]
+  5. Verify with a test: the alerts in Appendix B fire on a known
+     benign action, and log forward.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the seven event IDs that cover this tier, and what each filters on.</li>
+<li>Why is 5136 the earliest reliable signal?</li>
+<li>Name the three replication GUIDs for 4662.</li>
+<li>What does 4672 with SeDebugPrivilege mean, and why is it an immediate alert?</li>
+<li>Which ticket encryption types indicate RC4, and why is that a signal?</li>
+<li>What do SMB signing, LDAP signing, and channel binding each stop?</li>
+<li>Why is the log file size a security control?</li>
+<li>How do you prove to a client that their alerting works?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Windows Logging</strong> → <strong>Active Directory</strong> → <strong>Kerberos</strong> → <strong>SMB Relay</strong> →<br />
+<strong>Detection Engineering</strong>.<br />
+This closes the AD course. Next: <code>bh-01</code>..<code>bh-03</code> and <code>imp-01</code>..<code>imp-04</code>.</p>

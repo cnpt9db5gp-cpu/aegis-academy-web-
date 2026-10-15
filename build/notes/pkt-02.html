@@ -1,0 +1,224 @@
+<h1 id="wireshark-display-filters-and-protocol-dissection">Wireshark Display Filters and Protocol Dissection</h1>
+<h2 id="summary">Summary</h2>
+<p>tcpdump stores; Wireshark interprets. Display filters are how you turn 50,000 captured packets<br />
+into the five that answer your question.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Two-stage workflow</strong>: capture with BPF, then read with display filters</li>
+<li><strong>Display filter syntax</strong>: <code>proto.field op value</code>, e.g. <code>tcp.port == 445</code></li>
+<li>Comparators: <code>==</code>, <code>!=</code>, <code>&gt;</code>, <code>&lt;</code>, <code>contains</code>, <code>matches</code> (regex), <code>in</code></li>
+<li><strong>Follow streams</strong> is the single most useful feature: reassemble the whole conversation</li>
+<li><strong>Expert info</strong> annotates anomalies the dissector understands</li>
+<li>Statistics → Conversations / Endpoints answer "who talked to whom, how much"</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Display filter</strong></td>
+<td>Filter applied when reading a capture</td>
+</tr>
+<tr>
+<td><strong>Protocol field</strong></td>
+<td>A parsed field like <code>tcp.flags.syn</code></td>
+</tr>
+<tr>
+<td><strong>Conversation filter</strong></td>
+<td><code>tcp.stream eq 3</code></td>
+</tr>
+<tr>
+<td><strong>Follow stream</strong></td>
+<td>Reassemble one TCP conversation</td>
+</tr>
+<tr>
+<td><strong>Expert info</strong></td>
+<td>Analyzer warnings (checksum, retransmit)</td>
+</tr>
+<tr>
+<td><strong>Endpoints</strong></td>
+<td>Unique hosts in a capture</td>
+</tr>
+<tr>
+<td><strong>I/O graph</strong></td>
+<td>Volume over time</td>
+</tr>
+<tr>
+<td><strong>Name resolution</strong></td>
+<td>Turning IPs into names (off by default, correctly)</td>
+</tr>
+<tr>
+<td><strong>Dissector</strong></td>
+<td>The code that parses one protocol</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+command -v wireshark tshark editcap capinfos
+
+# --- capture a usable file ---
+sudo tcpdump -i lo -w /tmp/base.pcap -s 0 2&gt;/dev/null &amp;
+TC=$!; sleep 1
+( nc -l -p 8080 &gt;/dev/null 2&gt;&amp;1 &amp; ); sleep 1
+for i in $(seq 1 4); do echo &quot;hello $i&quot; | timeout 2 nc 127.0.0.1 8080 2&gt;/dev/null; done
+sleep 4; kill $TC 2&gt;/dev/null; wait $TC 2&gt;/dev/null
+
+# --- tshark: the CLI dissector ---
+capinfos /tmp/base.pcap 2&gt;/dev/null | head -8
+tshark -r /tmp/base.pcap -q -z io,phs              # protocol hierarchy
+tshark -r /tmp/base.pcap -q -z conv,tcp            # conversations
+tshark -r /tmp/base.pcap -q -z endpoints,ip
+
+# --- display filters ---
+tshark -r /tmp/base.pcap -Y &quot;tcp.port == 8080&quot;
+tshark -r /tmp/base.pcap -Y &quot;http&quot; 2&gt;/dev/null
+tshark -r /tmp/base.pcap -Y &quot;tcp.flags.syn == 1 and tcp.flags.ack == 0&quot;
+tshark -r /tmp/base.pcap -Y &quot;ip.src == 127.0.0.1&quot;
+tshark -r /tmp/base.pcap -T fields -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport 2&gt;/dev/null | head -8
+
+# --- the GUI, when you want to click ---
+wireshark /tmp/base.pcap &amp;
+echo &quot;  In the GUI: Display Filter box (top left), Follow TCP Stream (right click a packet)&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> answer three real questions from one capture using display filters.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/pkt-02 &amp;&amp; cd ~/aegis/labs/pkt-02
+
+# --- 1. build a capture with several distinct conversations ---
+sudo tcpdump -i lo -n -w base.pcap -s 0 2&gt;/dev/null &amp;
+TC=$!; sleep 1
+( nc -l -p 8080 &gt;/dev/null 2&gt;&amp;1 &amp; )
+( nc -l -p 9090 &gt;/dev/null 2&gt;&amp;1 &amp; )
+sleep 1
+for i in $(seq 1 3); do echo &quot;http-ish $i&quot; | timeout 2 nc 127.0.0.1 8080 2&gt;/dev/null; done
+for i in $(seq 1 3); do echo &quot;other $i&quot;   | timeout 2 nc 127.0.0.1 9090 2&gt;/dev/null; done
+ping -c2 127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+dig +short localhost @127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+sleep 5; kill $TC 2&gt;/dev/null; wait $TC 2&gt;/dev/null
+ls -la base.pcap
+
+# --- 2. Q1: what protocols are in here at all? ---
+echo &quot;=== Q1: protocol hierarchy ===&quot;
+tshark -r base.pcap -q -z io,phs 2&gt;/dev/null | head -20 | tee 01-phs.txt
+
+# --- 3. Q2: who talked to whom, and how much? ===
+echo
+echo &quot;=== Q2: TCP conversations ===&quot;
+tshark -r base.pcap -q -z conv,tcp 2&gt;/dev/null | head -12 | tee 02-conv.txt
+
+# --- 4. Q3: show me every packet of one conversation, with fields ---
+echo
+echo &quot;=== Q3: extract structured fields ===&quot;
+tshark -r base.pcap -Y &quot;tcp.port in {8080,9090}&quot; \
+  -T fields -e frame.number -e ip.src -e tcp.srcport -e ip.dst -e tcp.dstport \
+             -e tcp.flags.syn -e tcp.flags.fin -e frame.len 2&gt;/dev/null \
+  | head -15 | tee 03-fields.txt
+
+# --- 5. follow one conversation, reassembled ---
+echo
+echo &quot;=== the 8080 conversation, reassembled as one stream ===&quot;
+stream=$(tshark -r base.pcap -Y &quot;tcp.port == 8080&quot; -T fields -e tcp.stream 2&gt;/dev/null | head -1)
+echo &quot;  stream id: $stream&quot;
+tshark -r base.pcap -q -z &quot;follow,tcp,ascii,$stream&quot; 2&gt;/dev/null | head -25 | tee 04-follow.txt
+echo
+echo &quot;Follow Stream is the feature that turns 40 scattered packets into a readable conversation.&quot;
+
+# --- 6. expert info: what did the dissector notice? ---
+echo
+echo &quot;=== expert analysis ===&quot;
+tshark -r base.pcap -q -z expert 2&gt;/dev/null | head -12 | tee 05-expert.txt
+
+# --- 7. the filter vocabulary, written out ---
+cat &gt; 06-filters.md &lt;&lt;'EOF'
+# Display filter cheat sheet (Wireshark / tshark syntax)
+
+## comparison
+==   !=   &gt;   &lt;   &gt;=   &lt;=
+contains &quot;x&quot;        matches /regex/
+
+## protocols
+ip  tcp  udp  arp  icmp  dns  http  tls  ssh  smb
+
+## fields (the useful ones)
+ip.src  ip.dst  ip.ttl  ip.len
+tcp.srcport  tcp.dstport  tcp.stream
+tcp.flags.syn  tcp.flags.ack  tcp.flags.fin  tcp.flags.reset
+tcp.window_size_value  tcp.len
+udp.srcport  udp.dstport
+http.host  http.request.uri  http.response.code
+dns.qry.name
+
+## combinations
+tcp.port == 445
+tcp.flags.syn == 1 and tcp.flags.ack == 0        # half-open
+ip.addr == 192.168.56.101
+ip.ttl &lt; 20
+http.response.code &gt;= 500
+tcp.stream eq 3
+tcp.port in {22, 80, 443}
+
+## excludes
+not arp
+!(tcp.port == 22)
+
+## following one conversation
+tcp.stream eq 0
+-follow tcp -i 0
+EOF
+cat 06-filters.md
+
+# --- 8. GUI, if you want to click ---
+echo
+echo &quot;GUI: wireshark base.pcap&quot;
+echo &quot;  1. Display Filter box, top left. Try: tcp.port == 8080&quot;
+echo &quot;  2. Right-click a packet &gt; Follow &gt; TCP Stream&quot;
+echo &quot;  3. Statistics menu &gt; Conversations / Endpoints / I/O Graph&quot;
+echo &quot;  4. Expert Information tab, bottom pane&quot;
+</code></pre>
+<p><strong>Step 5 is the one that changes everything.</strong> Follow Stream turns a wall of hex into a<br />
+readable conversation, and it is how you read an exfiltration or a C2 channel.</p>
+<p><strong>Record:</strong> <code>06-filters.md</code> — keep this next to <code>pkt-01</code>'s filter library.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why filter at capture time <em>and</em> read with display filters, rather than one or the other?</li>
+<li>Write a filter for "SYN packets, no ACK".</li>
+<li>What does <code>tcp.stream eq 3</code> identify?</li>
+<li>What is Expert Information useful for?</li>
+<li>Why is DNS name resolution disabled by default in Wireshark?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Wireshark</strong> → <strong>Packet Filter</strong> → <strong>Protocol Analysis</strong> → <strong>PCAP</strong> → <strong>tcpdump</strong> →<br />
+<strong>tshark</strong>.</p>

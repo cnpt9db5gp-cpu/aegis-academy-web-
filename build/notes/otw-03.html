@@ -1,0 +1,241 @@
+<h1 id="bandit-levels-30-39-ssh-keys-shadow-permissions-md5base32hex-deeper-enumeration">Bandit Levels 30-39: SSH keys, shadow permissions, md5/base32/hex, deeper enumeration</h1>
+<h2 id="summary">Summary</h2>
+<p>Levels 30-39 combine everything so far — SSH keys, hash identification, unusual encodings, binary<br />
+searching, and harder file searches. These are the levels where Bandit stops being a tutorial and<br />
+starts being useful preparation for real work.</p>
+<h2 id="level-notes">Level notes</h2>
+<p><strong>Level 30 — a password that needs correct file permissions.</strong></p>
+<pre><code class="language-bash">ls -la
+ssh-keygen -y -f /home/bandit30/.ssh/id_rsa &gt; /tmp/pub
+# the mode on the private key matters
+chmod 600 /home/bandit30/.ssh/id_rsa
+ssh bandit30@localhost -i /home/bandit30/.ssh/id_rsa -p 2220
+</code></pre>
+<p>If you cannot read the key, check its mode and owner before assuming you are stuck.</p>
+<p><strong>Level 31 — a base32-encoded password.</strong></p>
+<pre><code class="language-bash">cat /etc/shadow | grep bandit31
+file bandit31
+xxd bandit31                       # recognise the encoding
+base32 -d bandit31
+</code></pre>
+<p><code>-x</code> in <code>base32</code>/<code>base64</code>/<code>xxd</code> means "decode". Learn these three; they appear constantly in<br />
+CTFs.</p>
+<p><strong>Level 32 — md5 is the hash algorithm here.</strong></p>
+<pre><code class="language-bash">find . -type f -exec md5sum {} \; | grep -i bandit32
+# identify it properly, then crack
+hashid hash.txt
+john --wordlist=/usr/share/wordlists/rockyou.txt --show hash.txt
+# md5sum -c verifies a checksum, a useful IR habit
+md5sum /etc/passwd
+</code></pre>
+<p><code>hashid</code> before <code>john</code> saves real time — John needs the right format flag for each algorithm.</p>
+<p><strong>Level 33 — sshd_config and a writable config.</strong></p>
+<pre><code class="language-bash">grep -n &quot;PasswordAuthentication\|PermitRootLogin\|AllowUsers&quot; /etc/ssh/sshd_config
+ls -la /etc/ssh/sshd_config
+file /etc/ssh/sshd_configd
+cat /etc/ssh/sshd_configd/sshd_config
+</code></pre>
+<p>Reading <code>sshd_config</code> is standard enumeration on any Linux server — it tells you whether password<br />
+auth is on, whether root login is permitted, and which users may connect.</p>
+<p><strong>Level 34 — permissions on a directory nobody can enter.</strong></p>
+<pre><code class="language-bash">ls -la /opt
+ls -lad /opt/*
+# /opt/level34 is d--------- : nobody, including you, can traverse it
+sudo ls -la /opt/level34
+</code></pre>
+<p><code>sudo</code> works in the Bandit environment. In a real engagement, this is the moment you realise<br />
+whether your compromised account has any sudo rights at all.</p>
+<p><strong>Level 35 — nginx config and a hash in it.</strong></p>
+<pre><code class="language-bash">find / -name &quot;nginx.conf&quot; -o -name &quot;*.conf&quot; 2&gt;/dev/null | head
+cat /etc/nginx/nginx.conf
+nginx -T                        # dump the FULL effective config, including includes
+grep -rn &quot;password\|hash&quot; /etc/nginx/
+hashid hash.txt &amp;&amp; john --show hash.txt
+</code></pre>
+<p><strong><code>nginx -T</code> / <code>apachectl -S</code> / <code>httpd -t -D DUMP</code> dump the effective config</strong> — far more useful<br />
+than reading a single file, because it resolves every <code>include</code>.</p>
+<p><strong>Level 36 — a base64 blob in a script plus a running service.</strong></p>
+<pre><code class="language-bash">ls -la
+cat /opt/level36/*
+base64 -d payload | bash
+xxd payload | head
+grep -n &quot;eval\|exec\|system&quot; *.sh      # look for command injection points
+</code></pre>
+<p><strong><code>grep -n "eval\|exec\|system" *.sh</code> is a one-second audit</strong> for the most common script<br />
+vulnerability class: passing untrusted input to a shell.</p>
+<p><strong>Level 37 — a script that decrypts something.</strong></p>
+<pre><code class="language-bash">ls -la
+cat level37.sh
+xxd bandit37.payload | head
+base64 -d bandit37.payload | ...
+# read the script properly, then follow what it does
+</code></pre>
+<p>Read the script. A decryption script tells you the algorithm by name — and often the key is<br />
+derived from the <em>next</em> level's password, so you solve them in order.</p>
+<p><strong>Level 38 — a readable SSH key owned by root.</strong></p>
+<pre><code class="language-bash">ls -la /root
+ssh-keygen -y -f /root/.ssh/id_rsa
+ssh bandit38@localhost -i /root/.ssh/id_rsa
+</code></pre>
+<p><code>/root</code> is normally <code>drwx------</code>; finding yourself able to read it <em>is</em> the finding.</p>
+<p><strong>Level 39 — the final push.</strong></p>
+<pre><code class="language-bash">ls -la
+cat /opt/level39/level39.py
+sed -n '1,40p' /opt/level39/level39.py
+</code></pre>
+<p><strong>Read the source before trying anything.</strong> This is the habit Bandit 30-39 is really teaching:<br />
+the answer is in the code, not in brute force.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>base32 / base64 / hex</strong></td>
+<td>Encodings; <code>-d</code> or <code>-r</code> decodes</td>
+</tr>
+<tr>
+<td><strong><code>md5sum -c</code></strong></td>
+<td>Verify a file against a recorded checksum</td>
+</tr>
+<tr>
+<td><strong><code>hashid</code></strong></td>
+<td>Identify a hash algorithm from its format</td>
+</tr>
+<tr>
+<td><strong><code>nginx -T</code></strong></td>
+<td>Dump the full effective configuration</td>
+</tr>
+<tr>
+<td><strong>sshd_config</strong></td>
+<td>SSH server configuration; a standard enumeration target</td>
+</tr>
+<tr>
+<td><strong>Permission traversal</strong></td>
+<td>Directory mode <code>d-----</code> blocking all access</td>
+</tr>
+<tr>
+<td><strong><code>xxd</code></strong></td>
+<td>Hex dump — the CTF's most-used command</td>
+</tr>
+<tr>
+<td><strong><code>sed -n '1,40p'</code></strong></td>
+<td>Print a line range from a script</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- encodings, the full set ---
+base32 -d file; base32 file
+base64 -d file; base64 -w0 file
+xxd file | head; xxd -r -p file          # hex encode / decode
+od -An -tx1z file
+echo &quot;SGVsbG8=&quot; | base64 -d
+
+# --- identify and crack a hash ---
+hashid hash.txt
+hashid --identify hash.txt
+john --wordlist=/usr/share/wordlists/rockyou.txt hash.txt
+john --show hash.txt
+hashcat -m 0 hash.txt /usr/share/wordlists/rockyou.txt   # 0 = MD5
+
+# --- sshd enumeration ---
+grep -rn &quot;PasswordAuthentication\|PermitRootLogin\|AllowUsers\|Port&quot; /etc/ssh/
+sshd -T                       # effective sshd config
+nginx -T 2&gt;/dev/null | head -40
+apachectl -S 2&gt;/dev/null | head
+
+# --- a one-second script audit ---
+grep -rn &quot;eval\|exec\|system\|popen\|os.system\|shell=True&quot; /opt /srv 2&gt;/dev/null | head
+
+# --- permissions, decoded ---
+ls -lad /opt/level34 /root /etc/shadow
+namei -l /etc/shadow          # walk the whole path, component by component
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> clear levels 30-39 and build your final "credential hunting" reference.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/otw-03 &amp;&amp; cd ~/aegis/labs/otw-03
+
+ssh bandit30@bandit.labs.overthewire.org -p 2220
+</code></pre>
+<p><strong>On the box:</strong></p>
+<pre><code class="language-bash">cat &gt;&gt; ~/my-notes.txt &lt;&lt;'EOF'
+
+## 30-39: decoding and config enumeration
+base32 -d f        xxd f | head          xxd -r -p f
+hashid h.txt      john --show h.txt     hashcat -m 0 h
+nginx -T           sshd -T
+grep -rn &quot;eval\|exec\|system&quot; *.sh
+namei -l /etc/shadow        # why can't I read it?
+EOF
+cat ~/my-notes.txt
+</code></pre>
+<p><strong>Back on Kali, assemble the complete hunting reference:</strong></p>
+<pre><code class="language-bash">cd ~/aegis/labs/otw-03
+cat &gt; 01-credential-hunting.md &lt;&lt;'EOF'
+# Credential hunting reference
+
+## Encoding
+| Task | Command |
+|---|---|
+| base32 decode | `base32 -d FILE` |
+| base64 decode | `base64 -d FILE` |
+| hex dump | `xxd FILE \| head` |
+| hex decode | `xxd -r -p FILE` |
+| from scratch | `od -An -tx1z FILE` |
+
+## Hashes
+| Task | Command |
+|---|---|
+| identify | `hashid HASH` |
+| crack (john) | `john --wordlist=/usr/share/wordlists/rockyou.txt --show HASH` |
+| crack (hashcat) | `hashcat -m &lt;mode&gt; HASH rockyou.txt` |
+| verify | `md5sum FILE` / `sha256sum FILE` |
+
+## Configs
+| Task | Command |
+|---|---|
+| effective sshd | `sshd -T` |
+| effective nginx | `nginx -T` |
+| ssh settings | `grep -rn &quot;PermitRootLogin\\|PasswordAuth&quot; /etc/ssh/` |
+| apache vhosts | `apachectl -S` |
+
+## Search
+| Task | Command |
+|---|---|
+| why unreadable | `namei -l /path` |
+| script audit | `grep -rn &quot;eval\|exec\|system\|shell=True&quot; DIR` |
+| by owner | `find / -user NAME -readable 2&gt;/dev/null` |
+| by mtime | `find / -mmin -60 -type f 2&gt;/dev/null` |
+EOF
+cat 01-credential-hunting.md | tee 01-credential-hunting.txt
+
+# --- exercise it against your own machine, read-only ---
+{
+  echo &quot;=== effective sshd configuration (your own box) ===&quot;
+  sudo sshd -T 2&gt;/dev/null | grep -E &quot;^(port|permitrootlogin|passwordauthentication|pubkeyauthentication)&quot; \
+    || grep -rn &quot;PermitRootLogin\|PasswordAuthentication&quot; /etc/ssh/sshd_config
+  echo
+  echo &quot;=== why is /etc/shadow unreadable? ===&quot;
+  ls -l /etc/shadow
+  namei -l /etc/shadow
+} | tee 02-own-box.txt
+</code></pre>
+<p><strong><code>namei -l /etc/shadow</code> is the answer to a question you will be asked constantly:</strong> "why can't I<br />
+read this?" It walks every component of the path and shows the permission on each.</p>
+<p><strong>Record:</strong> <code>01-credential-hunting.md</code>. Keep it. Tier 4 and Tier 6 both depend on it.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>How do you distinguish base32, base64 and hex data at a glance?</li>
+<li>Why identify a hash with <code>hashid</code> before cracking it?</li>
+<li>What does <code>nginx -T</code> give you that reading one config file does not?</li>
+<li>What does <code>namei -l /path/to/file</code> tell you, and when do you need it?</li>
+<li>Why is <code>grep -rn "eval\|exec\|system" *.sh</code> a sensible first check on an unknown script?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Credential Exposure</strong> → <strong>Password Hashing</strong> → <strong>Hash ID &amp; Format Recognition</strong> →<br />
+<strong>Enumeration</strong>. Bandit is complete — you are ready for <code>linux-privesc-doctrine</code>.</p>

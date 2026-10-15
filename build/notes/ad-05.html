@@ -1,0 +1,654 @@
+<h1 id="credential-dumping-with-impacket-and-mimikatz">Credential Dumping with Impacket and Mimikatz</h1>
+<h2 id="summary">Summary</h2>
+<p>Once you have a foothold, the highest-value action in a Windows engagement is getting the hashes.<br />
+NTDS.dit holds every account in the domain, and there are two ways to read it: <strong>DCSync</strong> (the<br />
+protocol-correct way, requiring three specific rights) and <strong>credential dumping</strong> (steal it from<br />
+memory or from the filesystem).</p>
+<p>The lecture's framing: <strong>DCSync is the clean one.</strong> Credential dumping is the messy one, and<br />
+every variant of it is a specific defence that a defender can turn on.</p>
+<blockquote>
+<p>Companion to <code>ad-04</code> (roasting) and <code>imp-01</code> (the tooling). This note is<br />
+the decision: which method, what it means for the client, and what you<br />
+do after.</p>
+</blockquote>
+<h2 id="the-two-methods">The two methods</h2>
+<pre><code class="language-text">  DCSYNC                       CREDENTIAL DUMPING
+  -----------                  ------------------
+  the replication protocol      memory or filesystem theft
+
+  requires:                    requires:
+    Replicating Directory       an admin-level session (SYSTEM works)
+      Changes (All)             OR SeDebugPrivilege + SeImpersonate
+    Replicating Directory
+      Changes In Filtered Set
+    DS-Replication-Get-        (or SeBackupPrivilege to copy the file)
+      Changes (All)
+
+  leaves:                      leaves:
+    4624 logon events           a distinctive access pattern (or none)
+    4662 object access          a service creation (mimikatz)
+    4663 GUID enumeration       possibly nothing, if it is a raw disk read
+    5136 directory changes
+    replication traffic         no domain controller involvement
+
+  invisible if the three        hard to make invisible; that is the
+    rights are absent           point of every defence below
+</code></pre>
+<h2 id="dcsync">DCSync</h2>
+<pre><code class="language-text">  WHAT IT IS:
+    Replication is a normal DC-to-DC protocol. Any DC can serve a
+    replication request to a peer. DCSync is simply using that
+    protocol against yourself.
+
+    Replicating Directory Changes (All)       -&gt; get the secrets
+    Replicating Directory Changes In Filtered Set -&gt; enumerate the NC
+    DS-Replication-Get-Changes (All)          -&gt; the modern equivalent
+
+    CRUCIALLY: none of these are &quot;Domain Admin&quot; membership rights.
+    They are SEPARATE rights that can be (and usually are) delegated
+    to a service account. And a forest with a single DC does not need
+    replication at all - so a single-DC forest has no reason to grant
+    it, and granting it is a pure finding.
+
+  HOW TO CHECK WHETHER YOU CAN
+    ask the DC, unauthenticated:
+      &quot;(&amp;(objectClass=DomainDNS)(nCSCreationName=*)&quot;
+      &quot;(nETInfoNamingContext=*))&quot;
+    the presence of the three attributes in the nTSGeneralInfo
+    context indicates the rights are present on the object.
+
+  WHAT IT RETURNS
+    - every user's NT hash
+    - every computer account's NT hash (this is the big one)
+    - krbtgt's hash, if the request is not filtered (krbtgt can read
+      itself, so an unfiltered request returns it -&gt; golden tickets)
+    - the domain SIDs, groups, and the whole directory
+
+  WHY IT IS SO OFTEN A FINDING
+    because it is delegated for legitimate reasons (backup software,
+    some management tools) and never revoked when the reason goes away.
+</code></pre>
+<h2 id="credential-dumping-the-variants">Credential dumping: the variants</h2>
+<pre><code class="language-text">  1. LSASS MEMORY (Windows: mimikatz sekurlsa::logonpasswords)
+     the hashes of everyone logged on, and the cached ones.
+     defended by: credential guard, protected process, running as a
+     non-admin, PAWs, session isolation.
+
+  2. SAM (windows\system32\config\SAM)
+     the local machine accounts. Needs SeBackupPrivilege or SYSTEM.
+     the NT hash of every local account, including the local admin.
+
+  3. NTDS.DIT  (windows\ntds\ntds.dit)
+     the whole domain. Needs SYSTEM + bootkey, or a volume shadow copy,
+     or DCSync (which is cleaner and does not need SYSTEM).
+     defended by: protected users, LAPS, tiering, the same things that
+     stop DCSync (which is: not having the rights).
+
+  4. DPAPI (dpapi::masterkeys)
+     the keys that decrypt saved credentials, browser passwords,
+     WiFi keys. Cracked with a wordlist - the master key file is the
+     secret, and it is small enough to brute force if the user's
+     password is weak.
+
+  5. CREDENTIAL MANAGER (cmdkey /list)
+     stored RDP and network credentials. Sometimes a plaintext
+     password is right there.
+
+  6. KERBEROS TICKETS (sekurlsa::tickets)
+     all cached TGTs and service tickets. A stolen TGT needs no
+     cracking (ad-02).
+</code></pre>
+<h2 id="the-dpapi-key-which-is-the-underrated-one">The DPAPI key, which is the underrated one</h2>
+<pre><code class="language-text">  WHAT IT IS:
+    Every time Windows saves a password (browser, RDP, credential
+    manager), it encrypts it with a key derived from the USER's
+    password, stored in DPAPI. The master key is on disk.
+
+  THE ATTACK:
+    1. steal the user's masterkey file
+    2. steal the encrypted blob (browser DB, credential manager export)
+    3. derive the DPAPI key from a password guess - CHEAP, one hash per guess
+    4. decrypt
+
+  WHY IT IS GOOD FOR AN ASSESSMENT:
+    it converts a memory-only compromise into a recoverable credential
+    set, and it needs no admin rights on the host if you have the
+    user's files.
+
+  WHAT IT IS NOT:
+    it does not work for a domain admin's credential if the user is a
+    protected user, and it is not instant - the master key file has a
+    cost parameter (default 4800, which is seconds on a GPU).
+
+  DEFENCE:
+    - strong passwords (that is the whole defence; DPAPI's cost is
+      tied to the password)
+    - the &quot;roaming&quot; case, where the master key follows the user
+      across machines, is the dangerous one: the same blob decrypts
+      on every machine in the domain. That is a well-known finding.
+</code></pre>
+<h2 id="after-the-dump-the-chain">After the dump: the chain</h2>
+<pre><code class="language-text">  DUMP  -&gt;  many accounts, all hashes
+        -&gt;  offline: crack the weak ones (cry-d4's methodology)
+        -&gt;  online: use them directly, pass-the-hash
+        -&gt;  find the privileged one
+        -&gt;  look for DCSync rights in the graph
+        -&gt;  if the domain admin's hash is in the dump: you are done,
+            and so is the engagement's most valuable finding
+
+  WHAT TO CRACK FIRST, in order of value per minute of GPU time:
+    1. Domain Admins, Enterprise Admins          (the win condition)
+    2. Service accounts with SPNs                 (roastable, ad-04)
+    3. Accounts with delegation attributes        (the key to ad-02)
+    4. Accounts with preauth disabled             (the key to ad-04)
+    5. Everything else, sorted by name entropy
+    6. krbtgt                                     (only if you want to
+                                                    prove the impact)
+
+  (Step 6 deserves care: if you have krbtgt's hash, you can forge
+   tickets that survive a password reset. Demonstrating that in a
+   production domain is a decision to make WITH the client, not
+   unilaterally. In most engagements you note the implication and
+   do not exercise it.)
+</code></pre>
+<h2 id="controls-and-what-each-one-actually-stops">Controls, and what each one actually stops</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Stops</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Credential Guard / LSA protection</strong></td>
+<td>LSASS dumping</td>
+<td>the single most effective control</td>
+</tr>
+<tr>
+<td><strong>Run as a non-admin</strong></td>
+<td>most dumping</td>
+<td>requires no privilege to have</td>
+</tr>
+<tr>
+<td><strong>Protected Users group</strong></td>
+<td>ticket theft, DPAPI roaming</td>
+<td>also forces NTLM down</td>
+</tr>
+<tr>
+<td><strong>LAPS</strong></td>
+<td>local admin reuse</td>
+<td>unique per machine</td>
+</tr>
+<tr>
+<td><strong>Tiered administration + PAWs</strong></td>
+<td>using an admin hash</td>
+<td>process, not a technical control</td>
+</tr>
+<tr>
+<td><strong>DCSync auditing</strong></td>
+<td>DCSync</td>
+<td>alert on 4662 with replication GUIDs</td>
+</tr>
+<tr>
+<td><strong>Remove the three rights where unneeded</strong></td>
+<td>DCSync</td>
+<td>the actual fix</td>
+</tr>
+<tr>
+<td><strong>Restricted admin for RDP</strong></td>
+<td>pass-the-hash over RDP</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>Local admin removal</strong></td>
+<td>local dumping</td>
+<td>LAPS</td>
+</tr>
+<tr>
+<td><strong>Long, random service passwords</strong></td>
+<td>cracking the dump</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>Session isolation / VBS</strong></td>
+<td>credential theft from memory</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>LSA protection without VBS (RunAsPPL)</strong></td>
+<td>partial</td>
+<td>weaker than Credential Guard</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-powershell"># what a hardened domain looks like when you check
+Get-ADGroupMember &quot;Protected Users&quot;
+Get-ADComputer -Filter {msDS-SupportedEncryptionTypes=*} | Measure-Object
+
+# the DCSync audit, which is what the client needs to detect this
+$replicationGUIDs = @(
+  &quot;1131f6aa-9c07-11d1-f79f-00c04fc2dcd2&quot;,
+  &quot;1131f6ad-9c07-11d1-f79f-00c04fc2dcd2&quot;,
+  &quot;89e95b76-444d-4c62-991a-0facbeda640c&quot;
+)
+# Enable these on the Domain Controllers advanced audit policy category:
+#   DS Access   -&gt; &quot;Success and Failure&quot; on &quot;Directory Service Access&quot;
+#   DS Access   -&gt; &quot;Success&quot; on &quot;Directory Service Changes&quot;
+# Then alert on 4662 where the objectGUID matches.
+</code></pre>
+<pre><code class="language-powershell"># Where the client should look, in their own logs
+# 4662  Access to an object   ObjectType=domainDNS
+#       ObjectAccess UNKNOWN GUID (the replication ones above)
+# 4663  Attempt to enumerate the DS
+# 5136  A directory object was modified
+# 4624  A successful logon   LogonType=3 or 9 (network) from odd hosts
+# 4648  A logon attempted with explicit credentials
+# 4672  Special privileges assigned to a new logon
+# 4688  A process was created   (mimikatz, sekurlsa, comsvcs.dll)
+# 7045  A service was installed (mimikatz's service-based extraction)
+# 4104  PowerShell script block logged
+</code></pre>
+<h2 id="reporting">Reporting</h2>
+<pre><code class="language-text">  ## F-xx · Domain credential material readable by a standard user
+
+  Risk
+    An authenticated user in the &quot;Helpdesk&quot; group can obtain the NT hash
+    of every account in the forest, including both domain controllers'
+    machine accounts and the krbtgt account. From there, an attacker can
+    authenticate as any account, including Domain Administrators, without
+    a password, and (via krbtgt) can forge tickets that survive a
+    password reset.
+
+  Prerequisites
+    Membership of Helpdesk only. No exploit, no privileged session, no
+    elevated tooling. The read is performed with the replication protocol
+    using three directory rights that are granted to Helpdesk for a
+    backup application that was decommissioned in 2023.
+
+  Evidence
+    Three directory rights present on the Domain object:
+      Replicating Directory Changes (All)
+      Replicating Directory Changes In Filtered Set
+      DS-Replication-Get-Changes (All)
+    A replication request for the domain returns 214 account objects
+    with their NT hashes. The krbtgt hash was obtained and is stored in
+    the encrypted evidence archive; it was not used to forge tickets.
+    (Full account data is not reproduced in this report.)
+
+  Business impact
+    Complete compromise of the forest from any Helpdesk account. This
+    is a one-step path to domain administrator and is the highest-impact
+    finding in the engagement.
+
+  Remediation
+    1. Remove all three rights from the Helpdesk group       [Domain Admins, Immediate]
+    2. Identify what requires them; if the backup application is retired,
+       decommission the group                          [IT Ops, Immediate]
+    3. Enable &quot;Audit Directory Service Access&quot; and alert on the
+       replication GUIDs                          [Security, 1 sprint]
+    4. Credential Guard on all servers and workstations [Endpoint, 1 sprint]
+    5. Add Protected Users to all privileged accounts   [Domain Admins, 1 sprint]
+    6. Reset krbtgt twice, 24 hours apart               [Domain Admins, Immediate]
+
+  Re-test
+    Included at +30 days: confirm the rights are absent and that the
+    alerting fires on a test replication request.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DCSync</strong></td>
+<td>Using replication rights to read the whole directory</td>
+</tr>
+<tr>
+<td><strong>DS-Replication-Get-Changes</strong></td>
+<td>The modern third right</td>
+</tr>
+<tr>
+<td><strong>NTDS.dit</strong></td>
+<td>The directory database; every hash in the domain</td>
+</tr>
+<tr>
+<td><strong>SAM</strong></td>
+<td>The local machine account database</td>
+</tr>
+<tr>
+<td><strong>LSASS</strong></td>
+<td>The process holding credentials in memory</td>
+</tr>
+<tr>
+<td><strong>Credential Guard</strong></td>
+<td>VBS-based LSASS protection; the strongest control</td>
+</tr>
+<tr>
+<td><strong>RunAsPPL</strong></td>
+<td>Weaker, user-mode-only LSA protection</td>
+</tr>
+<tr>
+<td><strong>DPAPI</strong></td>
+<td>Windows credential encryption, keyed off the user's password</td>
+</tr>
+<tr>
+<td><strong>Master key file</strong></td>
+<td>The DPAPI key on disk; the crackable secret</td>
+</tr>
+<tr>
+<td><strong>Protected Users</strong></td>
+<td>Group that blocks ticket theft and forces NTLM down</td>
+</tr>
+<tr>
+<td><strong>LAPS</strong></td>
+<td>Unique local admin passwords</td>
+</tr>
+<tr>
+<td><strong>krbtgt</strong></td>
+<td>The account that signs TGTs; its hash enables golden tickets</td>
+</tr>
+<tr>
+<td><strong>4662</strong></td>
+<td>The event log ID that shows DCSync</td>
+</tr>
+<tr>
+<td><strong>7045</strong></td>
+<td>Service installed; mimikatz's service-based extraction</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ad-05 &amp;&amp; cd ~/aegis/labs/ad-05
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. tooling ---
+{
+  echo &quot;=== credential tooling ===&quot;
+  pipx install impacket-toolkit 2&gt;/dev/null &amp;&amp; echo &quot;  impacket-toolkit installed&quot;
+  for b in secretsdump lookupsid.py reg.py ntdsutil dcomrpc2 \
+           mkhash psexec wmiexec smbexec; do
+    command -v &quot;$b&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; printf &quot;  %-16s %s\n&quot; &quot;$b&quot; &quot;$(command -v $b)&quot;
+  done
+  echo
+  echo &quot;=== on a WINDOWS host in the lab ===&quot;
+  echo &quot;  mimikatz.exe           (run as a local admin at minimum)&quot;
+  echo &quot;  sekurlsa::logonpasswords   the LSASS dump&quot;
+  echo &quot;  sekurlsa::tickets          the ticket cache&quot;
+  echo &quot;  sekurlsa::dpapi           the DPAPI master keys&quot;
+  echo &quot;  lsadump::cache           the local SAM cache&quot;
+  echo &quot;  and for the file route (needs SYSTEM + bootkey):&quot;
+  echo &quot;  secretsdump.py -ntds ntds.dit -bootkey bootkey&quot;
+} 2&gt;&amp;1 | tee 01-tooling.txt
+
+# --- 2. check the rights, anonymously ---
+cat &gt; 02-dcsync-check.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Do YOU have the DCSync rights? READ-ONLY, and often ANONYMOUS.
+DC=&quot;${1:?usage: ./02-dcsync-check.sh 192.168.56.10}&quot;
+b=$(echo &quot;$DC&quot; | cut -d. -f1)
+case &quot;$b&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DC outside the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+NC=$(ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base defaultNamingContext 2&gt;/dev/null \
+     | grep -m1 &quot;^defaultNamingContext:&quot; | awk '{print $2}')
+echo &quot;[scope] $DC in range&quot;
+echo
+echo &quot;=== does the domain object expose the replication rights? ===&quot;
+echo &quot;    (an ANONYMOUS query. if it answers, that is the finding.)&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  -s base &quot;(objectClass=DomainDNS)&quot; \
+  nTSGeneralInfo nCSCreationName nETInfoNamingContext 2&gt;/dev/null \
+  | grep -E &quot;nCS|nET|nTS&quot; | sed 's/^/  /'
+echo
+echo &quot;  nCSCreationName is present   -&gt; the DC object is replicated normally&quot;
+echo &quot;  nETInfoNamingContext present -&gt; the rights are ON the object&quot;
+echo
+echo &quot;=== who is in the replication groups (as the DC sees them) ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(memberOf=CN=Domain Admins,${NC:-DC=lab,DC=internal})&quot; sAMAccountName 2&gt;/dev/null \
+  | grep &quot;^sAMAccountName:&quot; | sed 's/^/  /'
+echo
+echo &quot;=== the rights, checked against your OWN account (not anonymous) ===&quot;
+echo &quot;  If you have a credential, ldapwhoami -vv shows the effective rights:&quot;
+echo &quot;    ldapwhoami -x -D 'CN=me,OU=Users,$NC' -W -H ldap://$DC -vv | grep -i access&quot;
+echo
+echo &quot;  Look for: Replicating Directory Changes (All)&quot;
+echo &quot;  If it is there, your session can do DCSync. Report it and STOP.&quot;
+echo &quot;  Do not exercise DCSync in production without written agreement:&quot;
+echo &quot;  a full replication request is a domain-wide event and the client's&quot;
+echo &quot;  monitoring will see it. A rights check is enough evidence.&quot;
+EOF
+chmod +x 02-dcsync-check.sh
+
+# --- 3. the non-destructive version ---
+cat &gt; 03-safe-dcsync.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# The LEAST invasive way to prove DCSync rights. Do this, not a full
+# secretsdump, unless the ROE explicitly permits domain-wide replication.
+DOM=&quot;${1:?}&quot;; CRED=&quot;${2:?dc-ip or dc/domain and user:pass}&quot;
+DC=$(echo &quot;$DOM&quot; | cut -d/ -f1); b=$(echo &quot;$DC&quot; | cut -d. -f1)
+case &quot;$b&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DOM outside the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+echo &quot;[scope] $DOM in range; [roe] DCSync is credential testing, confirm the ROE&quot;
+echo
+echo &quot;=== 1. are the rights present on the DC? (LDAP, not replication) ===&quot;
+ldapwhoami -x -D &quot;$CRED&quot; -H &quot;ldap://$DC&quot; -vv 2&gt;/dev/null \
+  | grep -iE &quot;Replicating Directory|Get-Changes&quot; | sed 's/^/  /'
+echo &quot;  (an empty result means the rights are not granted - which is correct)&quot;
+echo
+echo &quot;=== 2. what COULD be done with them (statement of impact, not execution) ===&quot;
+echo &quot;  A full replication request would return:&quot;
+echo &quot;    - every user NT hash&quot;
+echo &quot;    - every computer account NT hash&quot;
+echo &quot;    - the krbtgt hash (if unfiltered)&quot;
+echo &quot;  Use the enumeration scripts instead (imp-01) and state the&quot;
+echo &quot;  rights presence as the finding. Reproduce the dump only when&quot;
+echo &quot;  the ROE says 'domain-wide credential extraction authorised'.&quot;
+echo
+echo &quot;=== 3. the enumeration that proves the SAME thing, safely ===&quot;
+echo &quot;    ldapsearch for sAMAccountName + userAccountControl (ad-03)&quot;
+echo &quot;    bloodhound-python for the DCSync EDGE, without any hashes&quot;
+echo &quot;  A graph edge 'X can DCSync' is the finding. The hashes are not&quot;
+echo &quot;  needed to prove it and you should not collect them by default.&quot;
+EOF
+chmod +x 03-safe-dcsync.sh
+
+# --- 4. what to do with the dump ---
+cat &gt; 04-triage.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Triage a hash dump by value, not by order.
+
+The instinct is to feed a 200-account dump to hashcat and wait. That
+wastes hours. The instinct that works: decide what you are looking for
+FIRST, then run only the hashcats that answer that question.
+&quot;&quot;&quot;
+import sys, re
+
+# the two questions worth GPU hours
+GOAL = {
+    &quot;win&quot;:     [&quot;krbtgt&quot;, &quot;administrator&quot;, &quot;admin&quot;],
+    &quot;lateral&quot;: [&quot;svc&quot;, &quot;service&quot;, &quot;backup&quot;, &quot;sql&quot;, &quot;web&quot;, &quot;iis&quot;, &quot;app&quot;, &quot;monitor&quot;],
+    &quot;roast&quot;:   [&quot;svc&quot;, &quot;service&quot;, &quot;app&quot;, &quot;sql&quot;, &quot;iis&quot;, &quot;web&quot;],
+}
+
+def triage(path, goal=&quot;win&quot;, accounts_file=None):
+    entries = []
+    for line in open(path, errors=&quot;ignore&quot;):
+        line = line.strip()
+        if not line: continue
+        if &quot;:&quot; in line:
+            user, h = line.split(&quot;:&quot;, 1)
+        elif &quot;\\&quot; in line:
+            user, h = line.rsplit(&quot;\\&quot;, 1)
+        else:
+            continue
+        if re.fullmatch(r&quot;[0-9a-fA-F]{32}&quot;, h):         entries.append((user, h, &quot;NT&quot;))
+        elif re.fullmatch(r&quot;[0-9a-fA-F]{40}&quot;, h):        entries.append((user, h, &quot;LM/NT&quot;))
+        elif h.startswith(&quot;$&quot;):                        entries.append((user, h, &quot;cached/derived&quot;))
+    if accounts_file:
+        groups = {}
+        for g in open(accounts_file, errors=&quot;ignore&quot;):
+            parts = [p.strip() for p in g.strip().split(&quot;,&quot;)]
+            if len(parts) &gt;= 2: groups.setdefault(parts[0], []).append(parts[1])
+        for user, h, kind in entries:
+            gs = groups.get(user, [])
+            for g in gs:
+                if re.search(r&quot;Domain Admins|Enterprise Admins|Schema Admins&quot;, g, re.I):
+                    print(f&quot;  *** WIN CONDITION: {user} is in {g}&quot;)
+                    break
+    print(f&quot;\n  {len(entries)} accounts parsed\n&quot;)
+    print(&quot;  ORDER TO CRACK (value per GPU-minute):&quot;)
+    print(&quot;  1. Domain Admins / krbtgt      -&gt; the win condition&quot;)
+    print(&quot;  2. Service accounts with SPNs   -&gt; roastable (ad-04)&quot;)
+    print(&quot;  3. Delegation/preauth accounts -&gt; the key to ad-02/ad-04&quot;)
+    print(&quot;  4. Everything else, name-sorted by entropy&quot;)
+    print()
+    tiers = {k: [] for k in GOAL}
+    for user, h, kind in entries:
+        for k, pats in GOAL.items():
+            if any(p in user.lower() for p in pats):
+                tiers[k].append(user)
+    for k, users in tiers.items():
+        if users:
+            print(f&quot;  [{k}] {len(users)} candidates: {', '.join(users[:8])}&quot;
+                  f&quot;{' ...' if len(users)&gt;8 else ''}&quot;)
+    return entries
+
+if __name__ == &quot;__main__&quot;:
+    path = sys.argv[1] if len(sys.argv) &gt; 1 else None
+    if not path:
+        print(__doc__); sys.exit(0)
+    triage(path, accounts_file=sys.argv[2] if len(sys.argv) &gt; 2 else None)
+PY
+
+# --- 5. a synthetic dump, so the script has something to triage ---
+python3 - &lt;&lt;'PY' &gt; lab_dump.txt
+import hashlib, os, secrets
+names = [&quot;administrator&quot;,&quot;krbtgt&quot;,&quot;svc-backup&quot;,&quot;svc-web&quot;,&quot;svc-sql&quot;,&quot;svc-iis&quot;,
+         &quot;svc-mon&quot;,&quot;alice&quot;,&quot;bob&quot;,&quot;erin&quot;,&quot;jsmith&quot;,&quot;helpdesk1&quot;,&quot;helpdesk2&quot;,
+         &quot;backupadmin&quot;,&quot;itadmin&quot;,&quot;sqladmin&quot;,&quot;webadmin&quot;,&quot;jdoe&quot;,&quot;asmith&quot;,&quot;bwilson&quot;,
+         &quot;dev1&quot;,&quot;dev2&quot;,&quot;buildagent&quot;,&quot;monitoring&quot;,&quot;backup-svc&quot;,&quot;reporting&quot;]
+for n in names:
+    # synthetic, obviously-fake hashes. This is a lab file.
+    print(f&quot;{n}:{secrets.token_hex(16)}&quot;)
+PY
+cat &gt; lab_groups.csv &lt;&lt;'EOF'
+name,groups
+krbtgt,Kerberos Authentication Service
+administrator,Domain Admins
+svc-backup,&quot;Domain Admins,Backup Operators,DnsAdmins&quot;
+itadmin,Domain Admins
+sqladmin,Domain Admins
+svc-web,Backup Operators
+alice,IIS Users
+bob,Helpdesk
+erin,Backup Operators
+EOF
+python3 04-triage.py lab_dump.txt lab_groups.csv 2&gt;&amp;1 | tee 05-triage.txt
+
+# --- 6. the detection the client needs ---
+cat &gt; 06-detection.md &lt;&lt;'MD'
+# Detection for credential dumping
+
+```text
+  THE EVENTS, and what each tells you
+
+  4662  Directory Service Access, ObjectType=DomainDNS, with the
+        ObjectAccess UNKNOWN GUID being one of:
+          1131f6aa-9c07-11d1-f79f-00c04fc2dcd2  Replicating Directory Changes
+          1131f6ad-9c07-11d1-f79f-00c04fc2dcd2  Replicating Directory Changes In Filtered Set
+          89e95b76-444d-4c62-991a-0facbeda640c  DS-Replication-Get-Changes
+        =&gt; DCSync. This is the single most important detection in AD.
+
+  4663  Attempt to enumerate the DS. HIGH VOLUME = enumeration.
+  5136  A directory object was modified. Rogue SPNs, delegation flags,
+        preauth flags appearing: someone is preparing an attack.
+  4742  A computer account was changed (the classic
+        &quot;replace the DC machine account&quot; escalation).
+  4624  LogonType 3 or 9 (network) from a host that never does that.
+  4648  Explicit credentials - a pass-the-hash or a scheduled task.
+  4672  Special privileges (SeDebugPrivilege) assigned at logon.
+  4688  Process creation: mimikatz, rundll32 with comsvcs.dll,
+        or any PowerShell with -enc.
+  7045  Service installed. Mimikatz's service-based LSASS extraction.
+  4104  PowerShell script block. The most content-rich log you can have.
+
+  THE TWO THAT MATTER MOST, and they cost nothing:
+    5136 on the Domain object, for sPN, msDS-AllowedToDelegateTo,
+           and msDS-SupportedEncryptionTypes changes
+           -&gt; someone is setting up roasting or delegation
+    4662 with the replication GUIDs
+           -&gt; someone is running DCSync
+```
+
+```powershell
+# the audit policy that makes the above exist
+#   on the DC, in gpedit.msc:
+#     Computer Configuration
+#       -&gt; Policies
+#         -&gt; Windows Settings
+#           -&gt; Security Settings
+#             -&gt; Advanced Audit Policy Configuration
+#               -&gt; Audit Policies
+#                 -&gt; DS Access
+#                   -&gt; Audit Directory Service Access: SUCCESS, FAILURE
+#                   -&gt; Audit Directory Service Changes: SUCCESS
+#                 -&gt; Object Access
+#                   -&gt; Audit File System: SUCCESS (for the SAM/NTDS.dit reads)
+
+# the alert, in Splunk/KQL/Elastic (KQL shown)
+# index=* EventCode=4662 ObjectType=&quot;domainDNS&quot;
+#   | where ObjectAccess IN (&quot;1131f6aa-9c07-11d1-f79f-00c04fc2dcd2&quot;,
+#                           &quot;1131f6ad-9c07-11d1-f79f-00c04fc2dcd2&quot;,
+#                           &quot;89e95b76-444d-4c62-991a-0facbeda640c&quot;)
+# | table _time SubjectUserName IpAddress ObjectName
+```
+
+| Control | Blocks | Effort |
+|---|---|---|
+| Credential Guard (VBS) | LSASS dumping | a sprint; needs compatible hardware |
+| Run as non-admin | most dumping | process |
+| Protected Users | ticket theft, DPAPI roaming | membership list |
+| LAPS | local admin reuse | a deploy |
+| Remove unused replication rights | DCSync | an hour + monitoring |
+| Tiered admin + PAW | using a stolen admin hash | process, painful |
+| Audit the replication GUIDs | detecting DCSync | an hour |
+| Alert on 5136 for sPN changes | detecting roast prep | an hour |
+| Restricted admin off | RDP pass-the-hash | a GPO |
+
+**The uncomfortable answer for most organisations: the three controls
+that would have prevented the finding in this note are not the ones
+that are deployed, because they require either a hardware refresh
+(Credential Guard) or a process conversation (tiering).**
+MD
+cat 06-detection.md
+rm -f lab_dump.txt lab_groups.csv 04-triage.py
+</code></pre>
+<p><strong>Step 5 is the deliverable</strong>: a synthetic dump triaged by <em>value</em> rather than volume —<br />
+<code>svc-backup</code> flagged as a win condition because of its group memberships, and the priority<br />
+order printed. The instinct is to feed 200 hashes to hashcat; the instinct that works is to<br />
+decide what you're looking for first.</p>
+<p><strong><code>03-safe-dcsync.sh</code></strong> is the practical judgement: an LDAP rights check plus a graph edge is<br />
+the finding, and a full domain-wide replication request is a client-visible event you should not<br />
+fire unilaterally. The script says so and explains why.</p>
+<p><strong>Record:</strong> <code>05-triage.txt</code> and <code>06-detection.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the three rights that gate DCSync, and why they are separate from Domain Admin.</li>
+<li>Why is DCSync preferable to credential dumping for an assessment?</li>
+<li>Name five credential-dumping variants and what each needs.</li>
+<li>What does DPAPI master key extraction convert a memory compromise into?</li>
+<li>Why is the krbtgt hash so consequential, and why might an assessor choose not to use it?</li>
+<li>What event ID and which three GUIDs are the DCSync detection?</li>
+<li>What does event 5136 tell you to alert on, and why is it earlier than the dump?</li>
+<li>Why is Credential Guard frequently not deployed?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Credential Dumping</strong> → <strong>DCSync</strong> → <strong>NTDS.dit</strong> → <strong>NT Hash</strong> →<br />
+<strong>Credential Guard</strong> → <strong>Pass-the-Hash</strong>.<br />
+<code>imp-01</code> is the tool; <code>bh-03</code> is how you find who has these rights.</p>

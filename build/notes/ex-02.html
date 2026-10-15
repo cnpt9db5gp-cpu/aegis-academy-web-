@@ -1,0 +1,254 @@
+<h1 id="mapping-the-stack-frame-in-gdb">Mapping the Stack Frame in gdb</h1>
+<h2 id="summary">Summary</h2>
+<p>Before you can overwrite a return address you must know exactly where it is relative to your<br />
+buffer. This lecture produces those numbers by measurement rather than by calculation, because<br />
+the compiler inserts padding you will not have predicted.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>x86-64 System V ABI: <code>push rbp; mov rbp,rsp; sub rsp,N</code> on entry</li>
+<li><strong>Locals sit at lower addresses than the saved RBP and return address</strong></li>
+<li>The stack grows <strong>downward</strong>, so overflowing a buffer walks <strong>upward</strong> toward <code>ret</code></li>
+<li>16-byte stack alignment is enforced, so the offset is rarely a round number</li>
+<li>Measure <code>rbp - rsp</code> and the frame contents; do not compute and hope</li>
+<li>Record the numbers in your scratchpad; every later exercise needs them</li>
+</ul>
+<h2 id="the-frame-drawn">The frame, drawn</h2>
+<pre><code class="language-text">HIGH ADDRESSES (older frames)
+┌──────────────────────┐
+│ caller frame         │
+├──────────────────────┤ ← RBP
+│ saved RBP      +8    │
+│ RETURN ADDR    +0    │ ← the target
+├──────────────────────┤
+│ arg5 arg4 arg3 arg2 │
+│ arg1 arg1            │
+├──────────────────────┤ ← RSP
+│ local variables      │
+│ alignment padding    │
+└──────────────────────┘ ← your buffer starts near here
+LOW ADDRESSES
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Prologue</strong></td>
+<td><code>push rbp; mov rbp,rsp; sub rsp,N</code></td>
+</tr>
+<tr>
+<td><strong>Epilogue</strong></td>
+<td><code>leave; ret</code></td>
+</tr>
+<tr>
+<td><strong><code>rbp</code></strong></td>
+<td>Frame pointer; points at the frame base</td>
+</tr>
+<tr>
+<td><strong><code>rsp</code></strong></td>
+<td>Stack pointer; points at the current top</td>
+</tr>
+<tr>
+<td><strong>Return address</strong></td>
+<td>Saved RIP, popped by <code>ret</code></td>
+</tr>
+<tr>
+<td><strong>Offset</strong></td>
+<td>Bytes from your buffer to the return address</td>
+</tr>
+<tr>
+<td><strong>Alignment padding</strong></td>
+<td>Bytes inserted to keep 16-byte alignment</td>
+</tr>
+<tr>
+<td><strong>Frame chain</strong></td>
+<td><code>rbp</code> → previous <code>rbp</code> → ... → stack base</td>
+</tr>
+<tr>
+<td><strong>Breaking on address</strong></td>
+<td><code>b *0x401136</code> when symbols are absent</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the core gdb workflow, in batch mode ---
+gdb -q --batch \
+  -ex 'break main' -ex 'run' \
+  -ex 'info registers rsp rbp rip' \
+  -ex 'disassemble main' \
+  -ex 'x/8gx $rbp' \
+  -ex 'bt' \
+  ./target-weak 'AAAA'
+
+# --- finding a useful address without symbols ---
+objdump -d ./target-weak | grep -E &quot;&lt;main&gt;|&lt;vuln&gt;|&lt;win&gt;&quot;
+nm ./target-weak | grep -E &quot; T (main|vuln|win)&quot;
+
+# --- the frame chain ---
+gdb -q --batch -ex 'break main' -ex 'run' -ex 'x/40gx $rbp' ./target-weak
+
+# --- follow rbp to the caller's frame ---
+gdb -q --batch -ex 'break main' -ex 'run' \
+  -ex 'x/4gx $rbp' -ex 'x/4gx *(long*)$rbp' ./target-weak
+
+# --- breakpoints at instructions, not functions ---
+gdb -q --batch -ex 'break *0x4011a6' -ex 'run' -ex 'info registers rip' ./target-weak
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> measure the exact offset from a buffer to its return address, by two independent<br />
+methods.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ex-02 &amp;&amp; cd ~/aegis/labs/ex-02
+
+cp ../ex-01/target.c . 2&gt;/dev/null || cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+void level3(const char *in) { char b16[16]; strcpy(b16, in); printf(&quot;L3 %s\n&quot;, b16); }
+void level2(const char *in) { char b24[24]; strcpy(b24, in); level3(in); }
+void level1(const char *in) { char b32[32]; strcpy(b32, in); level2(in); }
+int main(int argc, char **argv) {
+    if (argc &lt; 2) { fprintf(stderr, &quot;usage: %s &lt;string&gt;\n&quot;, argv[0]); return 1; }
+    level1(argv[1]);
+    return 0;
+}
+EOF
+gcc -Wall -g -O0 -fno-stack-protector -no-pie -z execstack target.c -o target
+checksec --file=./target | grep -E &quot;No canary|NX disabled|No PIE&quot;
+
+# --- 1. the prologue, read directly from the disassembly ---
+echo &quot;=== the prologue of each function ===&quot;
+objdump -d -M intel ./target | grep -A6 -E &quot;&lt;(level1|level2|level3)&gt;:&quot; | head -30 | tee 01-prologue.txt
+echo
+echo &quot;Read: push rbp / mov rbp,rsp / sub rsp,N.  N is the frame size for that function.&quot;
+
+# --- 2. measure rbp - rsp in each frame ---
+echo
+echo &quot;=== rbp - rsp, per frame ===&quot;
+for fn in main level1 level2 level3; do
+  gdb -q --batch -ex &quot;break $fn&quot; -ex &quot;run $(python3 -c 'print(&quot;A&quot;*120)')&quot; \
+      -ex &quot;printf \&quot;  $fn: rbp=0x%lx rsp=0x%lx delta=%ld bytes\\n\&quot;, \$rbp, \$rsp, \$rbp-\$rsp&quot; \
+      -ex quit ./target 2&gt;/dev/null | grep &quot;$fn:&quot;
+done | tee 02-deltas.txt
+
+# --- 3. THE FRAME CONTENTS: where the return address actually is ---
+echo
+echo &quot;=== the frame at level1, in quads ===&quot;
+gdb -q --batch -ex 'break level1' -ex 'run AAAAAAAAAAAAAAAA' \
+    -ex 'printf &quot;rbp = 0x%lx\n&quot;, $rbp' \
+    -ex 'x/8gx $rbp-16' \
+    -ex 'x/2gx $rbp' \
+    -ex quit ./target 2&gt;/dev/null | tee 03-frame.txt
+cat 03-frame.txt
+echo
+echo &quot;  At \$rbp+0 is the SAVED RBP. At \$rbp+8 is the RETURN ADDRESS.&quot;
+echo &quot;  Identify the return address: it is a 0x0040xxxx value, not ASCII.&quot;
+
+# --- 4. brute-force the offset (the reliable method) ---
+echo
+echo &quot;=== measuring the offset empirically ===&quot;
+python3 - &lt;&lt;'PY' | tee 04-offset.txt
+import subprocess
+marker = b&quot;ZZZZZZZZ&quot;          # 0x5a5a5a5a5a5a5a5a
+for n in range(1, 160):
+    try:
+        r = subprocess.run([&quot;./target&quot;, b&quot;A&quot; * n + marker], capture_output=True, timeout=5)
+        out = (r.stderr + r.stdout).decode(&quot;utf8&quot;, &quot;replace&quot;)
+    except subprocess.TimeoutExpired:
+        continue
+    if marker.decode() in out or r.returncode != 0:
+        print(f&quot;  offset to return address : {n + 8} bytes&quot;)
+        print(f&quot;  crash occurred at n      : {n}&quot;)
+        print(f&quot;  exit code                : {r.returncode}&quot;)
+        print(f&quot;  last output              : {out.strip().splitlines()[-1][:80] if out.strip() else '(none)'}&quot;)
+        break
+else:
+    print(&quot;  no crash observed in the swept range - widen it&quot;)
+PY
+
+# --- 5. the three functions, three offsets ---
+echo
+echo &quot;=== per-function offsets (each frame is different) ===&quot;
+cat &gt; levels.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+void l3(char *in){ char b[16]; strcpy(b,in); printf(&quot;L3 %s\n&quot;, b); }
+void l2(char *in){ char b[24]; strcpy(b,in); l3(in); }
+void l1(char *in){ char b[32]; strcpy(b,in); l2(in); }
+int main(int argc,char**argv){
+  if(argc&lt;2) return 1;
+  void *fns[3] = {l1,l2,l3};
+  int which = atoi(argv[2]) if0;   /* placeholder */
+  return 0; }
+EOF
+cat &gt; offsets.py &lt;&lt;'PY'
+import subprocess, sys
+OFFSETS = {&quot;l1&quot;: None, &quot;l2&quot;: None, &quot;l3&quot;: None}
+marker = b&quot;BBBBBBBB&quot;
+def build(which):
+    src = f'''
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+void l3(char *in){{ char b[16]; strcpy(b,in); }}
+void l2(char *in){{ char b[24]; strcpy(b,in); if({which}==3) l3(in); }}
+void l1(char *in){{ char b[32]; strcpy(b,in); if({which}&gt;=2) l2(in); }}
+int main(int argc,char**argv){{ if(argc&lt;2) return 1;
+  if({which}==1) l1(argv[1]); else if({which}==2) l2(argv[1]); else l3(argv[1]);
+  return 0; }}
+'''
+    open(f&quot;/tmp/t{which}.c&quot;,&quot;w&quot;).write(src)
+    subprocess.run([&quot;gcc&quot;,&quot;-g&quot;,&quot;-O0&quot;,&quot;-fno-stack-protector&quot;,&quot;-no-pie&quot;,&quot;-z&quot;,&quot;execstack&quot;,
+                    f&quot;/tmp/t{which}.c&quot;,&quot;-o&quot;,f&quot;/tmp/t{which}&quot;],check=True)
+for which in (1,2,3):
+    build(which)
+    for n in range(1,200):
+        try:
+            r = subprocess.run([f&quot;/tmp/t{which}&quot;, b&quot;A&quot;*n + marker], capture_output=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            continue
+        if r.returncode != 0 or marker.decode() in (r.stdout+r.stderr).decode(&quot;utf8&quot;,&quot;replace&quot;):
+            OFFSETS[f&quot;l{which}&quot;] = n + 8
+            break
+    print(f&quot;  l{which}: offset to return address = {OFFSETS[f'l{which}']} bytes&quot;)
+PY
+python3 offsets.py 2&gt;/dev/null | tee 05-level-offsets.txt
+rm -f levels.c offsets.py /tmp/t?.c /tmp/t?
+
+# --- 6. record it ---
+cat &gt; 06-my-numbers.md &lt;&lt;'EOF'
+# My measured offsets (target, gcc -O0)
+
+| Function | buffer size | rbp - rsp | offset to return addr |
+|---|---|---|---|
+| main    |    |   |   |
+| level1  | 32 |   |   |
+| level2  | 24 |   |   |
+| level3  | 16 |   |   |
+
+Notes:
+- the offset is NOT the buffer size: alignment padding sits between
+- recompiling changes the numbers - always re-measure
+- `-O2` changes everything again
+EOF
+cat 06-my-numbers.md
+echo &quot;  fill in 06-my-numbers.md from 02-deltas.txt and 05-level-offsets.txt&quot;
+</code></pre>
+<p><strong>Step 4 is the one that matters.</strong> An empirically measured offset beats any calculation, because<br />
+the compiler inserted padding you could not have derived.</p>
+<p><strong>Record:</strong> <code>06-my-numbers.md</code> filled in. <code>ex-03</code> and <code>ex-04</code> depend on it.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What three instructions make up a function prologue on x86-64?</li>
+<li>Is a local buffer at a higher or lower address than the return address?</li>
+<li>Why is the offset not equal to the buffer size?</li>
+<li>How do you tell a return address apart from saved data on the stack?</li>
+<li>Why must you re-measure after recompiling?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>gdb</strong> → <strong>Calling Convention</strong> → <strong>Stack Frame</strong> → <strong>RBP / RSP</strong> → <strong>Buffer Overflow</strong> →<br />
+<strong>Stack Canary</strong>.<br />
+Every number in <code>ex-03</code> and <code>ex-04</code> comes from this lecture.</p>

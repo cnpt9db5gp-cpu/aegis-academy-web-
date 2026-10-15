@@ -1,0 +1,279 @@
+<h1 id="deploying-metasploitable-and-other-intentionally-vulnerable-hosts">Deploying Metasploitable and Other Intentionally Vulnerable Hosts</h1>
+<h2 id="summary">Summary</h2>
+<p>Intentionally vulnerable targets are the only way to practise at a repeatable difficulty. This<br />
+note covers what to deploy, what each is <em>for</em>, and the rule that matters most: <strong>a vulnerable<br />
+host on a host-only network is the entire safety case for running it.</strong></p>
+<p>The framing: <strong>the deploy is not the lesson.</strong> The lesson is a<br />
+specific exercise against a specific target. A target you cannot name<br />
+the purpose of is a toy.</p>
+<blockquote>
+<p>Companion to <code>lab-01</code> (the platform) and <code>lab-04</code> (the traffic and<br />
+the write-up).</p>
+</blockquote>
+<h2 id="the-catalogue-by-purpose">The catalogue, by purpose</h2>
+<pre><code class="language-text">  TARGET                  WHAT IT IS FOR             BRIDGE TO
+  ------------------------------------------------------------------------
+  Metasploitable2 (VulnHub)
+      Several VMs in one, or build your own from the download.
+      Famous for: many hosts, a rich pivot story, aged software.
+      Use for: the capstone (cap-01..cap-06)
+      Watch: it is UNPATCHED by design and 20+ years of CVEs old.
+
+  Metasploitable3
+      Ubuntu, more modern, fewer services, still deliberately weak.
+      Use for: &quot;am I actually using current tools?&quot;
+
+  DVWA
+      PHP + MySQL, levels 1-5 of the same web app.
+      THE BEST TARGET FOR Tier 4. Level 1-5 walks up the whole web
+      track: injection, XSS, CSRF, weak session, file upload.
+      Use for: ps-02, ps-03, cs161-07
+
+  OWASP Juice Shop
+      A modern, intentionally vulnerable SPA. The best target for
+      PortSwigger-class material because it has access control,
+      business logic, and IDOR built in.
+      Use for: ps-04, ps-09, psw-02
+
+  WebGoat
+      Lesson-based, one vulnerability per lesson.
+      Use for: reading the explanation first, then practising
+
+  AD Miner (an analyser, not a target)
+      Runs against YOUR OWN lab AD and produces the reporting
+      equivalent of BloodHound's path analysis.
+      Use for: after lab-03, to see what a defender would see.
+
+  Hack The Box / PG Practice / tryhack.me
+      Real, harder, and NOT a lab you can break freely.
+      PG Practice is the honest one - machines designed to be
+      solvable, with a writeup culture.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/lab-02 &amp;&amp; cd ~/aegis/labs/lab-02
+mkdir -p deploy notes
+
+cat &gt; 01-preflight.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# BEFORE deploying anything vulnerable. Every line is a gate.
+echo &quot;==============================================================&quot;
+echo &quot; PRE-DEPLOY SAFETY CHECK&quot;
+echo &quot;==============================================================&quot;
+f=0
+gate() { if [ &quot;$1&quot; = &quot;y&quot; ]; then printf &quot;  [ok]   %s\n&quot; &quot;$2&quot;
+         else printf &quot;  [STOP] %s\n&quot; &quot;$2&quot;; f=1; fi; }
+
+echo
+echo &quot;--- network ---&quot;
+gate &quot;${ISOLATED:-n}&quot; &quot;the target's network is HOST-ONLY, not bridged&quot;
+gate &quot;${NO_EGRESS:-n}&quot; &quot;the target CANNOT reach the internet&quot;
+gate &quot;${NOT_MY_LAN:-n}&quot; &quot;the target is NOT on my real LAN&quot;
+echo
+echo &quot;--- the specific address ---&quot;
+echo -n &quot;  the target's IP: &quot;
+TARGET_IP=&quot;&quot;
+read -r TARGET_IP
+case &quot;$TARGET_IP&quot; in
+  192.168.56.*|10.10.10.*)
+    printf &quot;  [ok]   %s is inside the lab ranges\n&quot; &quot;$TARGET_IP&quot; ;;
+  *)
+    printf &quot;  [STOP] %s is NOT in a lab range. Do not deploy a vulnerable\n&quot; &quot;$TARGET_IP&quot;
+    printf &quot;         host on that address.\n&quot;; f=1 ;;
+esac
+echo
+echo &quot;--- evidence that isolation is real ---&quot;
+echo &quot;  From INSIDE the target VM, run these. If ANY succeeds, stop.&quot;
+echo &quot;    ping -c1 8.8.8.8          expect FAIL&quot;
+echo &quot;    ping -c1 192.168.1.1      expect FAIL (your real router)&quot;
+echo &quot;    ping -c1 $(ip route | awk '/default/{print $3; exit}')  expect FAIL (your gateway)&quot;
+echo
+echo &quot;  Record the results in notes/isolation-&lt;date&gt;.txt.&quot;
+echo
+if [ &quot;$f&quot; -eq 0 ]; then
+  echo &quot;  Gates passed. Deploy.&quot;
+else
+  echo &quot;  A gate failed. DO NOT DEPLOY.&quot;
+  echo &quot;  A deliberately vulnerable host with egress is an attack tool&quot;
+  echo &quot;  aimed at everything you can reach, including your real network.&quot;
+fi
+exit $f
+EOF
+chmod +x 01-preflight.sh
+
+cat &gt; 02-dvwa.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# DVWA on loopback or the host-only range. The best Tier 4 target.
+#
+# The vulnerability here is intentional and documented. That is what
+# makes it safe to run: it is a lab, not a breach.
+set -euo pipefail
+ROOT=&quot;$HOME/aegis/labs/lab-02/deploy/dvwa&quot;
+BIND=&quot;${1:-127.0.0.1:8081}&quot;     # loopback by default. Change deliberately.
+mkdir -p &quot;$ROOT&quot;; cd &quot;$ROOT&quot;
+
+echo &quot;=== 1. Is PHP available? ===&quot;
+command -v php &gt;/dev/null || { echo &quot;  sudo apt install php-cli php-sqlite3 php-mbstring&quot;; exit 1; }
+php --version | head -1 | sed 's/^/  /'
+
+echo &quot;=== 2. Pull DVWA ===&quot;
+if [ ! -d DVWA ]; then
+  git clone --depth 1 https://github.com/digininja/DVWA.git
+  echo &quot;  cloned&quot;
+else
+  echo &quot;  already present&quot;
+fi
+
+echo &quot;=== 3. Configure for SQLite (no MySQL service needed) ===&quot;
+# DVWA ships with a MySQL default. SQLite is far simpler on a lab and
+# has one fewer thing to break.
+cp config/config.inc.php.dist config/config.inc.php
+python3 - &lt;&lt;'PY'
+import re, pathlib
+p = pathlib.Path(&quot;config/config.inc.php&quot;)
+s = p.read_text()
+s = s.replace(&quot;$_DVWA = array();&quot;, &quot;$_DVWA = array();&quot;)
+# switch the DB definition block to sqlite3
+s = re.sub(r&quot;\$_DB\s*=\s*array\((?:[^;]|\n)*?\);&quot;,
+           &quot;$_DB = array('dbtype' =&gt; 'sqlite3', 'database' =&gt; 'dvwa.sqlite');&quot;,
+           s, count=1)
+# loopback only, and no database creator account needed
+s = s.replace(&quot;define('ALLOW_EMPTY_PASSWORD', true);&quot;,
+              &quot;define('ALLOW_EMPTY_PASSWORD', true);&quot;)
+p.write_text(s)
+print(&quot;  config written for sqlite3&quot;)
+PY
+
+echo &quot;=== 4. Start on $BIND ===&quot;
+echo &quot;  php -S $BIND -t $ROOT&quot;
+nohup php -S &quot;$BIND&quot; -t &quot;$ROOT&quot; &gt; &quot;$ROOT/server.log&quot; 2&gt;&amp;1 &amp;
+sleep 1
+curl -s -o /dev/null -w &quot;  HTTP %{http_code} on $BIND\n&quot; &quot;http://$BIND/login.php&quot;
+
+echo
+echo &quot;=== 5. THE TARGET'S PURPOSE, which is the point of deploying it ===&quot;
+cat &lt;&lt;'PURPOSE'
+  DVWA has five security levels. Walk them in order:
+
+    Level 1 (Low)        brute-forceable login; SQL injection with no
+                         protection at all; XSS reflected; CSRF with a
+                         token that is checked but trivial
+    Level 2 (Medium)      adds a modest filter that is bypassable with
+                         a different technique (a different encoding, a
+                         different injection point)
+    Level 3 (High)        parameterised queries (no injection at all);
+                         CSRF tokens with a session requirement
+    Level 4 (Medium+)     blind SQLi; DOM-based XSS instead of server-side
+                         reflection; a second-order injection
+    Level 5 (Impossible)  the correct implementation of everything
+
+  THE LESSON, and it is the one people miss:
+    Levels 1 to 4 are not four versions of the same app. They are four
+    DIFFERENT attacks requiring different techniques. The filter in
+    level 2 does not stop you - it changes which technique works. A
+    pentester who can only do reflected XSS cannot solve level 4.
+
+  This is why Tier 4's theory notes exist. DVWA Level 4 is DOM XSS and
+  it is genuinely hard if you have only learned to inject payloads
+  into form fields.
+PURPOSE
+EOF
+chmod +x 02-dvwa.sh
+./02-dvwa.sh 2&gt;&amp;1 | tail -20 | tee 03-dvwa.txt
+
+cat &gt; 04-metasploitable.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Metasploitable: the pivot lab.
+#
+# Metasploitable2 comes as seven VMs. You do not need all of them.
+# The useful set for the capstone is three:
+#
+#   msf2-dc     a Windows 2000 domain controller. Deliberately ancient:
+#               NTLM only, no ASLR, weak services, and a known path to
+#               SYSTEM. This is where the capstone's AD phase runs.
+#   msf2-meterpreter  a Windows XP host with writable services, and
+#               AV, which is the point of it
+#   msf2-ubuntu   a Linux host with weak NFS and web services, for the
+#               Unix half
+#
+# METASPLOITABLE3 is one Ubuntu box, current-ish, for &quot;am I using
+# modern tooling&quot;.
+#
+# SAFETY: Metasploitable2 runs Windows 2000 with no patches and known
+# RCE. It MUST be on a host-only network. It is the single highest
+# risk target in this catalog, and the preflight in 01-preflight.sh
+# is not optional for it.
+echo &quot;=== deploy order, and why ===&quot;
+cat &lt;&lt;'ORDER'
+  1. msf2-ubuntu       first. Linux is quick, it validates your
+                       tooling, and it is the least risky.
+  2. msf2-dc           second. This is the capstone's centrepiece.
+  3. msf2-meterpreter  third. The AV-evasion phase.
+  4. Juice Shop        fourth. The web tier, on the same host.
+  5. DVWA              fifth. Loopback is fine for this.
+
+  Each one gets its own snapshot at 04-PRE-EXERCISE.
+ORDER
+cat &lt;&lt;'SETTING'
+  THE VBOXSETTINGS THAT MATTER
+    --nic1 hostonly                       NEVER bridged
+    --nictype1 82540EM                    the most compatible NIC
+    --memory 512                          msf2 machines are old
+    --cpus 1
+    --snapshot on                         power-on snapshot
+
+  AND THE SNAPSHOT DISC: store it outside the VM folder, on a disk
+  with room. A snapshot chain that fills the disk corrupts the VM.
+SETTING
+EOF
+chmod +x 04-metasploitable.sh
+</code></pre>
+<h2 id="the-deployment-record">The deployment record</h2>
+<pre><code class="language-bash">cat &gt; 05-inventory.md &lt;&lt;'EOF'
+# Lab target inventory
+
+&gt; Fill this as you deploy. It is the answer to &quot;what did you have
+&gt; available&quot;, which is the first question of any capstone write-up.
+
+| Target | Address | Range | Snapshot | Purpose | Destroyed? |
+|---|---|---|---|---|---|
+| DVWA | 127.0.0.1:8081 | loopback | n/a | web tier, ps-02/03 | n/a |
+| msf2-ubuntu | 192.168.56.30 | external | 03 | Linux pivot | |
+| msf2-dc | 192.168.56.10 | external | 02-DOMAIN | AD domain controller | |
+| msf2-dc (2nd NIC) | 10.10.10.5 | internal | 02-DOMAIN | the pivot path | |
+| msf2-meterpreter | 192.168.56.20 | external | 03 | AV evasion | |
+| Juice Shop | 192.168.56.40 | external | 03 | access control, IDOR | |
+| ad-miner | - | - | - | defender's view | |
+
+## Isolation confirmation (record the actual output)
+EOF
+cat &gt;&gt; 05-inventory.md &lt;&lt;'ISO'
+
+```text
+$ ping -c1 8.8.8.8      from inside msf2-dc
+PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+--- 8.8.8.8 ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss
+$ ping -c1 192.168.1.1  from inside msf2-dc
+100% packet loss
+$ ping -c1 192.168.56.1 from inside msf2-dc
+1 packets transmitted, 1 received, 0% packet loss
+```
+ISO
+</code></pre>
+<p><strong>All three results must be as above. If the first or second succeeds,<br />
+stop and fix the network before doing anything else.</strong><br />
+```</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is a host-only network the entire safety case for a vulnerable target?</li>
+<li>Name four targets and the specific lesson each is for.</li>
+<li>Why is Juice Shop better than DVWA for access-control material?</li>
+<li>What is DVWA Level 4, and why does it defeat someone who only knows reflected XSS?</li>
+<li>What does DVWA Level 5 teach, and why is it worth deploying?</li>
+<li>Why SQLite instead of MySQL for DVWA on a lab?</li>
+<li>Why is Metasploitable2 the highest-risk target in the catalogue?</li>
+<li>Which four VM settings matter for deploying Metasploitable2?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Lab Environment</strong> → <strong>Exploitation</strong> → <strong>Virtualisation</strong> → <strong>Attack Surface</strong> →<br />
+<strong>Privilege Escalation</strong>.<br />
+<code>lab-03</code> builds the domain; <code>lab-04</code> captures the traffic and writes it up.</p>

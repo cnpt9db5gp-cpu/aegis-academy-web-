@@ -1,0 +1,297 @@
+<h1 id="course-overview-the-shell">Course Overview &amp; The Shell</h1>
+<h2 id="summary">Summary</h2>
+<p>MIT's <em>The Missing Semester of Your CS Education</em> exists because every computer science degree<br />
+assumes you already know how to use a command line, an editor, a version control system, and a<br />
+debugger — and almost nobody does. For a security student this is not a nice-to-have: <strong>the shell<br />
+is the primary interface of your entire profession.</strong> <code>nmap</code>, <code>gdb</code>, <code>john</code>, <code>metasploit</code>, and<br />
+every exploit script you will ever write are driven from a terminal.</p>
+<p>Lecture 1 covers the mental model: what a shell actually is, what happens when you press Enter,<br />
+and why that matters.</p>
+<h2 id="what-actually-happens-when-you-press-enter">What actually happens when you press Enter</h2>
+<pre><code>you type:   nmap -sV 127.0.0.1
+    ↓
+1. LINE EDITING     the terminal (readline) handles arrows, history, tab completion
+    ↓
+2. PARSING          the shell splits the line into words: nmap | -sV | 127.0.0.1
+    ↓
+3. EXPANSION        ~ becomes /home/nwpcs;  * becomes filenames;  $VAR becomes a value
+    ↓
+4. PATH LOOKUP      find an executable named nmap in the directories in $PATH
+    ↓
+5. EXECUTION        fork() a copy, execve() the binary, the parent waits
+    ↓
+6. EXIT CODE        the shell records 0 (success) or non-zero (failure)
+</code></pre>
+<p><strong>Why this matters:</strong> most "the shell is broken" moments are actually a failure at step 4 (not<br />
+found on PATH) or step 3 (an expansion you did not intend). Knowing the six steps turns a vague<br />
+frustration into a specific diagnosis.</p>
+<h2 id="the-essential-builtins">The essential builtins</h2>
+<p>Most of what you type is a <strong>builtin</strong> — implemented inside the shell itself, not a program on<br />
+disk. This matters because builtins work when <code>/usr/bin</code> is broken, which is exactly the<br />
+situation after a partial compromise or a broken chroot.</p>
+<pre><code class="language-bash"># Which of these is the shell itself, and which is a file on disk?
+# `type -t` answers precisely: builtin | file | alias | keyword | function
+for b in cd pwd echo export type command source alias history jobs kill test \
+         which ls cat; do
+  printf '  %-9s %s\n' &quot;$b&quot; &quot;$(type -t &quot;$b&quot;)&quot;
+done
+</code></pre>
+<p>Every <code>builtin</code> above is implemented inside bash. <code>which</code>, <code>ls</code> and <code>cat</code><br />
+are <code>file</code> — separate programs on disk. That distinction is the whole<br />
+reason builtins survive a broken <code>/usr/bin</code>, so it is worth being able<br />
+to ask rather than assume.</p>
+<h2 id="job-control">Job control</h2>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&amp;</code></td>
+<td>run in background</td>
+</tr>
+<tr>
+<td><code>Ctrl+Z</code></td>
+<td>suspend (SIGTSTP) — pauses, does not kill</td>
+</tr>
+<tr>
+<td><code>bg</code></td>
+<td>resume in background</td>
+</tr>
+<tr>
+<td><code>fg</code></td>
+<td>resume in foreground</td>
+</tr>
+<tr>
+<td><code>Ctrl+C</code></td>
+<td>interrupt (SIGINT)</td>
+</tr>
+<tr>
+<td><code>Ctrl+\</code></td>
+<td>quit (SIGQUIT) — produces a core dump</td>
+</tr>
+<tr>
+<td><code>$!</code></td>
+<td>PID of the last background job</td>
+</tr>
+<tr>
+<td><code>kill %1</code></td>
+<td>signal job 1</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+sleep 1000 &amp;
+jobs
+fg %1
+kill %1
+
+# run something long, multitask, and come back to it
+sudo nmap -sV -p- 192.168.56.101 &amp;
+tail -f /var/log/syslog        # use the terminal meanwhile
+jobs                          # see it still running
+fg %1                          # come back
+</code></pre>
+<h2 id="multiple-terminals">Multiple terminals</h2>
+<p><code>Ctrl+Shift+T</code> opens a new tab; <code>Ctrl+Shift+N</code> a new window. Learn this now. <strong>Long scans belong<br />
+in one tab while you work in another.</strong> Beginners lose fifteen minutes of scan output by<br />
+forgetting <code>Ctrl+C</code> will not stop an nmap run gracefully.</p>
+<h2 id="shell-scripting-preview">Shell scripting preview</h2>
+<p>A script is a file of shell commands. The three lines that make it a script rather than a<br />
+command list:</p>
+<pre><code class="language-bash">#!/bin/bash          # which interpreter runs this
+set -euo pipefail     # fail fast, fail on unset vars, fail on pipe errors
+echo &quot;hello ${USER}&quot;
+</code></pre>
+<p>Those three safety lines are the difference between a script that tells you what went wrong and<br />
+one that silently continues with empty variables.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Shell</strong></td>
+<td>The interpreter: reads a line, expands it, executes it</td>
+</tr>
+<tr>
+<td><strong>Builtin</strong></td>
+<td>A command implemented inside the shell (<code>cd</code>, <code>export</code>)</td>
+</tr>
+<tr>
+<td><strong>External command</strong></td>
+<td>A program on disk (<code>ls</code>, <code>nmap</code>, <code>python3</code>)</td>
+</tr>
+<tr>
+<td><strong>PATH</strong></td>
+<td>Ordered directories searched for executables</td>
+</tr>
+<tr>
+<td><strong>Expansion</strong></td>
+<td>Substitution before execution: <code>~</code>, <code>*</code>, <code>$VAR</code>, <code>$(cmd)</code></td>
+</tr>
+<tr>
+<td><strong>Quoting</strong></td>
+<td><code>"…"</code> allows expansion; <code>'…'</code> forbids it; <code>\</code> escapes one character</td>
+</tr>
+<tr>
+<td><strong>Job control</strong></td>
+<td>Background, foreground, suspend, kill</td>
+</tr>
+<tr>
+<td><strong>Signal</strong></td>
+<td>A message to a process: SIGINT (2), SIGTERM (15), SIGKILL (9)</td>
+</tr>
+<tr>
+<td><strong>Exit code</strong></td>
+<td>0 = success; anything else = failure</td>
+</tr>
+<tr>
+<td><strong>Shebang</strong></td>
+<td><code>#!</code> line naming the interpreter</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what is my shell and where does it search? ---
+# --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+echo &quot;$SHELL&quot;
+echo &quot;$PATH&quot; | tr ':' '\n'
+type -a nmap          # is it builtin, alias, or a path?
+command -v nmap
+
+# --- expansion, the thing that surprises everyone ---
+echo ~                  # home
+echo *                  # every file in cwd
+echo *.md
+echo &quot;quoted * stays literal&quot;
+echo 'single quoted $HOME stays literal'
+echo \$HOME              # escaped
+file=$(ls *.md | head -1) &amp;&amp; echo &quot;first file: $file&quot;   # command substitution
+
+# --- background and resume ---
+sleep 300 &amp;
+sudo nmap -sV -p- 192.168.56.101 &gt; scan.txt 2&gt;&amp;1 &amp;
+jobs -l
+tail -f scan.txt       # watch it while you do something else
+kill %1                # or let it finish
+
+# --- a real recon loop in the background, then go get coffee ---
+{
+  for ip in $(seq 1 254); do
+    ping -c1 -W1 192.168.56.$ip &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo &quot;192.168.56.$ip&quot;
+  done
+} &gt; ~/aegis/labs/alive-hosts.txt 2&gt;&amp;1 &amp;
+echo &quot;scan running as PID $!&quot;
+
+# --- signals: the difference that matters ---
+kill -TERM  &lt;pid&gt;   # graceful, cleanup runs
+kill -KILL  &lt;pid&gt;   # no cleanup, last resort
+kill -0    &lt;pid&gt;   # does this process exist? (permission check too)
+
+# --- your own shell's memory ---
+declare -p PATH | head -1
+set | grep -E '^(SHELL|HOME|USER|PATH)='
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> internalise the six-step execution model, and produce your first multi-host<br />
+discovery run using only shell builtins and tools you already have.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ms-01 &amp;&amp; cd ~/aegis/labs/ms-01
+
+# --- STEP BY STEP: trace one command ---
+{
+  echo &quot;1. the line as typed:&quot;
+  echo '   nmap -sV --version-light -p- 127.0.0.1'
+  echo
+  echo &quot;2. what it expands to:&quot;
+  echo &quot;   $(echo nmap -sV --version-light -p- 127.0.0.1)&quot;
+  echo
+  echo &quot;3. where is nmap:&quot;
+  echo &quot;   $(command -v nmap)&quot;
+  echo
+  echo &quot;4. is it a builtin or external:&quot;
+  type -a nmap
+  echo
+  echo &quot;5. what PATH search order looks like:&quot;
+  echo &quot;$PATH&quot; | tr ':' '\n' | nl
+} | tee 01-execution-model.txt
+
+# --- RUN IT: your first real scan, loopback only ---
+nmap -sV --version-light -p- 127.0.0.1 -oN 02-loopback-scan.txt
+cat 02-loopback-scan.txt
+
+# --- background work, do something else, come back ---
+nmap -sV -p- 192.168.56.0/24 &gt; 03-range-scan.txt 2&gt;&amp;1 &amp;
+echo &quot;started as PID $!&quot;
+sleep 5
+jobs -l
+echo &quot;--- doing other work while that runs ---&quot;
+id &gt; /tmp/unrelated.txt &amp;&amp; cat /tmp/unrelated.txt
+jobs                                   # still there?
+wait                                   # block until it finishes
+cat 03-range-scan.txt
+
+# --- SIGNALS ---
+sleep 600 &amp;
+BGPID=$!
+kill -0 $BGPID &amp;&amp; echo &quot;process $BGPID exists&quot;
+kill -TERM $BGPID
+sleep 1
+kill -0 $BGPID 2&gt;/dev/null || echo &quot;terminated cleanly after SIGTERM&quot;
+
+# --- expansion, demonstrated ---
+{
+  echo &quot;cwd:        $(pwd)&quot;
+  echo &quot;home:       ~&quot;
+  echo &quot;wildcard:   *.txt  -&gt;  $(ls *.txt | tr '\n' ' ')&quot;
+  echo &quot;quoted:     '*.txt' -&gt;  '*.txt'&quot;
+  echo &quot;var:        $USER on $HOSTNAME&quot;
+  echo &quot;cmdsub:     today is $(date +%A)&quot;
+} | tee 04-expansion.txt
+</code></pre>
+<p><strong>Record:</strong> the output of <code>01-execution-model.txt</code>. It is the mental model you will use to<br />
+diagnose every "command not found" for the rest of your career.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>List the six steps between pressing Enter and the process starting.</li>
+<li><code>cd</code> is a builtin and <code>ls</code> is not. Why does that distinction matter to an attacker?</li>
+<li>What is the difference between <code>Ctrl+Z</code>/<code>bg</code> and <code>Ctrl+C</code>?</li>
+<li>Why do security scripts start with <code>set -euo pipefail</code>?</li>
+<li><code>foo: command not found</code> — which of the six steps failed, and what do you check first?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Shell</strong> → <strong>Working Directory</strong> → <strong>PATH / tool resolution</strong> → <strong>Bash Scripting</strong>.<br />
+<code>ms-02</code> turns all of this into a working recon pipeline.</p>

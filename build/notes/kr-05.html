@@ -1,0 +1,190 @@
+<h1 id="keeping-kali-current-without-breaking-it">Keeping Kali Current Without Breaking It</h1>
+<h2 id="summary">Summary</h2>
+<p>Kali is a <strong>rolling release</strong>: there is no version to upgrade <em>to</em>, only a repository that is<br />
+always in motion. <code>apt update &amp;&amp; apt upgrade</code> on Kali can change thousands of packages across a<br />
+few hundred megabytes and — because Kali tracks upstream quickly — can occasionally leave you with<br />
+a mismatched library that breaks one tool.</p>
+<p>This is the most common way new Kali users lose their environment. This lecture is about doing it<br />
+safely.</p>
+<h2 id="how-a-rolling-upgrade-actually-differs-from-debian">How a rolling upgrade actually differs from Debian</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Debian stable</th>
+<th>Kali rolling</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Upgrade size</td>
+<td>Occasionally large, then quiet for months</td>
+<td>Potentially large <strong>any day</strong></td>
+</tr>
+<tr>
+<td>Library versions</td>
+<td>Frozen for the release lifetime</td>
+<td>Track upstream within days</td>
+</tr>
+<tr>
+<td><code>apt upgrade</code></td>
+<td>Safe, predictable</td>
+<td>Usually safe; occasionally a tool breaks</td>
+</tr>
+<tr>
+<td>Risk</td>
+<td>Very low</td>
+<td>Low, but non-zero and hard to predict</td>
+</tr>
+<tr>
+<td>Recovery</td>
+<td>Install an older ISO</td>
+<td>Restore a snapshot or rollback</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-safe-routine">The safe routine</h2>
+<pre><code class="language-bash"># 1. See what is actually going to happen, BEFORE it happens
+sudo apt update
+apt list --upgradable 2&gt;/dev/null | wc -l       # how many packages
+apt-get -s upgrade | tail -20                   # -s = SIMULATE. Read it.
+
+# 2. If the simulated upgrade touches something alarming (a kernel, libc, metasploit
+#    framework), stop and snapshot the VM first.
+
+# 3. Upgrade
+sudo apt upgrade
+
+# 4. Reboot if a new kernel was installed
+# (uname -r before and after will tell you)
+
+# 5. VERIFY — this is the step everyone skips
+python3 -c &quot;import scapy; print('scapy ok')&quot;
+msfconsole -q -x &quot;version; exit&quot; 2&gt;/dev/null | head -5
+nmap --version | head -2
+john --list=formats | head -3
+</code></pre>
+<h2 id="things-that-genuinely-break-on-rolling-kali">Things that genuinely break on rolling Kali</h2>
+<ul>
+<li><strong>Kernel upgrades</strong> — a new kernel plus an old out-of-tree driver (some VPN and Wi-Fi drivers)<br />
+  means no wireless. <code>sudo apt install linux-headers-$(uname -r)</code> is the usual fix.</li>
+<li><strong>Metasploit Framework and its database</strong> — <code>msfdb init</code> repairs a broken database; a major<br />
+  framework update occasionally wants a fresh database anyway.</li>
+<li><strong>Python packaging collisions</strong> — <code>pip install</code> as root fights <code>apt</code> for the same libraries.<br />
+  The fix is isolation, covered in <code>py-*</code> and <code>linux-privesc-doctrine</code>.</li>
+<li><strong>Removal of a tool you relied on</strong> — Kali tracks upstream renames and removals.</li>
+</ul>
+<h2 id="the-correct-way-to-install-a-python-tool-on-kali">The correct way to install a Python tool on Kali</h2>
+<p>This matters so much it gets its own lecture (<code>pipx</code>), but the short version:</p>
+<pre><code class="language-bash"># WRONG - fights the system interpreter, breaks apt eventually
+sudo pip install some-tool
+pip install some-tool --break-system-packages
+
+# RIGHT - isolated, uninstallable, cannot break the OS
+pipx install some-tool
+some-tool --version
+
+# ALSO RIGHT - per-project isolation
+python3 -m venv ~/aegis/venvs/some-tool
+source ~/aegis/venvs/some-tool/bin/activate
+pip install some-tool
+deactivate
+</code></pre>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- dry run: the most important command on a rolling distro ---
+sudo apt update
+apt-get -s upgrade            # simulate, print, change nothing
+apt-get -s full-upgrade       # simulate including removals
+apt list --upgradable | head -20
+
+# --- what is holding packages back? ---
+apt-mark showhold
+apt-get -s dist-upgrade | grep -E '^(Remv|The following)'
+
+# --- clean up, safely ---
+sudo apt autoremove
+sudo apt clean                # clears the package cache, frees space
+
+# --- kernel and reboot bookkeeping ---
+uname -r
+dpkg -l 'linux-image*' | grep ^ii | awk '{print $2}'
+ls /boot
+
+# --- after an upgrade, sanity-check the toolchain ---
+for t in nmap nc curl wget python3 pipx git gdb objdump; do
+  printf &quot;%-10s %s\n&quot; &quot;$t&quot; &quot;$(command -v $t || echo MISSING)&quot;
+done
+
+# --- repair common breakages ---
+sudo apt install --reinstall python3-pip python3-venv
+msfdb init          # if metasploit db is broken
+sudo apt update --allow-releaseinfo-change
+
+# --- is this repo even sane? ---
+apt-cache policy | head -30
+grep -rhv '^#' /etc/apt/sources.list /etc/apt/sources.list.d/ 2&gt;/dev/null | grep -v '^$'
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> practise a safe upgrade cycle, and produce a baseline fingerprint of your<br />
+toolchain so you can tell immediately what a bad update did.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/kr-05 &amp;&amp; cd ~/aegis/labs/kr-05
+
+# --- BASELINE: fingerprint every tool before touching anything ---
+{
+  echo &quot;=== BASELINE $(date -Iseconds) ===&quot;
+  echo &quot;kernel: $(uname -r)&quot;
+  echo &quot;python: $(python3 --version)&quot;
+  for t in nmap nc netcat socat curl wget git gdb objdump radare2 sqlmap hydra john hashcat john metasploit msfconsole gobuster ffuf nikto; do
+    p=$(command -v &quot;$t&quot; 2&gt;/dev/null)
+    if [ -n &quot;$p&quot; ]; then
+      v=$(&quot;$t&quot; --version 2&gt;&amp;1 | head -1)
+      printf &quot;%-14s %-40s %s\n&quot; &quot;$t&quot; &quot;$p&quot; &quot;$v&quot;
+    else
+      printf &quot;%-14s %s\n&quot; &quot;$t&quot; &quot;NOT INSTALLED&quot;
+    fi
+  done
+} | tee 01-baseline.txt
+
+# --- NOW SIMULATE (changes nothing) ---
+sudo apt update
+apt list --upgradable 2&gt;/dev/null | tail -n +2 | wc -l | xargs echo &quot;packages upgradable:&quot;
+apt-get -s upgrade 2&gt;/dev/null | grep -E '^(Inst|Remv)' | head -40 | tee 02-simulated.txt
+apt-get -s upgrade 2&gt;/dev/null | grep -c '^Inst' | xargs echo &quot;would upgrade:&quot;
+apt-get -s upgrade 2&gt;/dev/null | grep -c '^Remv' | xargs echo &quot;would REMOVE:&quot;
+
+# --- Safety check: is a kernel or libc in that list? ---
+grep -E 'linux-image|libc6|python3 ' 02-simulated.txt &amp;&amp; \
+  echo &quot;&gt;&gt;&gt; KERNEL/LIBC IN PLAY: snapshot the VM before proceeding&quot; || \
+  echo &quot;No kernel/libc in this batch - routine upgrade&quot;
+
+# --- Disk headroom before you start ---
+df -h / | tail -1
+
+# --- Hold list is usually empty; if not, this is why ---
+apt-mark showhold
+</code></pre>
+<p><strong>Then, if and only if you have a VM snapshot:</strong> run <code>sudo apt upgrade</code>, reboot, and re-run the<br />
+fingerprint loop, diffing against <code>01-baseline.txt</code>:</p>
+<pre><code class="language-bash"># after the upgrade - rerun the exact same fingerprint loop above,
+# redirecting to a second file. Do not retype it: the point of the
+# comparison is that both files came from identical code.
+#   { ...the loop from step 1, unchanged... } &gt; 02-after.txt
+# Uncomment and run the loop itself here; the shell cannot expand
+# &quot;...same loop...&quot; and the block below is a diff, not a program.
+diff 01-baseline.txt 02-after.txt
+</code></pre>
+<p><strong>Record:</strong> keep <code>01-baseline.txt</code> permanently. When a tool mysteriously stops working in three<br />
+months, this file is the first thing you will want.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does <code>apt-get -s upgrade</code> exist, and what happens if you skip it?</li>
+<li>Kali is a rolling release. Name two concrete operational consequences of that.</li>
+<li>What is wrong with <code>sudo pip install some-tool</code>, and what is the correct alternative?</li>
+<li>A wireless adapter stopped working after an upgrade. What is the most likely cause and the<br />
+   first command you would run?</li>
+<li>You need to free disk space. Which three commands are safe, and which is destructive?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Package Management</strong> → <strong>Dependency Conflicts</strong> → <strong>Virtualenv Isolation</strong> → <strong>pipx</strong>.<br />
+This is also the maintenance half of <strong>Host Compromise Response</strong> in Tier 6: a target's package<br />
+state is evidence.</p>

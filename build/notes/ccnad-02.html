@@ -1,0 +1,228 @@
+<h1 id="ipv4-ipv6-nat-and-port-forwarding">IPv4, IPv6, NAT and Port Forwarding</h1>
+<h2 id="summary">Summary</h2>
+<p>NAT is why your laptop is invisible, and port forwarding is how you become visible again. Both<br />
+are security-relevant in opposite directions, and both are routinely misconfigured.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>NAT</strong> rewrites addresses at the boundary: private → public. Breaks inbound connections</li>
+<li><strong>PAT/NAPT</strong>: many private addresses share one public via port translation — the common case</li>
+<li><strong>Port forwarding</strong>: the deliberate hole through NAT, mapped from an external port to an internal<br />
+  host. Every one is a service you have published</li>
+<li><strong>IPv6</strong>: removes the need for NAT, which removes a layer of obscurity. Scanning a /64 is<br />
+  technically feasible and nobody does it</li>
+<li><strong>IPv6 privacy extensions</strong> randomise host identifiers, making host-tracking harder</li>
+<li><strong>Happy eyeballs / dual stack</strong>: hosts often run both, doubling the attack surface quietly</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>NAT</strong></td>
+<td>Network Address Translation</td>
+</tr>
+<tr>
+<td><strong>PAT / NAPT</strong></td>
+<td>NAT using port numbers; many-to-one</td>
+</tr>
+<tr>
+<td><strong>Port forwarding</strong></td>
+<td>Explicit NAT rule exposing an internal service</td>
+</tr>
+<tr>
+<td><strong>Hairpin NAT</strong></td>
+<td>A host reaching an internal service via the external address</td>
+</tr>
+<tr>
+<td><strong>IPv6 / /64</strong></td>
+<td>128-bit addressing; a /64 is standard per site</td>
+</tr>
+<tr>
+<td><strong>Privacy extension</strong></td>
+<td>IPv6 host IDs that rotate</td>
+</tr>
+<tr>
+<td><strong>Dual stack</strong></td>
+<td>IPv4 and IPv6 simultaneously</td>
+</tr>
+<tr>
+<td><strong>UPnP</strong></td>
+<td>Automatically opens ports; a security problem</td>
+</tr>
+<tr>
+<td><strong>CGNAT</strong></td>
+<td>Carrier-grade NAT; you cannot port forward at all</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what NAT did to you ---
+curl -s --max-time 5 https://api.ipify.org 2&gt;/dev/null; echo &quot;  &lt;- your public IP&quot;
+curl -s --max-time 5 &quot;https://ipinfo.io/json&quot; 2&gt;/dev/null | head -12
+
+# --- your own NAT boundary ---
+ip -br addr
+ip route | awk '/default/{print &quot;  default gw:&quot;, $3}'
+cat /proc/net/ip_tables_names 2&gt;/dev/null
+sudo iptables -t nat -L -n 2&gt;/dev/null | head -10
+sudo nft list ruleset 2&gt;/dev/null | head -10
+
+# --- UPnP: who can open ports on your gateway? ---
+command -v upnpc miniupnpc
+upnpc -l 2&gt;/dev/null | head -10 || echo &quot;(miniupnpc not installed)&quot;
+# Any entry listed here is a port your router will forward on request.
+
+# --- IPv6 ---
+ip -6 addr show scope global 2&gt;/dev/null
+ping6 -c1 -W2 2606:4700:4700::1111 2&gt;/dev/null | head -2
+traceroute -6 -n -m4 2606:4700:4700::1111 2&gt;/dev/null | head -5
+
+# --- dual stack, both at once ---
+curl -4 -s --max-time 5 https://ifconfig.me 2&gt;/dev/null; echo &quot;  &lt;- IPv4&quot;
+curl -6 -s --max-time 5 https://ifconfig.me 2&gt;/dev/null; echo &quot;  &lt;- IPv6&quot;
+
+# --- what an open port forward looks like from outside ---
+# (only ever against your own gateway, and only to confirm your own exposure)
+curl -s --max-time 5 &quot;https://api.ipify.org?format=json&quot; 2&gt;/dev/null | head -3
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> establish what is exposed on your own connection, and understand NAT from the<br />
+outside.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccnad-02 &amp;&amp; cd ~/aegis/labs/ccnad-02
+
+# --- 1. inside vs outside: the NAT proof ---
+{
+  echo &quot;=== my private addresses ===&quot;
+  ip -br addr | grep -v &quot;127.0.0.1&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== my public address (what the internet sees) ===&quot;
+  pub=$(curl -s --max-time 6 https://api.ipify.org 2&gt;/dev/null)
+  echo &quot;  $pub&quot;
+  echo
+  if [ -n &quot;$pub&quot; ]; then
+    python3 - &quot;$pub&quot; &lt;&lt;'PY'
+import ipaddress, sys
+pub = sys.argv[1]
+a = ipaddress.ip_address(pub)
+print(f&quot;  is it public?  {a.is_global}&quot;)
+print(f&quot;  is it private? {a.is_private}&quot;)
+if not a.is_private and not a.is_loopback:
+    print(&quot;  -&gt; You are behind NAT. Inbound connections cannot reach you without a forward.&quot;)
+PY
+  else
+    echo &quot;  (no outbound connectivity, or the request was blocked)&quot;
+  fi
+} 2&gt;&amp;1 | tee 01-nat.txt
+
+# --- 2. IPv6, if you have it ---
+{
+  echo &quot;=== IPv6 global addresses ===&quot;
+  ip -6 addr show scope global 2&gt;/dev/null | grep inet6 | sed 's/^/  /'
+  if ip -6 addr show scope global 2&gt;/dev/null | grep -q inet6; then
+    echo
+    echo &quot;=== these are globally routable, with no NAT in front ===&quot;
+    echo &quot;  IPv6 reachability test:&quot;
+    timeout 8 ping6 -c2 2606:4700:4700::1111 2&gt;&amp;1 | tail -3 | sed 's/^/    /'
+    echo
+    echo &quot;=== path ===&quot;
+    traceroute -6 -n -m5 2606:4700:4700::1111 2&gt;/dev/null | sed 's/^/    /'
+  else
+    echo &quot;  (no global IPv6 on this host)&quot;
+  fi
+} 2&gt;&amp;1 | tee 02-ipv6.txt
+
+# --- 3. UPnP: let me check whether my gateway would forward a port for me ---
+{
+  echo &quot;=== UPnP status ===&quot;
+  if command -v upnpc &gt;/dev/null; then
+    upnpc -s 2&gt;&amp;1 | head -6
+    echo
+    echo &quot;=== existing port mappings ===&quot;
+    upnpc -l 2&gt;&amp;1 | head -15
+  else
+    echo &quot;miniupnpc not installed. This is a REAL check worth doing:&quot;
+    echo &quot;  sudo apt install miniupnpc &amp;&amp; upnpc -l&quot;
+    echo
+    echo &quot;Why it matters: UPnP lets any local process ask your router to forward&quot;
+    echo &quot;a port to any internal host. Malware uses it, and so do attackers.&quot;
+  fi
+} 2&gt;&amp;1 | tee 03-upnp.txt
+
+# --- 4. port forwarding, demonstrated locally without touching a router ---
+python3 - &lt;&lt;'PY' | tee 04-forwarding.txt
+import socket, threading, time
+
+# A forward is just: listen on an external port, hand traffic to an internal port.
+BACKEND_PORT = 9100        # &quot;the internal service&quot;
+FRONT_PORT   = 38080       # &quot;the external port&quot;
+
+def backend():
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((&quot;127.0.0.1&quot;, BACKEND_PORT)); s.listen(1)
+    c, _ = s.accept()
+    data = c.recv(64); c.sendall(b&quot;HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nhi\n&quot;)
+    c.close(); s.close()
+
+def forwarder():
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((&quot;0.0.0.0&quot;, FRONT_PORT)); s.listen(1)     # 0.0.0.0 = reachable by the whole LAN
+    c, addr = s.accept()
+    b = socket.create_connection((&quot;127.0.0.1&quot;, BACKEND_PORT), timeout=2)
+    c.sendall(b&quot;GET / HTTP/1.0\r\n\r\n&quot;)
+    b.sendall(c.recv(64))
+    print(f&quot;  forwarded a request from {addr[0]} to 127.0.0.1:{BACKEND_PORT}&quot;)
+    c.close(); b.close(); s.close()
+
+threading.Thread(target=backend, daemon=True).start()
+threading.Thread(target=forwarder, daemon=True).start()
+time.sleep(0.4)
+print(&quot;  now querying the forwarded port from loopback:&quot;)
+import urllib.request
+try:
+    print(&quot;   &quot;, urllib.request.urlopen(f&quot;http://127.0.0.1:{FRONT_PORT}&quot;, timeout=3).read())
+except Exception as e:
+    print(&quot;   &quot;, type(e).__name__, e)
+time.sleep(0.3)
+PY
+
+echo
+echo &quot;=== what I just built, and what it means ===&quot;
+cat &lt;&lt;'EOF'
+A port forward is a listener on 0.0.0.0 that relays to an internal service. It is
+the mechanism behind every published web service, every exposed RDP box, and
+every &quot;why is my Ubuntu showing up on shodan&quot; question.
+
+On your router, the same forwarding happens at the edge: it is the only reason
+anything behind your NAT is reachable at all. Each rule you add is a decision
+to publish that service to the internet.
+EOF
+
+# --- 5. check what is listening on your whole LAN-facing surface ---
+{
+  echo &quot;=== world-reachable listeners on this machine ===&quot;
+  ss -tulpn | awk 'NR==1 || $5 ~ /0\.0\.0\.0|\*/' | sed 's/^/  /'
+  echo
+  n=$(ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/' | wc -l)
+  echo &quot;  count: $n&quot;
+  [ &quot;$n&quot; -gt 1 ] &amp;&amp; echo &quot;  each of these is reachable from your entire network.&quot;
+} | tee 05-exposed.txt
+</code></pre>
+<p><strong>Step 5 is the actionable finding.</strong> Anything bound to <code>0.0.0.0</code> on your Kali laptop is visible<br />
+to your whole Wi-Fi. That is the most common real-world mistake on this machine.</p>
+<p><strong>Record:</strong> <code>01-nat.txt</code> and <code>05-exposed.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between NAT and PAT?</li>
+<li>Why can a machine behind NAT not accept inbound connections?</li>
+<li>What does UPnP allow, and why is it a security concern?</li>
+<li>How does IPv6 change the "I am hidden by NAT" assumption?</li>
+<li>What does binding to <code>0.0.0.0</code> mean compared to <code>127.0.0.1</code>?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>NAT</strong> → <strong>Port Forwarding</strong> → <strong>Subnetting</strong> → <strong>IPv6</strong> → <strong>Firewalls &amp; Filtering</strong> →<br />
+<strong>Segmentation</strong>.</p>

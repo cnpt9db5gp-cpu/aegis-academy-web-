@@ -1,0 +1,493 @@
+<h1 id="course-overview-engagement-process-and-rules-of-engagement">Course Overview, Engagement Process and Rules of Engagement</h1>
+<h2 id="summary">Summary</h2>
+<p>TCM Security's Practical Ethical Hacking is the only course in Tier 3 about <strong>process rather than<br />
+mechanism</strong>. Every other lecture in this tier teaches how something breaks. This one teaches how<br />
+to decide what to break, on whom, in what order, and how to prove you stayed inside the line<br />
+the whole time.</p>
+<p>That ordering is the lesson. A pentest is not "hacking". It is a <strong>controlled experiment with a<br />
+written hypothesis, a defined blast radius, and a defensible record</strong>. An engagement that succeeds<br />
+technically and violates scope legally is a failed engagement.</p>
+<blockquote>
+<p>This note is the spine of the tier. Every later note in AEGIS that touches a target<br />
+assumes you have read it. <code>docs/RULES-OF-ENGAGEMENT.md</code> in this repo is the<br />
+application of it to your own labs.</p>
+</blockquote>
+<h2 id="the-engagement-process">The engagement process</h2>
+<pre><code class="language-text">  1. RULES OF ENGAGEMENT   what you may touch, when, how hard, who to call
+  2. SCOPING               which systems, which addresses, which time window
+  3. RECON                 passive, then active; build a map
+  4. ENUMERATION           services, versions, vulns; build a list
+  5. EXPLOITATION          prove access; do not gold-plate
+  6. POST-EXPLOITATION     what does this access actually give me?
+  7. PIVOTING              what does the next network give me?
+  8. REPORTING             what does the business need to know?
+  9. RETEST                did the fix work?
+</code></pre>
+<h2 id="why-the-order-is-not-negotiable">Why the order is not negotiable</h2>
+<table>
+<thead>
+<tr>
+<th>If you skip</th>
+<th>What you get instead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ROE</td>
+<td>legal exposure, and a client who never calls you again</td>
+</tr>
+<tr>
+<td>Scoping</td>
+<td>you test a production host that was not the intended one</td>
+</tr>
+<tr>
+<td>Recon</td>
+<td>you miss the interesting system and find the boring one</td>
+</tr>
+<tr>
+<td>Enumeration</td>
+<td>you "exploit" a service you never identified</td>
+</tr>
+<tr>
+<td>Post-ex</td>
+<td>a shell with no finding written up, because you have no impact</td>
+</tr>
+<tr>
+<td>Reporting</td>
+<td>a successful attack nobody fixes</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Post-exploitation is where findings are born.</strong> A shell on a web server is an<br />
+access-control finding. Being able to read the customer database from that<br />
+shell is an impact finding. The second one is what gets a meeting with the<br />
+CISO.</p>
+<h2 id="what-a-rules-of-engagement-document-contains">What a Rules of Engagement document contains</h2>
+<pre><code class="language-text">  PARTIES
+    client legal entity, their authorised rep, your authorisation to act
+    explicit statement that this is AUTHORISED and by whom
+
+  SCOPE
+    in-scope:   target ranges, domains, hostnames, wireless SSIDs
+    out-of-scope: everything else, stated explicitly
+    the exact date/time window, with timezone
+    testing hours vs emergency escalation procedure
+
+  RULES OF ENGAGEMENT (the 'how')
+    permitted techniques           - full port scan? credential testing? DoS? no
+    prohibited techniques          - social engineering, physical, phishing
+    data handling                  - what you may read, what you must NOT copy
+    data destruction               - you do not delete, you do not encrypt
+    tool restrictions              - client wants a specific scanner
+    personnel on site              - who is watching, who can stop you
+
+  COMMUNICATIONS
+    primary and secondary technical contacts, 24h for test window
+    emergency contact for outages you cause
+    reporting cadence
+
+  DELIVERABLES
+    format, due date, retest inclusion, confidentiality terms
+</code></pre>
+<h2 id="the-three-questions-that-stop-most-engagements-before-they-start">The three questions that stop most engagements before they start</h2>
+<pre><code class="language-text">  1. WHO authorised this, in writing, and are they empowered to?
+  2. WHAT exactly is in scope, as addresses and domains — not descriptions?
+  3. WHAT happens if I break something?
+</code></pre>
+<p>If you cannot answer all three before touching anything, you do not have an<br />
+engagement. You have an incident.</p>
+<h2 id="the-legal-frame-plainly">The legal frame, plainly</h2>
+<pre><code class="language-text">  Computer Misuse Act (UK) / CFAA (US) / equivalents elsewhere:
+    UNAUTHORISED access is the offence. Authorisation must come from someone
+    who OWNS or has PERMISSION to grant it.
+
+  This means:
+    - &quot;the client asked me to&quot; is not authorisation; get it in writing
+    - &quot;I only found it open&quot; is not authorisation; knowing is not consent
+    - a signed SOW that lists a RANGE is authorisation for that range
+    - testing a customer's supplier without their permission is a crime
+</code></pre>
+<h2 id="data-handling-the-part-everyone-under-plans">Data handling: the part everyone under-plans</h2>
+<pre><code class="language-text">  Rule: you are the person most likely to be blamed for a breach that used
+        a credential you read.
+
+  - never exfiltrate more than needed to prove impact
+  - prove by existence, not by contents (&quot;this account exists and has access
+    to /admin&quot; is sufficient; dumping it is not)
+  - redact credentials in every artefact, screenshots included
+  - store notes encrypted, delete on the contractual schedule
+  - if you did read credentials, that is a FINDING, redacted in the report
+</code></pre>
+<h2 id="engagement-types">Engagement types</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Access</th>
+<th>Goal</th>
+<th>Typical finding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vulnerability scan</td>
+<td>none</td>
+<td>enumerate known CVEs</td>
+<td>Patch backlog</td>
+</tr>
+<tr>
+<td>External pentest</td>
+<td>remote</td>
+<td>reach and prove external access</td>
+<td>Entry point</td>
+</tr>
+<tr>
+<td>Internal pentest</td>
+<td>LAN / domain-joined</td>
+<td>test segmentation</td>
+<td>Lateral movement</td>
+</tr>
+<tr>
+<td>Web app assessment</td>
+<td>app only</td>
+<td>test the application</td>
+<td>OWASP Top 10</td>
+</tr>
+<tr>
+<td>Red team</td>
+<td>objective-driven, covert</td>
+<td>reach a business objective</td>
+<td>Detection gaps</td>
+</tr>
+<tr>
+<td>Purple team</td>
+<td>collaborative</td>
+<td>find and fix together</td>
+<td>Everything, live</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Red team is a different contract entirely.</strong> The goal is <em>adversary<br />
+emulation against defenders</em>, the scope is behavioural, and finding an<br />
+vulnerability is not the success condition — reaching the objective without<br />
+being detected is.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Rules of Engagement (ROE)</strong></td>
+<td>Written authorisation and permitted actions</td>
+</tr>
+<tr>
+<td><strong>Scope</strong></td>
+<td>The exact in-scope targets, times and techniques</td>
+</tr>
+<tr>
+<td><strong>Blast radius</strong></td>
+<td>The maximum damage an action could cause</td>
+</tr>
+<tr>
+<td><strong>Rules of engagement vs. ROE</strong></td>
+<td>Same thing; some orgs split client-side and tester-side</td>
+</tr>
+<tr>
+<td><strong>Get-out-of-jail letter</strong></td>
+<td>The written authorisation; formally an NDA + SOW</td>
+</tr>
+<tr>
+<td><strong>SOW</strong></td>
+<td>Statement of Work: scope, deliverables, dates</td>
+</tr>
+<tr>
+<td><strong>Post-exploitation</strong></td>
+<td>Determining impact of obtained access</td>
+</tr>
+<tr>
+<td><strong>Pivot</strong></td>
+<td>Using one compromised host to reach another network</td>
+</tr>
+<tr>
+<td><strong>Finding</strong></td>
+<td>A demonstrated vulnerability with evidence</td>
+</tr>
+<tr>
+<td><strong>Retest</strong></td>
+<td>Verification that remediation worked</td>
+</tr>
+<tr>
+<td><strong>Kill switch</strong></td>
+<td>The named person who can halt testing immediately</td>
+</tr>
+<tr>
+<td><strong>OOB (out-of-band)</strong></td>
+<td>Channel outside the target's network, for emergency contact</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the scope guard: every network script in AEGIS starts with this ---
+cat &gt; ~/aegis/bin/scope-guard.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Refuse to touch anything outside RFC1918 private ranges or explicit
+# loopback. Private labs live here. Public IPs require written authorisation
+# that this script cannot see - so it blocks them by default.
+in_scope() {
+  local ip=&quot;$1&quot;
+  case &quot;$ip&quot; in
+    127.*|::1)                        return 0 ;;   # loopback
+    10.*|192.168.*)                   return 0 ;;   # RFC1918
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+    *)                                return 1 ;;
+  esac
+}
+for t in &quot;$@&quot;; do
+  if ! in_scope &quot;$t&quot;; then
+    echo &quot;REFUSED: $t is not in an RFC1918 range.&quot; &gt;&amp;2
+    echo &quot;  AEGIS blocks public targets by default.&quot; &gt;&amp;2
+    echo &quot;  Authorised public testing requires the engagement ROE,&quot; &gt;&amp;2
+    echo &quot;  which lives in a document, not in this script.&quot; &gt;&amp;2
+    exit 3
+  fi
+done
+EOF
+chmod +x ~/aegis/bin/scope-guard.sh
+
+# prove it works
+~/aegis/bin/scope-guard.sh 192.168.56.10 10.0.0.5 &amp;&amp; echo &quot;PRIVATE: allowed&quot;
+~/aegis/bin/scope-guard.sh 127.0.0.1 &amp;&amp; echo &quot;LOOPBACK: allowed&quot;
+~/aegis/bin/scope-guard.sh 8.8.8.8; echo &quot;  exit code: $?  (3 = refused, by design)&quot;
+
+# --- the ROE template, as a working document ---
+cat &gt; ../../docs/ROE-TEMPLATE.md &lt;&lt;'EOF'
+# Rules of Engagement — TEMPLATE
+
+&gt; Copy this. Fill every field. An unfilled field is an unanswered question
+&gt; that will be answered by a lawyer instead of by you.
+
+## 1. Parties
+- Client legal entity:
+- Authorising representative (name, title, email):
+- Test firm / tester:
+- Contract reference / SOW:
+- Explicit statement of authorisation:
+
+## 2. Scope
+### In scope
+| Target | Type | Notes |
+|---|---|---|
+| 192.168.56.0/24 | network | host-only lab range |
+| 10.10.0.0/24 | network | |
+
+### Explicitly out of scope
+| Target | Reason |
+|---|---|
+| Anything not listed above | default deny |
+| Third-party SaaS / CDN | not owned by client |
+| Physical security | not in this methodology |
+| Social engineering of staff | out of scope unless written |
+| DoS / stress testing | NOT PERMITTED unless written |
+| Production customer data | do not read beyond proving access |
+
+## 3. Time window
+- Start (with timezone):
+- End (with timezone):
+- Testing hours only? (e.g. 09:00-17:00 local):
+- If outside window: stop all activity immediately.
+
+## 4. Rules of engagement
+### Permitted
+- [ ] full TCP connect scan of in-scope ranges
+- [ ] UDP top-20 scan with explicit permission
+- [ ] service/version enumeration
+- [ ] exploitation to prove access
+- [ ] authenticated testing (credentials supplied)
+- [ ] credential testing ONLY against accounts explicitly listed
+
+### Prohibited
+- [ ] denial of service of any kind
+- [ ] social engineering, phishing, physical testing
+- [ ] modifying, deleting or encrypting client data
+- [ ] installing persistent implants or leaving tools on target
+- [ ] exfiltrating data beyond what proves impact
+- [ ] testing any third-party system
+- [ ] disabling security controls (AV, EDR, IDS) on the client network
+
+## 5. Data handling
+- Credentials discovered: redact, do not reuse, report existence only.
+- Data collected: minimum necessary, encrypted at rest, deleted on &lt;date&gt;.
+- Screenshots: credentials blurred before storage.
+
+## 6. Communications
+- Primary technical contact (name, phone, 24h during window):
+- Secondary technical contact:
+- Emergency / outage contact (stop testing authority):
+- Expected contact during the engagement window:
+- Client observer present? Yes / No
+
+## 7. Deliverables
+- Format: PDF report + evidence archive
+- Due:
+- Retest included: Yes / No
+- Confidentiality / NDA reference:
+- Data destruction date:
+
+## 8. Sign-off
+| Role | Name | Date |
+|---|---|---|
+| Authorising representative | | |
+| Test lead | | |
+EOF
+echo &quot;written: docs/ROE-TEMPLATE.md&quot;
+
+# --- the pre-engagement checklist ---
+cat &gt; ../../docs/PRE-ENGAGEMENT-CHECKLIST.md &lt;&lt;'EOF'
+# Pre-engagement checklist — do not skip
+
+- [ ] Written authorisation signed and countersigned by the target owner
+- [ ] Authoriser has actual authority to grant access (not a contractor)
+- [ ] Scope is expressed as **addresses and domains**, not descriptions
+- [ ] Out-of-scope list is explicit and non-empty
+- [ ] Date/time window agreed, timezone stated
+- [ ] Emergency contact tested (call them before the window, not during)
+- [ ] Kill switch named: one person, one word, stops everything
+- [ ] DoS explicitly forbidden unless written permission exists
+- [ ] Data handling rules agreed
+- [ ] Third-party dependencies identified (hosting, SaaS, CDN, cloud)
+- [ ] Log source IPs (your IP may be blocked by the client's own IDS)
+- [ ] Test window agreed to avoid change freezes, holidays, and pentests
+- [ ] Deliverables and retest agreed
+- [ ] Written answer to &quot;what if I break production?&quot;
+EOF
+echo &quot;written: docs/PRE-ENGAGEMENT-CHECKLIST.md&quot;
+
+# --- the engagement diary discipline ---
+cat &gt; ../../docs/ENGAGEMENT-DIARY.md &lt;&lt;'EOF'
+# Engagement diary
+
+A timestamped, append-only log. It is your evidence of professionalism and,
+in a dispute, your defence.
+
+</code></pre>
+<p>2026-10-14 09:02  START. ROE ref AEGIS-2026-001. Window 09:00-17:00 PDT.<br />
+2026-10-14 09:05  Source IP whitelisted with client. Confirmed by J. Doe.<br />
+2026-10-14 09:20  Recon complete: 3 hosts, 11 services, 1 flagged.<br />
+2026-10-14 10:41  Access obtained on WEB-02 as www-data. Impact pending.<br />
+2026-10-14 11:15  Escalated to root on WEB-02. Credentials redacted.<br />
+2026-10-14 11:16  NOTIFIED client contact: database readable by this account.<br />
+2026-10-14 11:40  Cleaned up: no files left, no persistence installed.<br />
+2026-10-14 12:00  END. Evidence archived encrypted.</p>
+<pre><code>
+Rules:
+- append only; never edit or delete a line
+- record time, what you did, and on which target
+- record notifications, especially anything disruptive
+- record what you *did not* do, and why
+- keep it in version control or an append-only store
+EOF
+echo &quot;written: docs/ENGAGEMENT-DIARY.md&quot;
+</code></pre>
+<p><strong>Step 1 is the deliverable</strong>: a scope guard that physically refuses public targets and exits 3. Every<br />
+script in AEGIS that touches a network uses it. That is what makes "we only test what we own"<br />
+an enforced property rather than an intention.</p>
+<p><strong>Record:</strong> <code>docs/ROE-TEMPLATE.md</code>, <code>docs/PRE-ENGAGEMENT-CHECKLIST.md</code>,<br />
+<code>docs/ENGAGEMENT-DIARY.md</code>.</p>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> stand up a complete engagement package for a lab you own, and run a full<br />
+methodology cycle against your own VirtualBox host-only range with the guard enabled.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/tcm-01 &amp;&amp; cd ~/aegis/labs/tcm-01
+source ~/aegis/bin/scope-guard.sh
+
+# --- the virtual lab, created and documented like a real one ---
+cat &gt; 00-LAB-SETUP.md &lt;&lt;'EOF'
+# Engagement: AEGIS-LAB-2026-001
+
+## Authorisation
+I am the owner of this VirtualBox host-only network. This is a self-engagement
+against infrastructure I control, for the purpose of learning the methodology.
+
+## Scope (in)
+| Target | Type |
+|---|---|
+| 192.168.56.0/24 | VirtualBox host-only range |
+| 127.0.0.1 | loopback |
+
+## Out of scope
+- anything on 10.0.0.0/8, 172.16.0.0/12 — not mine
+- all public IPs
+- all third-party systems
+
+## Window
+Continuous. This is a lab, not a client engagement.
+
+## Prohibited
+- DoS, even on my own lab VMs (it corrupts the lesson)
+- touching any host that is not in 192.168.56.0/24
+EOF
+
+# --- the host-only range, created if needed ---
+if ! ip -br a show | grep -q 192.168.56; then
+  echo &quot;No host-only range yet. Create one in VirtualBox:&quot;
+  echo &quot;  File &gt; Host Network Manager &gt; Create &gt; vboxnet0, 192.168.56.1/24&quot;
+  echo &quot;  then:  sudo ip link add vboxnet0 type bridge&quot;
+  echo &quot;        sudo ip addr add 192.168.56.1/24 dev vboxnet0&quot;
+  echo &quot;        sudo ip link set vboxnet0 up&quot;
+fi
+ip -br a | sed 's/^/  /'
+
+# --- scope guard, exercised against every class of target ---
+echo
+echo &quot;=== scope guard decisions ===&quot;
+for t in 192.168.56.5 192.168.56.254 127.0.0.1 10.0.0.1 8.8.8.8 1.1.1.1 172.20.0.1; do
+  if in_scope &quot;$t&quot;; then printf &quot;  %-16s IN SCOPE\n&quot; &quot;$t&quot;; else printf &quot;  %-16s REFUSED\n&quot; &quot;$t&quot;; fi
+done
+
+# --- the method, applied to your own machine as a target ---
+echo
+echo &quot;=== step 1-3 done passively, against my own host ===&quot;
+{
+  echo &quot;--- what am I authorised to test? ---&quot;
+  in_scope 192.168.1.120 &amp;&amp; echo &quot;  192.168.1.120 (my LAN IP) IN SCOPE&quot; \
+                           || echo &quot;  192.168.1.120 OUT OF SCOPE - my lab range is 192.168.56.0/24 only&quot;
+  echo
+  echo &quot;--- what is the target, precisely? ---&quot;
+  echo &quot;  host:      $(hostname)&quot;
+  echo &quot;  os:        $(. /etc/os-release; echo &quot;$PRETTY_NAME&quot;)&quot;
+  echo &quot;  kernel:    $(uname -r)&quot;
+  echo &quot;  addresses: $(ip -br a | awk '{print $3}' | tr '\n' ' ')&quot;
+  echo
+  echo &quot;--- what entry points exist (my own)? ---&quot;
+  ss -tuln state listening | awk 'NR&gt;1{print &quot;  &quot;, $1, $5}' | head -10
+} | tee 01-intake.txt
+
+# --- the diary, started properly ---
+{
+  echo &quot;$(date -Iseconds)  START. Engagement AEGIS-LAB-2026-001 (self).&quot;
+  echo &quot;$(date -Iseconds)  Scope: 192.168.56.0/24 + 127.0.0.1 only.&quot;
+  echo &quot;$(date -Iseconds)  Intake complete: $(hostname), $(. /etc/os-release; echo &quot;$PRETTY_NAME&quot;).&quot;
+  echo &quot;$(date -Iseconds)  Listening services: $(ss -tuln state listening | tail -n +2 | wc -l)&quot;
+} | tee 02-DIARY.txt
+</code></pre>
+<p><strong>The <code>192.168.1.120</code> result is the lesson.</strong> Your own machine's real LAN address is<br />
+<em>outside</em> the scope you defined. Scope is not "stuff I own" — it is "stuff I wrote down". A<br />
+guard that only understood ownership would have allowed it; a guard that reads the ROE<br />
+would not. That is the entire reason the guard is a list, not a heuristic.</p>
+<p><strong>Record:</strong> <code>00-LAB-SETUP.md</code>, <code>01-intake.txt</code>, <code>02-DIARY.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between a Rules of Engagement and a scope?</li>
+<li>Why does "the client asked me to" not satisfy legal authorisation?</li>
+<li>Why is post-exploitation the stage where findings are born?</li>
+<li>What is a kill switch, and why must it be a single named person?</li>
+<li>Give three reasons not to exfiltrate data beyond what proves impact.</li>
+<li>Why is a red team engagement a different contract from a pentest?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Rules of Engagement</strong> → <strong>Scope</strong> → <strong>Reconnaissance</strong> → <strong>Pentest Reporting</strong> →<br />
+<strong>Exploitation Ethics</strong> → <strong>Privilege Escalation</strong>.<br />
+Every other Tier 3 note assumes this one. Read it before <code>tcm-02</code>.</p>

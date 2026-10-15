@@ -1,0 +1,106 @@
+<h1 id="basics-of-os-computer-system-operation-storage-structure">Basics of OS: Computer System Operation &amp; Storage Structure</h1>
+<h2 id="summary">Summary</h2>
+<p>Before algorithms and scheduling, a Neso-style foundation lecture: what a computer is made of,<br />
+what an OS manages, and how storage is structured. Security-relevant conclusions arrive<br />
+immediately — <strong>the OS is the trusted intermediary on every trust boundary you test later.</strong></p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Hardware</strong>: CPU (registers, ALU, control unit), memory hierarchy (registers → cache → RAM →<br />
+  disk), I/O devices, buses.</li>
+<li><strong>OS as resource manager</strong>: decides who gets the CPU, how much memory, which device.</li>
+<li><strong>OS as virtual machine</strong>: provides an abstract machine (files, processes, sockets) so programs<br />
+  do not touch hardware directly.</li>
+<li><strong>Memory hierarchy</strong>: the reason caching exists, and the reason cache timing is a side channel.</li>
+<li><strong>Storage structure</strong>: registers → cache → main memory → secondary storage. Each is a<br />
+  performance layer with a different trust story.</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ALU</strong></td>
+<td>Arithmetic logic unit; performs operations</td>
+</tr>
+<tr>
+<td><strong>Register</strong></td>
+<td>Fastest, smallest CPU storage</td>
+</tr>
+<tr>
+<td><strong>Cache</strong></td>
+<td>Small fast memory, hierarchy between CPU and RAM</td>
+</tr>
+<tr>
+<td><strong>DMA</strong></td>
+<td>Direct memory access; devices bypass the CPU</td>
+</tr>
+<tr>
+<td><strong>System call</strong></td>
+<td>Program → kernel request</td>
+</tr>
+<tr>
+<td><strong>Kernel mode</strong></td>
+<td>Ring 0, full privilege</td>
+</tr>
+<tr>
+<td><strong>User mode</strong></td>
+<td>Ring 3, restricted</td>
+</tr>
+<tr>
+<td><strong>Bootstrap</strong></td>
+<td>The firmware that loads the kernel</td>
+</tr>
+<tr>
+<td><strong>Firmware</strong></td>
+<td>Software baked into hardware (UEFI, BIOS)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">lscpu | grep -E &quot;^CPU|Model name|L1d|L2|L3&quot;
+ls -la /sys/devices/system/cpu/cpu0/cache/ 2&gt;/dev/null
+cat /proc/cpuinfo | grep -m1 &quot;model name&quot;
+free -h; swapon --show
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+# the boot chain, in order
+cat /proc/cmdline
+dmesg | head -5            # kernel ring buffer = boot messages
+ls /sys/firmware/efi 2&gt;/dev/null || echo &quot;booted via legacy BIOS path&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read the machine's hardware inventory and the boot chain from the running system.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-os-1 &amp;&amp; cd ~/aegis/labs/neso-os-1
+{
+  echo &quot;=== CPU ===&quot;; lscpu | grep -E &quot;Architecture|^CPU\(s\)|Thread|Core|Model name|L1d|L2|L3&quot;
+  echo; echo &quot;=== cache hierarchy ===&quot;
+  for c in /sys/devices/system/cpu/cpu0/cache/index*; do
+    [ -d &quot;$c&quot; ] &amp;&amp; echo &quot;  level=$(cat $c/level 2&gt;/dev/null) type=$(cat $c/type 2&gt;/dev/null) size=$(cat $c/size 2&gt;/dev/null)&quot;
+  done
+  echo; echo &quot;=== memory ===&quot;; free -h; swapon --show
+  echo; echo &quot;=== storage ===&quot;; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
+  echo; echo &quot;=== boot chain ===&quot;
+  echo &quot;firmware: $([ -d /sys/firmware/efi ] &amp;&amp; echo UEFI || echo legacy-BIOS)&quot;
+  echo &quot;cmdline:  $(cat /proc/cmdline)&quot;
+  echo &quot;--- first kernel messages ---&quot;; dmesg 2&gt;/dev/null | head -8
+  echo; echo &quot;=== who may talk to devices directly? ===&quot;
+  ls -la /dev/mem /dev/kmem 2&gt;/dev/null
+  grep -E &quot;DMA|dma&quot; /proc/iomem 2&gt;/dev/null | head -3
+} 2&gt;&amp;1 | tee 01-hardware.txt
+</code></pre>
+<p><strong>Expected:</strong> every row is a real hardware fact, and <code>/dev/mem</code> is root-only — the OS controlling<br />
+direct hardware access, exactly as described.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does the OS exist at all, from a <em>security</em> point of view?</li>
+<li>List the memory hierarchy from fastest to slowest.</li>
+<li>Why is the CPU cache a side-channel target?</li>
+<li>What is DMA and why does it matter for isolation?</li>
+<li>What does <code>/proc/cmdline</code> tell you about your boot?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kernel vs Userspace</strong> → <strong>Virtual Memory</strong> → <strong>Page Fault</strong> → <strong>Side Channel</strong>.</p>

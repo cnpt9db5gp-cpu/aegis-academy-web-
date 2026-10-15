@@ -1,0 +1,375 @@
+<h1 id="passive-reconnaissance-and-osint-collection">Passive Reconnaissance and OSINT Collection</h1>
+<h2 id="summary">Summary</h2>
+<p>The first stage of an engagement is to build a picture of the target <strong>without touching it</strong>.<br />
+Passive recon is what you can learn from data that already exists — DNS records, certificate<br />
+transparency logs, public code, breach corpora, job ads, documents, and the archive of the web.</p>
+<p>The discipline point: passive recon has <strong>no footprint on the target</strong>. Nothing logs it,<br />
+nothing alerts, nothing gets rate-limited. That is why it happens first and why it is free.</p>
+<blockquote>
+<p>Companion to <code>ccna-01</code>/<code>ccnad-01</code> for the protocol mechanics of what you<br />
+are reading. This note is about the <em>sources</em> and how to weigh them.</p>
+</blockquote>
+<h2 id="the-sources-ranked-by-yield">The sources, ranked by yield</h2>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>What it tells you</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Certificate Transparency logs</td>
+<td>Every hostname the org has ever issued for</td>
+<td>free, no contact</td>
+</tr>
+<tr>
+<td>DNS records</td>
+<td>A, AAAA, MX, NS, TXT, SPF, DMARC</td>
+<td>free, no contact</td>
+</tr>
+<tr>
+<td>ASN / WHOIS</td>
+<td>Netblocks, hosting, ownership</td>
+<td>free</td>
+</tr>
+<tr>
+<td>Historical DNS / Wayback</td>
+<td>Retired hosts, forgotten subdomains</td>
+<td>free</td>
+</tr>
+<tr>
+<td>Search engines</td>
+<td>Docs, configs, credentials, error pages</td>
+<td>free</td>
+</tr>
+<tr>
+<td>Public code search</td>
+<td>Credentials, keys, config files, endpoints</td>
+<td>free</td>
+</tr>
+<tr>
+<td>Breach corpora</td>
+<td>Which usernames and passwords are already known</td>
+<td>varies</td>
+</tr>
+<tr>
+<td>Job ads</td>
+<td>Technology, versions, culture, org structure</td>
+<td>free</td>
+</tr>
+<tr>
+<td>Email / error formats</td>
+<td>Mail server, org name, internal hostnames</td>
+<td>free</td>
+</tr>
+<tr>
+<td>ASN &amp; CDN attribution</td>
+<td>Where is this actually hosted</td>
+<td>free</td>
+</tr>
+<tr>
+<td>Shodan / Censys / FOFA</td>
+<td>Banner, service, and often version data</td>
+<td>free tier</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The most valuable single source is almost always CT logs.</strong> It gives you<br />
+a complete, non-intrusive inventory of every hostname an organisation has ever<br />
+had a certificate for, including the ones they have since forgotten.</p>
+<h2 id="osint-defined-honestly">OSINT, defined honestly</h2>
+<pre><code class="language-text">  OSINT = intelligence gathered from publicly available sources
+
+  It is NOT:
+    - pretexting (lying to a person to get information)
+    - social engineering (manipulating a person)
+    - unauthorised access to anything
+
+  The line: did you learn it, or did you make someone give it to you?
+  Learning it = OSINT. Persuading someone = social engineering, which is a
+  different engagement with a different authorisation.
+</code></pre>
+<h2 id="the-tradecraft">The tradecraft</h2>
+<pre><code class="language-text">  1. START NARROW    one domain, one organisation, one identifier
+  2. GO WIDE         expand outward: domains -&gt; subdomains -&gt; emails -&gt;
+                     usernames -&gt; people -&gt; more identities
+  3. RECORD EVERYTHING in a structured format, immediately
+  4. CORRELATE       an email address found in a breach corpus and a
+                     username from an AD dump is one identity, not two
+  5. VERIFY          stale data is common; confirm before acting
+  6. STAY PASSIVE    do not touch the target's infrastructure
+</code></pre>
+<p><strong>Step 4 is where beginners stop.</strong> A pile of unlinked strings is not<br />
+intelligence. The value is in the joins.</p>
+<h2 id="from-domains-to-people-the-identity-chain">From domains to people: the identity chain</h2>
+<pre><code class="language-text">  domain          example.com
+    -&gt; CT logs    dev.example.com, vpn.example.com, legacy.example.com
+    -&gt; DNS        legacy -&gt; 203.0.113.9 (still live, forgotten, unpatched)
+    -&gt; MX/TXT     mail handled by mtaservice.net, SPF includes _spf.google.com
+    -&gt; search     &quot;example.com filetype:pdf&quot; -&gt; an internal org chart
+    -&gt; code       github search &quot;example.com&quot; -&gt; a repo with a config file
+    -&gt; breaches   support@ found in a corpus, with a password hash
+    -&gt; usernames  jsmith, a.smith, j.smith - which convention?
+    -&gt; people     the org chart names roles; the convention gives accounts
+</code></pre>
+<p>The forgotten <code>legacy</code> host is the entire point. Assets nobody maintains are<br />
+the most likely thing in the estate to be exploitable, and you found it<br />
+without sending a single packet.</p>
+<h2 id="what-to-do-with-what-you-find">What to do with what you find</h2>
+<pre><code class="language-text">  FINDING                          TELL IT TO THE CLIENT, NOT THE WORLD
+  -------------------------------- ----------------------------------
+  Exposed credential in a public   as a critical finding, redacted. Never
+    repo                            use it yourself, even to &quot;verify&quot;.
+  Credential in a breach corpus    same. Report that the account is
+                                    breached, not the password.
+  Stale DNS pointing at live host  a finding: unmaintained asset
+  Employee names / org structure   normal OSINT; use it to size the
+                                    social engineering surface, and note
+                                    that in the report
+  Personal information             do NOT include. Refer to the client's
+                                    privacy/DPO process instead.
+</code></pre>
+<p>The last row is the one that gets people fired. Personal data discovered<br />
+during OSINT is the client's legal problem, not your report content.</p>
+<h2 id="passive-dns-and-historical-records">Passive DNS and historical records</h2>
+<pre><code class="language-text">  DNS records are not private. Anyone can query any public resolver.
+
+  a.gtld (Google)      passive DNS for many TLDs
+  hackertarget hostsearch  quick free pass
+  crt.sh               CT log search
+  Wayback Machine      historical content, and therefore historical URLs
+  SecurityTrails       free tier, historical DNS
+
+  Why historical DNS matters: an IP that used to be theirs, in an ASN that
+  is still theirs, is a range they probably did not intend to be publicly
+  scannable - and a range their firewall rules may not cover.
+</code></pre>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># All passive. Nothing here sends a packet to the target's web services.
+mkdir -p ~/aegis/labs/tcm-02 &amp;&amp; cd ~/aegis/labs/tcm-02
+
+TARGET=&quot;${AEGIS_TARGET:-lab.internal}&quot;
+
+# --- 1. DNS: the free inventory ---
+{
+  echo &quot;=== A / AAAA ===&quot;
+  dig +short A    &quot;$TARGET&quot; 2&gt;/dev/null
+  dig +short AAAA &quot;$TARGET&quot; 2&gt;/dev/null
+  echo
+  echo &quot;=== MX (mail) ===&quot;
+  dig +short MX &quot;$TARGET&quot; 2&gt;/dev/null
+  echo
+  echo &quot;=== NS (authority) ===&quot;
+  dig +short NS &quot;$TARGET&quot; 2&gt;/dev/null
+  echo
+  echo &quot;=== TXT (SPF, DMARC, verification tokens, sometimes more) ===&quot;
+  dig +short TXT &quot;$TARGET&quot; 2&gt;/dev/null | head -10
+  echo
+  echo &quot;=== SOA (serial, refresh - tells you how often they change DNS) ===&quot;
+  dig +short SOA &quot;$TARGET&quot; 2&gt;/dev/null
+} | tee 01-dns.txt
+
+# TXT records are chronically over-shared. Read them like an attacker would.
+dig +short TXT &quot;$TARGET&quot; 2&gt;/dev/null | grep -iE \
+  &quot;v=spf1|google-site-verification|MS=|token|key|secret&quot; | sed 's/^/  LEAK? /'
+
+# --- 2. Certificate Transparency: every hostname, ever ---
+{
+  echo &quot;=== CT logs for the target domain ===&quot;
+  # The base64-encoded domain API on crt.sh
+  q=$(python3 -c &quot;import base64,sys;print(base64.b64encode(sys.argv[1].encode()).decode())&quot; &quot;$TARGET&quot;)
+  curl -s --max-time 20 &quot;https://crt.sh/?q=${q}&amp;output=json&quot; 2&gt;/dev/null \
+    | python3 -c &quot;
+import sys, json
+try: rows = json.load(sys.stdin)
+except Exception: sys.exit('  (crt.sh unreachable)')
+names = set()
+for r in rows:
+    for n in (r.get('name_value') or '').split('\n'):
+        n = n.strip().lstrip('*.')
+        if n and '*' not in n: names.add(n)
+for n in sorted(names): print('  ', n)
+print(f'\n   {len(names)} distinct hostnames, no packets sent to the target')
+&quot; 2&gt;/dev/null || echo &quot;  (no network access in this environment)&quot;
+} | tee 02-ct.txt
+
+# --- 3. Local mirror of the same idea, fully offline ---
+cat &gt; 03-ct-offline.py &lt;&lt;'PY'
+&quot;&quot;&quot;The CT principle, demonstrated without any network at all.
+
+A CT log is just a list of certificates, append-only and publicly auditable.
+The privacy consequence: every TLS hostname you own is permanently public,
+forever, including the ones you have deleted from DNS.
+&quot;&quot;&quot;
+issued = [
+    (&quot;example.com&quot;,      &quot;2021-03-02&quot;, &quot;still active&quot;),
+    (&quot;mail.example.com&quot;, &quot;2021-03-02&quot;, &quot;still active&quot;),
+    (&quot;vpn.example.com&quot;,  &quot;2021-03-02&quot;, &quot;still active&quot;),
+    (&quot;legacy.example.com&quot;,&quot;2021-03-02&quot;,&quot;DNS DELETED 2023, host still up&quot;),
+    (&quot;test-stage.example.com&quot;,&quot;2021-03-02&quot;,&quot;never in DNS, still resolvable?&quot;),
+    (&quot;corp-vpn.example.com&quot;,  &quot;2021-03-02&quot;,&quot;internal cert, published anyway&quot;),
+]
+print(&quot;  hostname                     issued     note&quot;)
+print(&quot;  &quot; + &quot;-&quot;*72)
+for host, date, note in issued:
+    flag = &quot;  &lt;-- FINDING&quot; if (&quot;DELETED&quot; in note or &quot;never&quot; in note) else &quot;&quot;
+    print(f&quot;  {host:&lt;28} {date}  {note}{flag}&quot;)
+print()
+print(&quot;  Three findings, zero packets sent:&quot;)
+print(&quot;    1. a deleted host that may still be running&quot;)
+print(&quot;    2. a stage host nobody remembers&quot;)
+print(&quot;    3. an internal VPN name published externally (org chart leak)&quot;)
+PY
+python3 03-ct-offline.py | tee 04-ct-demo.txt
+
+# --- 4. Public code search: the highest-yield and highest-risk source ---
+{
+  echo &quot;=== what a public repo leak looks like ===&quot;
+  echo &quot;  Search: site:github.com \&quot;$TARGET\&quot;  or  github.com/search?q=\&quot;$TARGET\&quot;&quot;
+  echo &quot;  Look for:&quot;
+  echo &quot;    - config files with credentials&quot;
+  echo &quot;    - .env files committed by accident&quot;
+  echo &quot;    - internal hostnames in code, logs, or comments&quot;
+  echo &quot;    - API keys and their scope&quot;
+  echo
+  echo &quot;  RULE: if you find a live credential, you STOP.&quot;
+  echo &quot;  You do not test it. You report its existence, redacted.&quot;
+  echo
+  echo &quot;  Offline demonstration of what matches look like:&quot;
+  grep -rniE &quot;password|api[_-]?key|secret|token|BEGIN .*PRIVATE KEY&quot; \
+    ~/Projects/aegis-academy --include=&quot;*.md&quot; --include=&quot;*.py&quot; 2&gt;/dev/null \
+    | grep -viE &quot;example|password hashing|sudo -l&quot; | head -8 | sed 's/^/  /' \
+    || echo &quot;  (no matches in your own repo - keep it that way)&quot;
+} | tee 05-codesearch.txt
+
+# --- 5. Breach corpora: presence, not content ---
+cat &gt; 06-breach.md &lt;&lt;'EOF'
+# Breach corpora: presence, not content
+
+## What they are
+Databases of email/username + password hashes leaked by breaches, indexed by
+email address. Available freely and on the dark web.
+
+## How to use them ethically and usefully
+1. Query for a corporate email address
+2. Record ONLY: which breach, what date, what fields were exposed
+3. Do NOT record or use the password hash
+4. Never attempt to crack it
+5. Never attempt to log in with it
+
+## What you report
+| Finding | Severity | Recommendation |
+|---|---|---|
+| Accounts exposed in a breach, not yet MFA'd | High | Force password reset, enforce MFA |
+| Corporate addresses exposed, reused elsewhere | Medium | Credential-stuffing exposure; MFA |
+| Breach of a third party holding their data | Informational | Notify DPO; they handle it |
+
+## What you must not do
+- attempt authentication with any credential from any corpus
+- download a corpus containing the client's real hashes
+- re-share a corpus
+- report the passwords, even to the client, even encrypted
+EOF
+cat 06-breach.md
+
+# --- 6. Record everything, in a structure you can query later ---
+cat &gt; assets.csv &lt;&lt;'EOF'
+host,ip,source,status,ports,notes
+mail.lab.internal,192.168.56.20,DNS+A,live,,MX for lab.internal
+vpn.lab.internal,192.168.56.21,CT,DNS NXDOMAIN,,&quot;cert still valid; host never existed?&quot;
+legacy.lab.internal,192.168.56.22,CT+Wayback,live,22/80/443,&quot;not in current DNS - candidate&quot;
+EOF
+cat assets.csv
+echo
+echo &quot;  asset list schema:&quot;
+echo &quot;    host,ip,source,status,ports,notes&quot;
+echo &quot;    'source' is how you learned it - that column is what tells you&quot;
+echo &quot;    whether an asset is in the client's own inventory&quot;
+python3 - &lt;&lt;'PY'
+import csv
+with open(&quot;assets.csv&quot;) as f:
+    rows = list(csv.DictReader(f))
+print(f&quot;  parsed {len(rows)} assets&quot;)
+for r in rows:
+    if r[&quot;status&quot;] != &quot;live&quot;:
+        print(f&quot;    flag: {r['host']} - {r['notes']}&quot;)
+PY
+
+# --- 7. the deliverable: a recon report ---
+cat &gt; 07-recon-report.md &lt;&lt;'EOF'
+# Passive reconnaissance report — AEGIS-LAB-2026-001
+
+**Target:** lab.internal
+**Method:** passive only. Zero packets sent to target web or mail services.
+**Date:** (today)
+
+## 1. Summary
+Assets discovered: 7. Live: 5. Not in the client's published inventory: 2.
+Highest-value finding: `legacy.lab.internal` — removed from DNS in 2023, host
+still running, no longer patched.
+
+## 2. Assets discovered
+| Host | Source | Status | Notes |
+|---|---|---|---|
+| lab.internal | scope | live | apex |
+| mail.lab.internal | DNS MX | live | |
+| legacy.lab.internal | CT + Wayback | live | **not in client inventory** |
+
+## 3. DNS posture
+- SPF: (record here)
+- DMARC: (record here) — absent DMARC enables spoofing of the domain
+- CAA: (record here) — absent CAA allows any CA to issue for the domain
+- Any TXT records leaking internal detail: (list, or &quot;none&quot;)
+
+## 4. Certificate transparency findings
+- N hostnames published, M of which do not resolve
+- Internal naming disclosed: (list)
+- Assessment: renewals are happening for hosts that no longer exist
+
+## 5. Public code exposure
+- Repositories referencing the domain: N
+- Credentials found: (count only, never contents)
+- Recommendation: rotate, then commit-harden and add a secret scanner
+
+## 6. Breach exposure
+- Corporate accounts present in public corpora: N of M enumerated
+- Recommendation: enforce MFA, force reset, alert on reuse
+
+## 7. Out-of-band signals
+- Job postings naming specific technologies and versions: (list)
+- Error pages revealing stack versions: (list)
+
+## 8. Recommendations (prioritised)
+1. Investigate `legacy.lab.internal` — retire or return it to the inventory
+2. Publish DMARC and CAA records
+3. Enforce MFA on all mail-facing accounts
+4. Rotate any credential found in public code
+5. Add a pre-commit secret scanner
+
+## 9. Method and limitations
+- No active scanning was performed; ports and services are unknown
+- Passive data may be stale; confirm before acting
+- Personal data was found and deliberately excluded from this report
+EOF
+echo
+echo &quot;written: 07-recon-report.md&quot;
+</code></pre>
+<p><strong>Step 3 is the lesson in miniature</strong>: three findings from an append-only public log, with<br />
+zero packets sent. The deleted-but-still-running host is the archetype — an asset nobody<br />
+maintains because nobody knows it exists.</p>
+<p><strong>Record:</strong> <code>04-ct-demo.txt</code> and <code>07-recon-report.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What distinguishes OSINT from social engineering?</li>
+<li>Why is certificate transparency the highest-yield passive source?</li>
+<li>What do DMARC and CAA protect against, and what happens without them?</li>
+<li>You find a live API key in a public repo. What do you do, and what do you not do?</li>
+<li>Why does historical DNS matter more than current DNS?</li>
+<li>Why is personal data found during OSINT excluded from the report?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OSINT</strong> → <strong>Passive Recon</strong> → <strong>Reconnaissance</strong> → <strong>Subdomain Enumeration</strong> →<br />
+<strong>Attack Surface</strong> → <strong>Threat Model</strong>.<br />
+<code>tcm-03</code> is where this becomes active.</p>

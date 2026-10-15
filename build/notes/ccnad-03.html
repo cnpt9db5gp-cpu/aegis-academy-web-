@@ -1,0 +1,200 @@
+<h1 id="static-and-dynamic-routing-ospf">Static and Dynamic Routing, OSPF</h1>
+<h2 id="summary">Summary</h2>
+<p>Depth on how routers decide, and what goes wrong when an adversary joins the conversation.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Static route</strong>: a configured next hop. Predictable, auditable, does not scale</li>
+<li><strong>Dynamic routing</strong>: routers exchange information and converge. Scalable, larger trust surface</li>
+<li><strong>Distance-vector (RIP)</strong>: share whole tables with neighbours; slow convergence, split horizon</li>
+<li><strong>Link-state (OSPF)</strong>: share a topology database and compute shortest paths; fast, scalable</li>
+<li><strong>EIGRP</strong> sits between: advanced distance-vector, proprietary, Cisco</li>
+<li><strong>Administrative distance</strong>: the tiebreaker between sources, before metric is even considered</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Static route</strong></td>
+<td>Manually configured path</td>
+</tr>
+<tr>
+<td><strong>Dynamic routing</strong></td>
+<td>Learned automatically</td>
+</tr>
+<tr>
+<td><strong>Convergence</strong></td>
+<td>Time until all routers agree</td>
+</tr>
+<tr>
+<td><strong>Distance-vector</strong></td>
+<td>Advertise distance to each network (RIP, EIGRP)</td>
+</tr>
+<tr>
+<td><strong>Link-state</strong></td>
+<td>Advertise the local topology (OSPF)</td>
+</tr>
+<tr>
+<td><strong>Metric / cost</strong></td>
+<td>Preference between equivalent paths</td>
+</tr>
+<tr>
+<td><strong>Administrative distance</strong></td>
+<td>Trust ranking of a routing source</td>
+</tr>
+<tr>
+<td><strong>Area</strong></td>
+<td>OSPF grouping for scaling</td>
+</tr>
+<tr>
+<td><strong>LSA</strong></td>
+<td>The unit of link-state information</td>
+</tr>
+<tr>
+<td><strong>Default route</strong></td>
+<td>The catch-all entry</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">ip route show table all | head -10
+ip route show proto static 2&gt;/dev/null
+ip route show proto kernel 2&gt;/dev/null
+cat /proc/net/route
+
+# routing daemons, if this host has one
+ls /etc/quagga /etc/frr /etc/bird 2&gt;/dev/null
+systemctl status frr 2&gt;/dev/null | head -3
+
+# OSPF on the wire: IP protocol 89
+sudo tcpdump -i any -n &quot;proto 89&quot; 2&gt;/dev/null | head -10
+sudo nmap -sU -p 89 --reason 192.168.56.101 2&gt;/dev/null | grep -i ospf
+
+# compare path options
+traceroute -n -w1 -q1 -m5 192.168.56.101 2&gt;/dev/null
+ip route get 192.168.56.101
+
+# read a config if you have one
+grep -vE '^\s*(#|$)' /etc/frr/frr.conf 2&gt;/dev/null | head -20
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a routing table with working and broken routes, and observe which the kernel<br />
+actually uses.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccnad-03 &amp;&amp; cd ~/aegis/labs/ccnad-03
+
+# --- 1. longest-prefix match against a real, controllable table ---
+# Requires root; uses a private routing table so your system routes are untouched.
+if [ &quot;$(id -u)&quot; -eq 0 ] || sudo -n true 2&gt;/dev/null; then
+  sudo bash -c '
+    T=aegis-test
+    ip route add table $T 10.0.0.0/8 dev lo 2&gt;/dev/null
+    ip route add table $T 10.1.0.0/16 dev lo 2&gt;/dev/null
+    ip route add table $T 10.1.2.0/24 dev lo 2&gt;/dev/null
+    ip route add table $T 10.1.2.5/32 dev lo 2&gt;/dev/null
+    echo &quot;=== the test table ===&quot;
+    ip route show table $T
+    echo
+    echo &quot;=== which route wins for each destination ===&quot;
+    for d in 10.9.9.9 10.1.9.9 10.1.2.9 10.1.2.5; do
+      printf &quot;  %-12s &quot; $d
+      ip route get $d table $T 2&gt;/dev/null | grep -oE &quot;^[0-9.]+|[0-9.]+/[0-9]+&quot; | head -1
+      echo
+    done
+    ip route flush table $T
+  ' 2&gt;&amp;1 | tee 01-lpm-real.txt
+else
+  echo &quot;needs root to create a private routing table - run with sudo&quot; | tee 01-lpm-real.txt
+fi
+
+# --- 2. same thing, pure logic, no root needed ---
+python3 - &lt;&lt;'PY' | tee 02-lpm.txt
+import ipaddress
+TABLE = [(&quot;10.0.0.0/8&quot;, &quot;lo&quot;), (&quot;10.1.0.0/16&quot;, &quot;lo&quot;),
+         (&quot;10.1.2.0/24&quot;, &quot;lo&quot;), (&quot;10.1.2.5/32&quot;, &quot;lo&quot;), (&quot;0.0.0.0/0&quot;, &quot;gw-ISP&quot;)]
+def lookup(dst):
+    a = ipaddress.ip_address(dst); best = None
+    for c, dev in TABLE:
+        n = ipaddress.ip_network(c)
+        if a in n and (best is None or n.prefixlen &gt; best[0].prefixlen):
+            best = (n, dev)
+    return best
+print(&quot;  destination    matched           via&quot;)
+for d in [&quot;10.9.9.9&quot;,&quot;10.1.9.9&quot;,&quot;10.1.2.9&quot;,&quot;10.1.2.5&quot;,&quot;8.8.8.8&quot;]:
+    n, dev = lookup(d)
+    print(f&quot;  {d:&lt;14} {str(n):&lt;17} {dev}&quot;)
+print()
+print(&quot;A /32 host route beats the /24 that contains it. That is why&quot;)
+print(&quot;a single pinned route overrides an entire subnet.&quot;)
+PY
+
+# --- 3. a deliberately broken route, to see what failure looks like ---
+cat &gt; 03-broken-routes.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Add a blackhole route, prove the traffic dies, then remove it.
+# Requires root. Uses a table-local route so system routing is untouched.
+set -uo pipefail
+T=aegis-blackhole
+VICTIM=203.0.113.10      # TEST-NET-3, guaranteed not to exist
+
+sudo ip route add table $T blackhole 203.0.113.0/24
+echo &quot;=== route installed ===&quot;
+sudo ip route show table $T
+
+echo
+echo &quot;=== with the blackhole, lookup returns a dead route ===&quot;
+sudo ip route get $VICTIM table $T 2&gt;&amp;1 | sed 's/^/  /'
+
+echo
+echo &quot;=== removing it restores the default path ===&quot;
+sudo ip route flush table $T
+sudo ip route get $VICTIM 2&gt;&amp;1 | sed 's/^/  /' || echo &quot;  (no route - isolated network)&quot;
+EOF
+chmod +x 03-broken-routes.sh
+sudo -n true 2&gt;/dev/null &amp;&amp; ./03-broken-routes.sh 2&gt;&amp;1 | tee 03-blackhole.txt \
+  || echo &quot;needs sudo - run ./03-broken-routes.sh as root&quot; | tee 03-blackhole.txt
+
+# --- 4. OSPF, if your lab has any ---
+cat &gt; 04-ospf-notes.md &lt;&lt;'EOF'
+# OSPF, practically
+
+## Adjacency formation (the attack surface)
+1. Hello packets are sent to 224.0.0.5 every few seconds on each interface.
+2. Neighbours agree on the area, the timer values, and the network type.
+3. An adjacency forms: both sides exchange their full LSDB.
+4. Each router runs SPF and installs routes.
+
+Any host that answers Hello packets becomes a routing participant.
+That is the whole vulnerability: **participation is trust**.
+
+## Hardening
+- OSPF authentication: simple password (weak), MD5 (legacy), or cryptographic (preferred)
+- `passive-interface` on user-facing ports — stops Hello sending entirely
+- Area design: user segments in a stub/totally-stubby area
+- Separate management: do not run a routing protocol on a user network
+
+## Detecting a rogue adjacency
+- Compare the neighbour list against the expected device inventory
+- Monitor for LSAs referencing unexpected router IDs
+- Check for an unexpected cost change on any prefix
+EOF
+cat 04-ospf-notes.md
+</code></pre>
+<p><strong>Step 1 is the real thing</strong> — an actual kernel routing table with an actual longest-prefix<br />
+lookup. The pure-Python version in step 2 is the model you will carry in your head.</p>
+<p><strong>Record:</strong> <code>02-lpm.txt</code> and <code>04-ospf-notes.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Difference between distance-vector and link-state protocols?</li>
+<li>What is administrative distance, and when is it consulted?</li>
+<li>Why does OSPF <code>passive-interface</code> improve security?</li>
+<li>What exactly does an OSPF neighbour do that makes it a risk?</li>
+<li>How do you make a host route override an entire subnet?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Routing</strong> → <strong>TTL</strong> → <strong>Hop-by-Hop</strong> → <strong>Network Discovery</strong> → <strong>Segmentation</strong> →<br />
+<strong>Classic TCP/IP Security Problems</strong>.</p>

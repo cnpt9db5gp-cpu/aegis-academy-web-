@@ -1,0 +1,231 @@
+<h1 id="capture-the-traffic-break-the-machine-document-it">Capture the Traffic, Break the Machine, Document It</h1>
+<h2 id="summary">Summary</h2>
+<p>The capstone's practice loop: capture the traffic of an attack you perform against your own lab, run<br />
+the attack, and write up what the traffic reveals. That closes the loop between the offensive tier,<br />
+the network tier, and the forensics tier.</p>
+<p>The framing: <strong>an attack you can see on the wire teaches you<br />
+something an attack you can only read about does not.</strong> The capture is<br />
+how you learn what your own exploitation looks like from outside.</p>
+<h2 id="the-loop">The loop</h2>
+<pre><code class="language-text">  1. CAPTURE      tshark on the host-only bridge. Before anything.
+  2. ATTACK       run one technique, from cap-03 or cap-04.
+  3. READ         what does the wire show that the tool did not tell you?
+  4. DOCUMENT     the finding, the capture, and the timeline
+  5. ATTACK AGAIN with a different technique, and compare the two
+
+  STEP 5 is the one that teaches the most. The same attack with a
+  different technique produces a *completely different* capture, and
+  that difference is what detection is written against.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/lab-04 &amp;&amp; cd ~/aegis/labs/lab-04
+mkdir -p captures analysis report
+export SCOPE_GUARD=../cap-01/02-scope-guard.py
+
+cat &gt; 01-capture.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Capture the lab's own traffic. Loopback or host-only only.
+IF=&quot;${1:-lo}&quot;
+OUT=&quot;${2:-captures/run.pcapng}&quot;
+mkdir -p captures
+
+echo &quot;=== 1. is the interface up? ===&quot;
+ip -br link show &quot;$IF&quot; | sed 's/^/  /'
+echo
+
+echo &quot;=== 2. CAPTURE SETTINGS, and why each matters ===&quot;
+cat &lt;&lt;'SETTINGS'
+  -i lo            loopback. Nothing leaves the machine.
+  -c 500           stop after N packets, so a forgotten capture
+                   does not fill the disk
+  -w &lt;file&gt;        write to a PCAPNG, not to stdout
+  --time戳 --  no, plain: tshark writes capture timestamps by default
+
+  NOTE ON pcapng vs pcap:
+    pcapng carries interface metadata, comments, and per-packet
+    names. tshark writes pcapng by default. That is better: you can
+    record who made the capture and why, in the file itself.
+
+  THE COMMENT TAG, and use it:
+    editcap --capture-comment &quot;AEGIS capstone, Kerberoasting of
+      svc-backup, operator nwpcs, 2026-10-14&quot; in.pcapng out.pcapng
+    Anyone reading the file later learns its provenance without
+    needing you. (cd-04 asks for exactly this.)
+SETTINGS
+
+echo &quot;=== 3. start the capture ===&quot;
+timeout 300 tshark -i &quot;$IF&quot; -c 3000 -w &quot;$OUT&quot; \
+  -q &quot;host 192.168.56.10 or host 192.168.56.20&quot; &gt;/dev/null 2&gt;&amp;1 &amp;
+CAP=$!
+echo &quot;  capture pid $CAP&quot;
+sleep 3
+
+echo
+echo &quot;=== 4. RUN ONE TECHNIQUE (change this per exercise) ===&quot;
+echo &quot;  --- technique: Kerberoasting svc-backup ---&quot;
+DC=&quot;192.168.56.10&quot;
+case &quot;$(echo &quot;$DC&quot; | cut -d. -f1)&quot; in
+  192.168.56.*|10.10.10.*) ;;
+  *) echo &quot;  REFUSED: $DC not in the lab range&quot;; kill $CAP 2&gt;/dev/null; exit 3 ;;
+esac
+if command -v GetUserSPNs &gt;/dev/null; then
+  GetUserSPNs -dc-ip &quot;$DC&quot; &quot;${AEGIS_CRED:-LAB/alice:Summer2019!}&quot; \
+    -request 2&gt;&amp;1 | grep -vE &quot;^\[+\]&quot; | head -8 | sed 's/^/  /'
+  echo &quot;  -&gt; captured the TGS-REQs&quot;
+else
+  echo &quot;  (impacket not installed; run the technique manually from&quot;
+  echo &quot;   a second terminal while this capture runs)&quot;
+fi
+
+echo
+echo &quot;=== 5. stop and annotate ===&quot;
+wait $CAP 2&gt;/dev/null
+sleep 1
+if [ -s &quot;$OUT&quot; ]; then
+  command -v editcap &gt;/dev/null &amp;&amp; \
+    editcap --capture-comment &quot;AEGIS capstone - Kerberoasting svc-backup - nwpcs - $(date -u +%FT%TZ)&quot; \
+      &quot;$OUT&quot; &quot;${OUT%.pcapng}-annotated.pcapng&quot; 2&gt;/dev/null
+  ls -la captures/ | sed 's/^/  /'
+  echo &quot;  sha256:&quot;
+  sha256sum captures/* | sed 's/^/    /'
+else
+  echo &quot;  no capture produced (loopback captures of LAN traffic are&quot;
+  echo &quot;  empty - capture on the host-only bridge, not on lo, when&quot;
+  echo &quot;  the traffic is between VMs)&quot;
+fi
+EOF
+chmod +x 01-capture.sh
+</code></pre>
+<h2 id="what-the-wire-shows-that-the-tool-does-not">What the wire shows that the tool does not</h2>
+<pre><code class="language-python">cat &gt; 02-read.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Compare two captures of the same objective by DIFFERENT techniques.
+
+This is the exercise that teaches the most: the same result, two very
+different captures, and a detection has to work against both.
+&quot;&quot;&quot;
+TECHNIQUES = {
+ &quot;A: Kerberoasting&quot;: dict(
+   precondition=&quot;any valid domain account&quot;,
+   wire=[&quot;AS-REQ (preauth encrypted with the user's NT hash)&quot;,
+         &quot;AS-REP (TGT, encrypted with krbtgt)&quot;,
+         &quot;TGS-REQ x N, one per SPN, in a burst&quot;,
+         &quot;TGS-REP x N, encrypted with each service account's ktab&quot;,
+         &quot;4769-class events, only if Kerberos auditing is enabled&quot;],
+   visible_to=&quot;a passive network observer: the burst pattern, and the &quot;
+              &quot;volume of distinct SPNs requested from one host&quot;,
+   dc_events=&quot;4768/4769 only if Audit Kerberos Authentication Service &quot;
+             &quot;is Success (not the default)&quot;,
+   tool_output=&quot;the SPN list and the tickets&quot;,
+   wire_adds=&quot;THE BURST. One host asking for many service tickets in &quot;
+             &quot;seconds is the signature, and it is visible to anyone &quot;
+             &quot;watching the network, with no Kerberos auditing at all.&quot;),
+ &quot;B: AS-REP roasting&quot;: dict(
+   precondition=&quot;NOTHING. No account.&quot;,
+   wire=[&quot;AS-REQ (no preauth, so the body contains only a timestamp, &quot;
+         &quot;encrypted with the ktab derived from the password)&quot;,
+         &quot;AS-REP (encrypted with the account's ktab)&quot;],
+   visible_to=&quot;a passive observer: an AS-REQ from a host to a DC, where &quot;
+              &quot;most traffic is the reverse&quot;,
+   dc_events=&quot;fewer than A: one request, one reply. If Kerberos &quot;
+             &quot;auditing is off, NOTHING.&quot;,
+   tool_output=&quot;the account name and the encrypted blob&quot;,
+   wire_adds=&quot;almost nothing. This is the quietest attack in the &quot;
+             &quot;curriculum, which is exactly why it is the worst.&quot;),
+}
+
+def render():
+    print(&quot;  &quot; + &quot;=&quot;*78)
+    print(&quot;  THE SAME OBJECTIVE, TWO TECHNIQUES, TWO CAPTURES&quot;)
+    print(&quot;  &quot; + &quot;=&quot;*78)
+    for name, t in TECHNIQUES.items():
+        print(f&quot;\n  TECHNIQUE {name}&quot;)
+        print(f&quot;    precondition  : {t['precondition']}&quot;)
+        print(&quot;    on the wire   :&quot;)
+        for w in t[&quot;wire&quot;]: print(f&quot;      - {w}&quot;)
+        print(f&quot;    visible to    : {t['visible_to']}&quot;)
+        print(f&quot;    DC events     : {t['dc_events']}&quot;)
+        print(f&quot;    tool tells you: {t['tool_output']}&quot;)
+        print(f&quot;    the WIRE adds : {t['wire_adds']}&quot;)
+    print()
+    print(&quot;  &quot; + &quot;-&quot;*78)
+    print(&quot;  THE COMPARISON, and it is the whole exercise:&quot;)
+    print()
+    print(&quot;    Kerberoasting is LOUD on the wire and quiet in the logs.&quot;)
+    print(&quot;    AS-REP roasting is quiet in both.&quot;)
+    print()
+    print(&quot;    A detection written only against the DC logs catches A and&quot;)
+    print(&quot;    not B. A network detection written against burst patterns&quot;)
+    print(&quot;    catches A and not B.&quot;)
+    print()
+    print(&quot;    To catch B you need the attribute, and the attribute is&quot;)
+    print(&quot;    readable ANONYMOUSLY - which means the detection is a query&quot;)
+    print(&quot;    against the directory, not against a log stream:&quot;)
+    print()
+    print(&quot;      ldapsearch -x -b &lt;nc&gt; \\&quot;)
+    print(&quot;        '(userAccountControl:1.2.840.113556.1.4.803:=1048576)' \\&quot;)
+    print(&quot;        sAMAccountName&quot;)
+    print()
+    print(&quot;    THAT is the finding to give the client: not 'enable more&quot;)
+    print(&quot;    logging' but 'run this query every hour'. It is one line, it&quot;)
+    print(&quot;    needs no licences, and it closes the gap that no amount of&quot;)
+    print(&quot;    log-based detection would.&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    render()
+PY
+python3 02-read.py 2&gt;&amp;1 | tee 03-compare.txt
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>, and it produces the single best recommendation in the whole<br />
+curriculum. Kerberoasting is <strong>loud on the wire and quiet in the logs</strong>. AS-REP roasting is<br />
+<strong>quiet in both</strong> — it's the quietest attack in the curriculum, which is exactly why it's the<br />
+worst.</p>
+<p>So a detection written only against DC logs catches one and not the other, and a network<br />
+detection written against burst patterns also catches only one. <strong>To catch the quiet one you need<br />
+the attribute — and the attribute is readable <em>anonymously</em>.</strong> The recommendation isn't "enable<br />
+more logging"; it's <strong>"run this one-line LDAP query every hour"</strong>. No licences, and it closes a<br />
+gap no amount of log-based detection would.</p>
+<p><strong>Record:</strong> <code>03-compare.txt</code>.</p>
+<h2 id="the-write-up-template">The write-up template</h2>
+<pre><code class="language-markdown"># Exercise: &lt;technique&gt; against &lt;target&gt;
+
+**Objective** &lt;what you were trying to prove&gt;
+**Authorisation** cap-01's engagement; lab ranges only
+**Precondition** &lt;the credential or lack of one&gt;
+**Capture** &lt;file&gt;, sha256 &lt;hash&gt;, captured by &lt;who&gt; when
+**Timeline** &lt;link to the merged timeline&gt;
+
+## What I did
+&lt;the commands, verbatim, so the exercise is repeatable&gt;
+
+## What the capture shows
+&lt;the packets, in order, with what each one proves&gt;
+
+## What the tool did not tell me
+&lt;the gap between the tool output and the wire — this is the lesson&gt;
+
+## The finding, as it would be written
+&lt;the actual finding text, using rep-02's template&gt;
+
+## What the client's monitoring would have seen
+&lt;run cap-05's detection review for THIS technique&gt;
+
+## What I would do differently
+&lt;one or two things, specifically&gt;
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the five steps of the loop, and which one teaches the most?</li>
+<li>Why does step 5 (attack again with a different technique) matter?</li>
+<li>Compare Kerberoasting and AS-REP roasting: which is louder on the wire, and which is louder<br />
+   in the logs?</li>
+<li>Why does that comparison mean log-based detection alone is insufficient?</li>
+<li>What is the best recommendation this comparison produces, and why is it better than "enable<br />
+   more logging"?</li>
+<li>What is the <code>editcap</code> comment tag for, and which lab asks for it?</li>
+<li>Why should you capture on the host-only bridge rather than <code>lo</code> for LAN traffic?</li>
+<li>What section of the template is the actual lesson?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Network Forensics</strong> → <strong>PCAP Analysis</strong> → <strong>Detection Engineering</strong> →<br />
+<strong>Incident Response</strong> → <strong>Timeline Analysis</strong>.<br />
+This closes the lab tier and the curriculum.</p>

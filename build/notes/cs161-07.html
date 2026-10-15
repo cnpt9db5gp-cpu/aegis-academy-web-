@@ -1,0 +1,268 @@
+<h1 id="web-security">Web Security</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161's web-security lecture takes the browser's security model from <code>mit858-11</code> and asks the<br />
+application-level question: given that the browser trusts your origin, <strong>what can you do wrong</strong><br />
+that turns that trust into an attack?</p>
+<blockquote>
+<p>Companion to <code>mit858-11</code> (the model) and <code>portswigger-academy</code> (the labs).<br />
+This note is the taxonomy of application-level mistakes.</p>
+</blockquote>
+<h2 id="the-model-restated-as-an-attack-surface">The model, restated as an attack surface</h2>
+<pre><code class="language-text">  browser trusts origin O
+  O is compromised by: injection, so attacker code runs as O
+  attacker code as O can: read O's data, act as the user, call any origin
+</code></pre>
+<p>Almost every web vulnerability is a way to make attacker-controlled data<br />
+execute <em>inside</em> a trusted origin, or to make the server act <em>on behalf of</em><br />
+someone it should not.</p>
+<h2 id="the-four-families">The four families</h2>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>The mistake</th>
+<th>Consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Injection</strong></td>
+<td>Data treated as code</td>
+<td>Code execution in the app's context</td>
+</tr>
+<tr>
+<td><strong>Broken authentication</strong></td>
+<td>Identity not proven correctly</td>
+<td>Account takeover</td>
+</tr>
+<tr>
+<td><strong>Broken access control</strong></td>
+<td>Authorisation not checked per object</td>
+<td>Reading others' data</td>
+</tr>
+<tr>
+<td><strong>Misconfiguration</strong></td>
+<td>Defaults, over-permission, verbose errors</td>
+<td>Everything above</td>
+</tr>
+</tbody>
+</table>
+<p>CS161's framing: <strong>the second and third are more common and more severe</strong><br />
+than injection, despite injection dominating the attention.</p>
+<h2 id="injection-mechanised">Injection, mechanised</h2>
+<pre><code class="language-text">SQL:     &quot;SELECT * FROM u WHERE n='&quot; + name + &quot;'&quot;
+         -&gt; name = ' OR 1=1 --     gives the whole table
+
+shell:   system(&quot;convert &quot; + filename)
+         -&gt; filename = &quot;; rm -rf ~  #
+
+template: render(user_input)         -&gt; server-side template injection
+
+LDAP:    filter = &quot;(&amp;(uid=&quot; + user + &quot;)&quot;
+         -&gt; user = *)(uid=*          matches everyone
+</code></pre>
+<p>Every one is the same shape: <strong>string concatenation into a language</strong>. The<br />
+fix is always the same: <strong>use the language's parameterised form</strong>.</p>
+<pre><code class="language-text">  parameterised query   -&gt; the value can never alter the query structure
+  argv-style exec       -&gt; the value can never become a command
+  context-aware escaping -&gt; the fallback when parameters are unavailable
+</code></pre>
+<h2 id="access-control-the-one-people-under-test">Access control, the one people under-test</h2>
+<pre><code class="language-text">  authentication: who are you?
+  authorisation:  may you do this to THIS object?
+
+  broken:  GET /api/invoice?id=1234   and you change it to 1235
+</code></pre>
+<p>IDOR (Insecure Direct Object Reference) is the most common high-severity<br />
+finding in real bug bounty, because it requires no exploit technique — just a<br />
+number in a URL.</p>
+<p><strong>The test:</strong> for every endpoint, fetch an object you own, then fetch one you<br />
+do not, with the same request.</p>
+<h2 id="cs161s-security-relevant-web-properties">CS161's security-relevant web properties</h2>
+<ul>
+<li><strong>Authentication</strong>: must be unforgeable and must not leak <em>why</em> it failed</li>
+<li><strong>Sessions</strong>: unguessable, rotated on privilege change, invalidated server-side</li>
+<li><strong>Authorisation</strong>: checked per object, per request, server-side</li>
+<li><strong>Input handling</strong>: validated, and never used to build anything executable</li>
+<li><strong>Output encoding</strong>: context-appropriate, at the point of output</li>
+<li><strong>State</strong>: cookies flagged <code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code></li>
+<li><strong>CSRF</strong>: token or <code>SameSite</code>, because the browser attaches authority automatically</li>
+<li><strong>Errors</strong>: generic, consistent, and never reflecting input</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SQL injection</strong></td>
+<td>Concatenating input into a query</td>
+</tr>
+<tr>
+<td><strong>CSRF</strong></td>
+<td>Forging a request with the victim's ambient cookies</td>
+</tr>
+<tr>
+<td><strong>XSS</strong></td>
+<td>Script running in a trusted origin</td>
+</tr>
+<tr>
+<td><strong>IDOR</strong></td>
+<td>Accessing an object by changing its identifier</td>
+</tr>
+<tr>
+<td><strong>Access control</strong></td>
+<td>Per-object authorisation</td>
+</tr>
+<tr>
+<td><strong>Parameterised query</strong></td>
+<td>Separating code from data</td>
+</tr>
+<tr>
+<td><strong>Context-aware escaping</strong></td>
+<td>Encoding for the output context</td>
+</tr>
+<tr>
+<td><strong>Cookie flags</strong></td>
+<td>HttpOnly, Secure, SameSite</td>
+</tr>
+<tr>
+<td><strong>Error oracle</strong></td>
+<td>Error differences that leak secret state</td>
+</tr>
+<tr>
+<td><strong>Least privilege (web)</strong></td>
+<td>A session should only do what it must</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what does this site send back? ---
+curl -sI --max-time 5 http://127.0.0.1:8080/ | head -12
+echo
+echo &quot;=== security headers that should be present ===&quot;
+for h in content-security-policy x-frame-options strict-transport-security \
+         referrer-policy x-content-type-options permissions-policy; do
+  v=$(curl -sI --max-time 3 http://127.0.0.1:8080/ 2&gt;/dev/null | grep -i &quot;^$h&quot; | head -1)
+  printf &quot;  %-30s %s\n&quot; &quot;$h&quot; &quot;${v:-ABSENT}&quot;
+done
+
+# --- cookies, and whether they are usable by script ---
+curl -sv --max-time 5 http://127.0.0.1:8080/ 2&gt;&amp;1 | grep -i &quot;set-cookie&quot; | sed 's/^/  /'
+echo &quot;  HttpOnly absent = readable by JavaScript&quot;
+echo &quot;  Secure absent   = sent over plain HTTP too&quot;
+echo &quot;  SameSite absent = usable cross-site (CSRF exposure)&quot;
+
+# --- the enumeration that finds IDOR, on your own lab only ---
+cat &gt; 04-idor.md &lt;&lt;'EOF'
+# The IDOR test, written down
+
+For every endpoint that takes an identifier:
+
+1.  authenticate as user A
+2.  request an object A owns        -&gt; 200
+3.  request an object B owns        -&gt; ????
+
+If step 3 returns 200, the endpoint has no authorisation check.
+
+## What to record
+- the exact request
+- the identifier you changed, and whose object it is
+- the response status and a redacted snippet proving it is B's data
+
+## What NOT to do
+- do not fetch data you do not need; stop at the status code and size
+- do not enumerate broadly; test one or two identifiers
+- never put another user's real data in a report
+EOF
+cat 04-idor.md
+
+# --- what methods does this endpoint accept? ---
+for m in GET HEAD POST PUT DELETE PATCH OPTIONS TRACE; do
+  printf &quot;  %-8s %s\n&quot; &quot;$m&quot; \
+    &quot;$(curl -s -o /dev/null -w '%{http_code}' -X $m --max-time 3 http://127.0.0.1:8080/ 2&gt;/dev/null || echo '-')&quot;
+done
+echo &quot;  405 on the wrong verb tells you the resource exists.&quot;
+echo &quot;  200 on TRACE-style methods would be a finding in itself.&quot;
+
+# --- error handling, which is an oracle if it is inconsistent ---
+python3 - &lt;&lt;'PY' | tee 05-oracle.txt
+cases = [
+    (&quot;unknown user&quot;,     &quot;admin&quot;),
+    (&quot;wrong password&quot;,   &quot;admin&quot;),   # same username, bad password
+    (&quot;no such user&quot;,     &quot;nosuchuser&quot;),
+]
+print(&quot;  these three SHOULD return the identical response.&quot;)
+print()
+for label, user in cases:
+    print(f&quot;  {label:&lt;16} -&gt; (compare status, length and time, not just the message)&quot;)
+print()
+print(&quot;  Differences that leak which usernames exist are a real finding:&quot;)
+print(&quot;    different status code&quot;)
+print(&quot;    different response length&quot;)
+print(&quot;    measurably different timing&quot;)
+PY
+cat 05-oracle.txt
+
+# --- the fixes, as a checklist ---
+cat &gt; 06-checklist.md &lt;&lt;'EOF'
+# Web security checklist
+
+## Authentication
+- [ ] credentials compared in constant time
+- [ ] no user enumeration via message, status, length or timing
+- [ ] rate limited per account AND per source, without lockout
+- [ ] password hashing is slow and salted (Argon2id, scrypt, bcrypt)
+- [ ] MFA available, and second factors that resist phishing
+
+## Sessions
+- [ ] 128+ bits of entropy, from a CSPRNG
+- [ ] rotated on login and on every privilege change
+- [ ] invalidated server-side on logout
+- [ ] cookie: HttpOnly, Secure, SameSite, narrow Path
+- [ ] absolute and idle expiry
+
+## Authorisation
+- [ ] checked server-side, per object, per request
+- [ ] default deny
+- [ ] IDOR tested with a second, unprivileged account
+- [ ] privilege changes re-verify, not just the login
+
+## Input and output
+- [ ] parameterised queries, never string concatenation
+- [ ] no shell built from user input
+- [ ] output encoding per context (HTML, attribute, JS, URL)
+- [ ] CSP set, and not `unsafe-inline` without a nonce/hash
+- [ ] file uploads validated by content, not by name
+
+## Transport
+- [ ] TLS everywhere, HSTS set
+- [ ] no mixed content
+- [ ] CORS: fixed allowlist, never reflecting Origin with credentials
+
+## Errors
+- [ ] generic and identical to the client
+- [ ] detailed and correlated internally, never returned
+- [ ] no stack traces, no SQL, no paths
+EOF
+cat 06-checklist.md
+</code></pre>
+<p><strong>Step 5 is the subtle one</strong>: consistent error responses are a security control, and measuring<br />
+timing as well as status is how you check it.</p>
+<p><strong>Record:</strong> <code>04-idor.md</code> and <code>06-checklist.md</code> — that checklist is the Tier 4 working document.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Give the four web vulnerability families and an example of each.</li>
+<li>Why is parameterised SQL the only real fix for injection?</li>
+<li>What is IDOR, and why is it so common?</li>
+<li>Name three ways error handling leaks whether a username exists.</li>
+<li>Why does rotating the session ID at login fix session fixation?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OWASP Top 10</strong> → <strong>SQL Injection</strong> → <strong>IDOR</strong> → <strong>CSRF</strong> → <strong>XSS</strong> →<br />
+<strong>Same-Origin Policy</strong>.<br />
+<code>mit858-11</code> covers the browser model; <code>portswigger-academy</code> is where you practise.</p>

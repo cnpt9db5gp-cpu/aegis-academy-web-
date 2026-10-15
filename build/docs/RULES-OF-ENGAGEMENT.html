@@ -1,0 +1,67 @@
+<h1 id="rules-of-engagement-aegis">Rules of Engagement — AEGIS</h1>
+<p>Standing orders for everything in this repository. These are not suggestions.</p>
+<h2 id="1-the-authorisation-test">1. The authorisation test</h2>
+<p>Before touching any system, you must be able to answer <strong>yes</strong> to all four:</p>
+<ol>
+<li><strong>Do I own it, or have I been paid to test it?</strong></li>
+<li><strong>Is there a written scope</strong> — which IPs, domains, accounts, techniques, and time window?</li>
+<li><strong>Have I written down what is out of bounds?</strong> (data destruction, DoS, social engineering, third parties)</li>
+<li><strong>Would I be comfortable if the client's legal team read my exact commands?</strong></li>
+</ol>
+<p>If any answer is no, stop. Use a lab instead.</p>
+<h2 id="2-what-counts-as-a-legal-target">2. What counts as a legal target</h2>
+<table>
+<thead>
+<tr>
+<th>Target</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Your own Kali machine (localhost / loopback)</td>
+<td><strong>Always fine</strong></td>
+</tr>
+<tr>
+<td>Virtual machines you created</td>
+<td><strong>Always fine</strong></td>
+</tr>
+<tr>
+<td>Deliberately vulnerable images (Metasploitable, DVWA, Juice Shop, WebGoat)</td>
+<td><strong>Always fine</strong> — the image exists to be attacked</td>
+</tr>
+<tr>
+<td>OverTheWire, picoCTF, TryHackMe, Hack The Box, CyberDefenders</td>
+<td><strong>Fine</strong> — the platform grants authorisation</td>
+</tr>
+<tr>
+<td>PortSwigger Web Security Academy</td>
+<td><strong>Fine</strong> — labs are explicitly provided for this</td>
+</tr>
+<tr>
+<td>A CTF challenge you were invited to</td>
+<td><strong>Fine</strong> — check the rules, usually no scanning outside the target IP</td>
+</tr>
+<tr>
+<td><strong>Anyone else's system</strong></td>
+<td><strong>Never, without a signed engagement letter</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-hard-limits">3. Hard limits</h2>
+<ul>
+<li><strong>Never</strong> scan, probe or connect to anything you do not own or have authorisation for.</li>
+<li><strong>Never</strong> run denial-of-service tooling, even "just to test".</li>
+<li><strong>Never</strong> exfiltrate real personal data. If a lab exposes real credentials or PII, stop, note it, and do not spread it.</li>
+<li><strong>Never</strong> use findings to actually access systems beyond the agreed scope.</li>
+<li><strong>Never</strong> install or execute a tool from an unverified source during a study session — you would not do it on a client machine.</li>
+</ul>
+<h2 id="4-data-handling">4. Data handling</h2>
+<p>Anything you capture while learning — pcaps, memory images, credential hashes — stays on your own machine<br />
+and inside this private repository. <code>transcripts/</code> and lab artefacts are git-ignored by design.</p>
+<h2 id="5-reporting">5. Reporting</h2>
+<p>Finding a vulnerability in a system you are not authorised to test is not a "first blood". It is someone<br />
+else's problem, and the responsible move is to report it privately to the owner, not to publish it.</p>
+<blockquote>
+<p>Knowledge without authorisation is liability. Knowledge with authorisation is a career.</p>
+</blockquote>

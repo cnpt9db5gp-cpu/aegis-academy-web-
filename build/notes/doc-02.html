@@ -1,0 +1,253 @@
+<h1 id="mandatory-hygiene-isolated-lab-snapshots-and-scope">Mandatory Hygiene: Isolated Lab, Snapshots, and Scope</h1>
+<h2 id="summary">Summary</h2>
+<p>This is the least entertaining and most important lecture in Tier 0. Before you run a single tool<br />
+against a single target, you need three things in place: an <strong>isolated lab</strong>, a <strong>snapshot</strong>, and<br />
+a <strong>written scope</strong>.</p>
+<p>Skip any of them and you risk one of three outcomes: scanning a network that is not yours,<br />
+destroying an environment you cannot rebuild, or losing weeks of work to a mistyped <code>rm -rf</code>.</p>
+<h2 id="the-three-non-negotiables">The three non-negotiables</h2>
+<h3 id="1-isolated-lab">1. Isolated lab</h3>
+<p>Your attacker machine (Kali) and your targets (VMs) must be on a <strong>host-only</strong> network with no<br />
+route to your real LAN or the internet. Covered in <code>kr-06</code>.</p>
+<pre><code class="language-bash"># Verify before you scan anything
+ip route | grep 192.168.56       # host-only subnet present
+ip route | grep default          # your real gateway — different subnet
+</code></pre>
+<h3 id="2-snapshot-before-every-destructive-step">2. Snapshot before every destructive step</h3>
+<pre><code class="language-bash">VBoxManage snapshot vuln01 take &quot;pristine&quot;
+VBoxManage snapshot vuln01 list
+VBoxManage snapshot vuln01 restore &quot;pristine&quot;
+</code></pre>
+<p>Snapshot cadence that actually works:</p>
+<table>
+<thead>
+<tr>
+<th>Snapshot</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pristine</code></td>
+<td>immediately after import, before touching anything</td>
+</tr>
+<tr>
+<td><code>mid-exercise</code></td>
+<td>before anything irreversible (mass changes, format, partition work)</td>
+</tr>
+<tr>
+<td><code>solved</code></td>
+<td>after a successful run, as your reference solution</td>
+</tr>
+</tbody>
+</table>
+<h3 id="3-written-scope">3. Written scope</h3>
+<p>Even against your own lab, write it down. The habit is the point.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/engagements
+cat &gt; ~/aegis/engagements/$(date +%Y%m%d-%H%M%S)-scope.md &lt;&lt;'EOF'
+# Engagement Scope
+
+**Authorisation:** self-directed practice. No third-party systems in scope.
+**Date:** (today)
+**Tester:** nwpcs @ localhost
+
+## In scope
+- 192.168.56.0/24  (host-only lab network)
+- vuln01  .101  Metasploitable3
+- vuln02  .102  DVWA / Juice Shop
+- vuln03  .103  Misconfigured Ubuntu (privesc)
+
+## Out of scope
+- Any address outside 192.168.56.0/24
+- Denial of service of any kind
+- Social engineering, phishing, physical access
+- Data destruction or disk wiping
+
+## Permitted techniques
+- Scanning, enumeration, exploitation, post-exploitation, pivoting (within the range)
+- Credential recovery against hashes obtained from in-scope targets only
+
+## Emergency contact
+- Stop everything; restore the nearest snapshot.
+EOF
+</code></pre>
+<p><strong>Why write it for a self-practice engagement?</strong> Because in three months you will be running<br />
+something against something else, and the muscle memory of "scope first" is what keeps you inside<br />
+the lines.</p>
+<h2 id="operational-hygiene-that-saves-you">Operational hygiene that saves you</h2>
+<pre><code class="language-bash"># --- destructive command guardrails ---
+# Always know where you are and what you are pointing at
+pwd
+ls -la
+# Use a two-step delete for anything that matters
+mkdir -p /tmp/trash &amp;&amp; mv important-stuff /tmp/trash/    # reversible
+rm -rf /tmp/trash/                                        # now irreversible, and safe
+
+# Make the dangerous ones harder to type by accident
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+
+# --- history hygiene (both for privacy and for not leaving trails on yourself) ---
+export HISTCONTROL=ignorebothspace    # commands starting with a space are not recorded
+export HISTSIZE=50000
+export HISTFILESIZE=200000
+
+# --- never commit secrets or captures ---
+cd ~/Projects/aegis-academy
+git check-ignore -v labs/foo.pcap
+
+# --- evidence hygiene ---
+mkdir -p ~/aegis/evidence &amp;&amp; chmod 700 ~/aegis/evidence
+sha256sum capture.pcap | tee capture.pcap.sha256
+</code></pre>
+<h2 id="the-snapshot-discipline-that-actually-prevents-disaster">The snapshot discipline that actually prevents disaster</h2>
+<pre><code class="language-bash">#!/usr/bin/env bash
+# snap.sh - one command snapshot discipline
+set -euo pipefail
+VM=&quot;${1:?usage: ./snap.sh &lt;vmname&gt; [label]}&quot;
+LABEL=&quot;${2:-manual-$(date +%H%M%S)}&quot;
+VBoxManage snapshot &quot;$VM&quot; take &quot;$LABEL&quot; --description &quot;$LABEL&quot;
+echo &quot;[+] snapshot '$LABEL' taken on $VM&quot;
+VBoxManage snapshot &quot;$VM&quot; list | tail -5
+</code></pre>
+<pre><code class="language-bash"># use it
+./snap.sh vuln01 pristine
+./snap.sh vuln01 before-mitigation-test
+./snap.sh vuln01 solved-buffer-overflow
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Rules of Engagement (RoE)</strong></td>
+<td>The document defining what is permitted</td>
+</tr>
+<tr>
+<td><strong>Scope</strong></td>
+<td>The specific systems, IPs, techniques and time window authorised</td>
+</tr>
+<tr>
+<td><strong>Isolation</strong></td>
+<td>Network separation preventing accidental access outside scope</td>
+</tr>
+<tr>
+<td><strong>Snapshot</strong></td>
+<td>Frozen VM state; the cheapest rollback available</td>
+</tr>
+<tr>
+<td><strong>Destructive operation</strong></td>
+<td>Anything that cannot be undone (format, <code>rm -rf</code>, partition)</td>
+</tr>
+<tr>
+<td><strong>Chain of custody</strong></td>
+<td>Documented record of who handled evidence, and when</td>
+</tr>
+<tr>
+<td><strong>Evidence integrity</strong></td>
+<td>Cryptographic hash proving evidence was not altered</td>
+</tr>
+<tr>
+<td><strong>Scope creep</strong></td>
+<td>The gradual expansion of testing beyond authorisation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> establish the full hygiene baseline on your own machine, and verify your snapshot<br />
+recovery actually works <em>before</em> you need it.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/doc-02 &amp;&amp; cd ~/aegis/labs/doc-02
+
+# --- 1. write the scope document (do not skip - it is the deliverable) ---
+mkdir -p ~/aegis/engagements
+SCOPE=~/aegis/engagements/$(date +%Y%m%d)-scope.md
+cat &gt; &quot;$SCOPE&quot; &lt;&lt;'EOF'
+# Engagement Scope — AEGIS practice range
+Authorisation: self-directed. No third-party systems.
+IN:  192.168.56.0/24 (host-only), localhost, and my own VMs
+OUT: everything else; no DoS; no social engineering; no destruction
+EOF
+cat &quot;$SCOPE&quot; | tee 01-scope.txt
+
+# --- 2. build the snapshot helper and USE it ---
+cat &gt; snap.sh &lt;&lt;'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+VM=&quot;${1:?usage: ./snap.sh &lt;vmname&gt; [label]}&quot;
+LABEL=&quot;${2:-manual-$(date +%H%M%S)}&quot;
+VBoxManage snapshot &quot;$VM&quot; take &quot;$LABEL&quot; --description &quot;$LABEL&quot; &gt;/dev/null
+echo &quot;[+] snapshot '$LABEL' taken on $VM&quot;
+SCRIPT
+chmod +x snap.sh
+VBoxManage list runningvms
+
+# --- 3. PROVE snapshot recovery works (this is the step everyone skips) ---
+# If you have a lab VM:
+VM=vuln01
+./snap.sh $VM hygiene-test
+# break something deliberately inside the VM (create a file, install nothing)
+# then restore and confirm the break is gone
+VBoxManage snapshot $VM list | tail -6
+
+# --- 4. environment hardening ---
+cat &gt;&gt; ~/.bashrc &lt;&lt;'EOF'
+
+# --- AEGIS hygiene ---
+export HISTCONTROL=ignorebothspace
+export HISTSIZE=50000
+export HISTFILESIZE=200000
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+alias netstat-tools='ss -tulpn'
+EOF
+# (remove the aliases if you dislike being interrupted - the point is being deliberate)
+
+# --- 5. evidence directory with restricted permissions ---
+mkdir -p ~/aegis/evidence &amp;&amp; chmod 700 ~/aegis/evidence
+ls -ld ~/aegis/evidence
+
+# --- 6. verify your repo ignores captures ---
+cd ~/Projects/aegis-academy
+git check-ignore -v lab.pcap transcripts/foo.vtt 2&gt;/dev/null | tee /tmp/ig.txt
+git ls-files | grep -E '\.(pcap|mem|raw|dmp)$' &amp;&amp; echo &quot;!! TRACKED EVIDENCE - fix this&quot; \
+  || echo &quot;good: no evidence tracked in git&quot;
+
+# --- 7. self-audit: what is this machine listening on, really? ---
+{
+  echo &quot;=== listening sockets ===&quot;
+  ss -tulpn
+  echo
+  echo &quot;=== anything bound to 0.0.0.0 (world-reachable) is a finding ===&quot;
+  ss -tulpn | awk '$5 ~ /0\.0\.0\.0|\*/ {print &quot;  EXPOSED: &quot; $1, $5, $7}'
+} | tee 02-exposure-audit.txt
+
+# --- 8. the reversible-delete pattern ---
+mkdir -p /tmp/trash-demo &amp;&amp; echo &quot;important&quot; &gt; /tmp/trash-demo/file.txt
+mkdir -p /tmp/trash &amp;&amp; mv /tmp/trash-demo /tmp/trash/    # reversible!
+ls /tmp/trash/
+rm -rf /tmp/trash/                                       # now irreversible, and safe
+</code></pre>
+<p><strong>Step 7 is a real finding about your own machine.</strong> Anything bound to <code>0.0.0.0</code> is reachable<br />
+from your whole network. On a laptop that is frequently a real problem, and it is precisely the<br />
+misconfiguration you will look for in Tier 5.</p>
+<p><strong>Record:</strong> whether you have any world-reachable listener. Fix it now — kill the process or bind<br />
+it to <code>127.0.0.1</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the three non-negotiables before touching any target.</li>
+<li>Why is a written scope valuable even for a self-practice engagement?</li>
+<li>What does <code>HISTCONTROL=ignorebothspace</code> do, and why is it useful?</li>
+<li>Your lab VM will not boot after an experiment. Which two recovery mechanisms exist, and which<br />
+   is faster?</li>
+<li><code>ss -tulpn</code> shows a service on <code>0.0.0.0:8080</code>. What is the risk, and how do you fix it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Rules of Engagement</strong> → <strong>Scope Definition</strong> → <strong>Practice Range</strong> → <strong>Chain of Custody</strong>.<br />
+<code>docs/RULES-OF-ENGAGEMENT.md</code> is the version you re-read when a technique feels ambiguous.</p>

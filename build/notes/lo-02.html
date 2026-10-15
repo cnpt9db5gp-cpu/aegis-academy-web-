@@ -1,0 +1,426 @@
+<h1 id="memory-the-stack-and-calling-conventions">Memory, the Stack and Calling Conventions</h1>
+<h2 id="summary">Summary</h2>
+<p>Once the CPU is fetching bytes, the next question is <em>where those bytes live</em>. Three regions<br />
+matter for security work: the <strong>stack</strong> (automatic, grows down, holds frames), the <strong>heap</strong><br />
+(manual, attacker-influenced size), and <strong>code</strong> (read-only, ideally).</p>
+<p>The calling convention is the contract that says which register holds what across a function<br />
+call. It is also the reason a stack overflow can hijack control flow.</p>
+<blockquote>
+<p>Companion to <code>lo-03</code> (registers and instructions) and <code>cs161-03</code> (the bug<br />
+taxonomy). This note is the memory model.</p>
+</blockquote>
+<h2 id="the-regions">The regions</h2>
+<pre><code class="language-text">  HIGH ADDRESS
+  +-------------------------+
+  |  stack       | grows DOWN (toward lower addresses)
+  +-------------------------+
+  |  heap        | grows UP (toward higher addresses)
+  +-------------------------+
+  |  BSS        | uninitialised globals
+  +-------------------------+
+  |  DATA       | initialised globals
+  +-------------------------+
+  |  TEXT/RODATA| code and constants
+  +-------------------------+
+  LOW ADDRESS
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Region</th>
+<th>Managed by</th>
+<th>Lifetime</th>
+<th>Security relevance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>stack</strong></td>
+<td>the CPU, automatically</td>
+<td>per frame</td>
+<td>overflow target; canaries</td>
+</tr>
+<tr>
+<td><strong>heap</strong></td>
+<td>the program, manually</td>
+<td>until freed</td>
+<td>UAF, double free, heap overflow</td>
+</tr>
+<tr>
+<td><strong>bss</strong></td>
+<td>loader</td>
+<td>program</td>
+<td>zero-initialised globals; format strings</td>
+</tr>
+<tr>
+<td><strong>data</strong></td>
+<td>loader</td>
+<td>program</td>
+<td>initialised globals; GOT is here</td>
+</tr>
+<tr>
+<td><strong>text</strong></td>
+<td>loader, should be RO</td>
+<td>program</td>
+<td>ROP gadgets live here</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-stack-frame">The stack frame</h2>
+<p>Every call pushes a frame containing what the function needs to work and<br />
+what the caller needs afterwards:</p>
+<pre><code class="language-text">  HIGHER ADDRESS (older frames)
+  +--------------------------+
+  | caller's saved rbp       |  &lt;- return address is BELOW this
+  | return address           |  &lt;- the value on the stack at [rsp]
+  | saved rbp                |
+  | locals / spill slots     |
+  | arguments (caller area)  |
+  +--------------------------+
+  LOWER ADDRESS (rsp, grows down)
+
+  frame pointer rbp  -&gt; fixed reference to this frame
+  stack pointer  rsp -&gt; top of stack; the thing that MOVES
+</code></pre>
+<pre><code class="language-c">void f(int a, int b) {
+    char buf[16];     /* locals      */
+    int  x = a + b;   /* spill slot  */
+}
+</code></pre>
+<p>On entry to <code>f</code>, the stack holds <code>[... return address ... saved rbp ... a ...
+b ...]</code> and <code>rsp</code> points at the bottom. <code>push rbp; mov rbp, rsp</code> establishes<br />
+<code>rbp</code> as a fixed anchor; locals go at negative offsets from <code>rbp</code>.</p>
+<p><strong>Why the anchor matters:</strong> with <code>rbp</code> fixed, locals have stable addresses<br />
+even though <code>rsp</code> moves. A function pointer, a saved register, or a buffer<br />
+written past its end all have predictable addresses relative to <code>rbp</code>.</p>
+<h2 id="the-overflow">The overflow</h2>
+<pre><code class="language-text">  ASCIIART, 64-bit, little endian, buffer of 8 bytes at rbp-8:
+
+  normal:      [  rbp  ] [ret addr][b b b b b b b b]   &lt;- rsp
+                            ^
+  smash it:    [  rbp  ] [AAAAAAAA][X X X X X X X X]
+                            ^        ^ overwritten
+  chain it:    [  rbp  ] [AAAAAAAA][ADDR][R O P   ]
+                            ^        ^        ^
+                          saved     return    next gadgets
+                          rbp       address
+
+  Everything between the buffer and the return address is what you must
+  fill EXACTLY. That is what an offset calculation is.
+</code></pre>
+<p>The offset is <code>distance from the start of your buffer to the saved return
+address</code>. Everything in this note exists to make that number computable.</p>
+<h2 id="the-system-v-amd64-calling-convention">The System V AMD64 calling convention</h2>
+<pre><code class="language-c">int f(int a, int b, int c, int d, int e, int f_) {
+    return a + b + c + d + e + f_;
+}
+</code></pre>
+<pre><code class="language-text">  INTEGER / POINTER arguments:  rdi, rsi, rdx, rcx, r8,  r9
+  then:                        pushed onto the stack, right to left
+  RETURN value:                rax
+  Callee-saved:                rbx, rbp, r12-r15  (must save &amp; restore)
+  Caller-saved:                rax, rcx, rdx, rsi, rdi, r8-r11
+                               (may be clobbered by any call)
+  Frame pointer:               rbp
+  Stack alignment:             16 bytes at the call instruction
+  Red zone:                    128 bytes below rsp, no signal handlers
+  Variadic:                    al = number of vector registers used
+</code></pre>
+<p>Memorise the first two lines. <strong><code>rdi</code> holds the first argument.</strong> That one<br />
+fact answers most "what does this function do" questions in a disassembly<br />
+listing, because the argument determines which function it is.</p>
+<h2 id="caller-vs-callee-and-why-it-matters">Caller vs callee, and why it matters</h2>
+<pre><code class="language-text">  CALLER-SAVED: you may clobber rax/rcx/rdx/rsi/rdi/r8-r11 freely.
+                If you need a value to survive a call, save it yourself.
+
+  CALLEE-SAVED: the callee must save and restore rbx/rbp/r12-r15.
+                A well-written function pushes and pops these.
+
+  IN PRACTICE: if you see a function that uses rbx or r12-r15 and NEVER
+  pushes/pops them, it is either a leaf function or a compiler bug.
+  In hand-written shellcode, YOU are both caller and callee, and
+  getting this wrong corrupts the program you came back into.
+</code></pre>
+<h2 id="windows-x64-briefly">Windows x64, briefly</h2>
+<pre><code class="language-c">// Windows x64 differs:
+//   rcx, rdx, r8, r9   are the first four arguments (not rdi, rsi)
+//   shadow space:      32 bytes reserved by the caller before any call
+//   rax:               return value
+//   callee-saved:      rbx, rbp, rdi, rsi, r12-r15
+//   (note rdi/rsi flip sides)
+</code></pre>
+<p>If you are reading Windows shellcode or a Windows binary, the register<br />
+assignments are <strong>reversed from Linux</strong>. Getting this wrong is the single<br />
+most common cause of "my payload runs but does nothing".</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Stack</strong></td>
+<td>Automatic storage, grows toward lower addresses</td>
+</tr>
+<tr>
+<td><strong>Stack frame</strong></td>
+<td>One function's region of the stack</td>
+</tr>
+<tr>
+<td><strong><code>rsp</code></strong></td>
+<td>Stack pointer; moves constantly</td>
+</tr>
+<tr>
+<td><strong><code>rbp</code></strong></td>
+<td>Frame pointer; fixed within a frame</td>
+</tr>
+<tr>
+<td><strong>Prologue / epilogue</strong></td>
+<td><code>push rbp; mov rbp,rsp</code> / <code>mov rsp,rbp; pop rbp; ret</code></td>
+</tr>
+<tr>
+<td><strong>Calling convention</strong></td>
+<td>The contract for argument/return passing</td>
+</tr>
+<tr>
+<td><strong>Caller-saved</strong></td>
+<td>Registers a call may destroy</td>
+</tr>
+<tr>
+<td><strong>Callee-saved</strong></td>
+<td>Registers a callee must preserve</td>
+</tr>
+<tr>
+<td><strong>Stack alignment</strong></td>
+<td>16-byte boundary at the call</td>
+</tr>
+<tr>
+<td><strong>Red zone</strong></td>
+<td>128 bytes below rsp usable without adjusting it</td>
+</tr>
+<tr>
+<td><strong>Stack pivot</strong></td>
+<td>Redirecting rsp to attacker-chosen memory</td>
+</tr>
+<tr>
+<td><strong>Return address</strong></td>
+<td>The value <code>ret</code> pops and jumps to</td>
+</tr>
+<tr>
+<td><strong>Frame pointer omission</strong></td>
+<td><code>rbp</code> used as a general register (<code>-fomit-frame-pointer</code>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- 1. see a real stack frame ---
+mkdir -p ~/aegis/labs/lo-02 &amp;&amp; cd ~/aegis/labs/lo-02
+
+cat &gt; frame.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+int add(int a, int b, int c, int d, int e, int f) {
+    volatile char buf[16];
+    memset((void *)buf, 0, sizeof buf);
+    return a + b + c + d + e + f;      /* arguments beyond 4 are on the stack */
+}
+
+int caller(void) {
+    int x = add(1, 2, 3, 4, 5, 6);     /* 21 */
+    printf(&quot;%d\n&quot;, x);
+    return x;
+}
+
+int main(void) { return caller(); }
+EOF
+
+gcc -g -O0 -fno-omit-frame-pointer frame.c -o frame
+gcc -g -O0 -fomit-frame-pointer frame.c -o frame-noFP
+
+{
+  echo &quot;=== WITH a frame pointer: rbp anchors everything ===&quot;
+  objdump -d frame | sed -n '/&lt;add&gt;:/,/^$/p' | sed 's/^/  /'
+  echo
+  echo &quot;=== read it:&quot;
+  echo &quot;    push rbp; mov rbp,rsp   -&gt; rbp is now a fixed anchor&quot;
+  echo &quot;    [rbp+16],[rbp+24]      -&gt; the 5th and 6th arguments, on the stack&quot;
+  echo &quot;    [rbp-1] .. [rbp-16]    -&gt; the 16-byte buffer&quot;
+  echo &quot;    leave / ret             -&gt; restore rsp from rbp, pop, jump&quot;
+} 2&gt;&amp;1 | tee 01-frame.txt
+
+{
+  echo &quot;=== WITHOUT a frame pointer: rbp is free, offsets are rsp-relative ===&quot;
+  objdump -d frame-noFP | sed -n '/&lt;add&gt;:/,/^$/p' | sed 's/^/  /'
+  echo
+  echo &quot;  Same function, no anchor. Every local is rsp-relative and rsp moves&quot;
+  echo &quot;  on every push/pop. This is the default on x86-64 and it is why&quot;
+  echo &quot;  offset calculation is harder without a frame pointer.&quot;
+} 2&gt;&amp;1 | tee 02-noFP.txt
+
+# --- 2. the calling convention, proven by a C caller and an asm callee ---
+cat &gt; conv.S &lt;&lt;'EOF'
+    .text
+    .globl asm_sum6
+# uint64_t asm_sum6(uint64_t a, b, c, d, e, f)
+# System V: a=rdi b=rsi c=rdx d=rcx e=r8 f=r9, return in rax
+asm_sum6:
+    mov     rax, rdi          # a
+    add     rax, rsi          # + b
+    add     rax, rdx          # + c
+    add     rax, rcx          # + d
+    add     rax, r8           # + e
+    add     rax, r9           # + f
+    ret
+EOF
+cat &gt; conv.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+uint64_t asm_sum6(uint64_t a, uint64_t b, uint64_t c,
+                  uint64_t d, uint64_t e, uint64_t f);
+int main(void) {
+    printf(&quot;  asm_sum6(1,2,3,4,5,6) = %llu  (expected 21)\n&quot;,
+           (unsigned long long)asm_sum6(1,2,3,4,5,6));
+    printf(&quot;  asm_sum6(10,20,30,40,50,60) = %llu  (expected 210)\n&quot;,
+           (unsigned long long)asm_sum6(10,20,30,40,50,60));
+    printf(&quot;  if this is wrong, the register order is different from what\n&quot;
+           &quot;  you assumed - check which convention you are actually under.\n&quot;);
+    return 0;
+}
+EOF
+gcc -O0 -no-pie conv.S conv.c -o conv 2&gt;&amp;1 &amp;&amp; ./conv | tee 03-convention.txt
+
+# --- 3. watch the stack actually change ---
+cat &gt; 04-watch-stack.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+command -v gdb &gt;/dev/null || { echo &quot;  gdb not installed (apt install gdb)&quot;; exit 0; }
+gdb -q -batch \
+  -ex &quot;set disassembly-flavor att&quot; \
+  -ex &quot;break caller&quot; \
+  -ex run \
+  -ex &quot;printf \&quot;  at entry to caller():\n\&quot;&quot; \
+  -ex &quot;info registers rsp rbp&quot; \
+  -ex &quot;x/8gx \$rsp&quot; \
+  -ex &quot;stepi&quot; -ex &quot;stepi&quot; -ex &quot;stepi&quot; -ex &quot;stepi&quot; -ex &quot;stepi&quot; \
+  -ex &quot;printf \&quot;  after 5 instructions (rsp should have moved):\n\&quot;&quot; \
+  -ex &quot;info registers rsp rbp&quot; \
+  -ex &quot;x/8gx \$rsp&quot; \
+  ./frame 2&gt;&amp;1 | grep -vE &quot;^\[|^Reading|^Breakpoint|^warning:&quot;
+EOF
+chmod +x 04-watch-stack.sh
+./04-watch-stack.sh 2&gt;&amp;1 | tee 05-watch.txt
+
+# --- 4. the stack grows DOWN: proven ---
+python3 - &lt;&lt;'PY' | tee 06-direction.txt
+print(&quot;  On x86-64 the stack grows DOWN: toward LOWER addresses.&quot;)
+print(&quot;  A push writes to a smaller address than the last push.&quot;)
+print()
+print(&quot;    after push 1:  rsp = 0x7ffe_ffff_f000  [ 1 ] &lt;- here&quot;)
+print(&quot;    after push 2:  rsp = 0x7ffe_ffff_fef8  [ 2 ] &lt;- here, LOWER&quot;)
+print()
+print(&quot;  A buffer overflow therefore writes UPWARD, from the buffer toward&quot;)
+print(&quot;  the frame's own saved return address. The two directions are why&quot;)
+print(&quot;  a stack buffer is the natural target: the padding is contiguous&quot;)
+print(&quot;  and the prize is a fixed, predictable distance away.&quot;)
+print()
+print(&quot;  Contrast: the heap grows UP (toward higher addresses). Heap&quot;)
+print(&quot;  overflows walk forward into other allocations, which is why they&quot;)
+print(&quot;  need a grooming step and stack overflows do not.&quot;)
+PY
+cat 06-direction.txt
+
+# --- 5. the offset, actually computed ---
+cat &gt; offset.asm &lt;&lt;'EOF'
+    .text
+    .globl _start
+_start:
+    sub     rsp, 32           ; make room
+    lea     rdi, [rsp]        ; rdi = buffer at rsp
+    xor     rax, rax
+    mov     rdx, 64           ; copy 64 bytes into a 32-byte buffer
+    mov     rsi, rsp
+    lea     rdi, [rsp]
+    ; simple memcpy-ish loop
+    mov     rcx, 64
+.copy:
+    mov     al, [rsi]
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    dec     rcx
+    jnz     .copy
+    ; now write past the buffer deliberately, to the return address
+    mov     qword [rsp+32], 0x4141414141414141
+    mov     rax, 60
+    xor     rdi, rdi
+    syscall
+EOF
+{
+  echo &quot;=== the layout we are deliberately breaking ===&quot;
+  echo &quot;    rsp+0   .. rsp+31  buffer (32 bytes)&quot;
+  echo &quot;    rsp+32           &lt;-- the return address&quot;
+  echo &quot;    so the offset is 32 bytes, and it is CONSTANT, not a guess&quot;
+  echo
+  echo &quot;=== how you find the offset when you cannot control the layout ===&quot;
+  echo &quot;    1. write a cyclic pattern of A-Z a-z 0-9 (unique bytes)&quot;
+  echo &quot;    2. let it crash&quot;
+  echo &quot;    3. read the saved return address from the core / crash dump&quot;
+  echo &quot;    4. find the cycle position that matches -&gt; that is the offset&quot;
+  echo
+  echo &quot;    This is 'cyclic pattern + crash + read', and it is the single&quot;
+  echo &quot;    most useful automation in stack exploitation.&quot;
+} 2&gt;&amp;1 | tee 07-offset.txt
+
+# --- 6. the regions, as reported by the loader ---
+{
+  echo &quot;=== where this binary's memory regions are ===&quot;
+  readelf -lW ./frame | grep -E &quot;LOAD|GNU_STACK&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== section-level view ===&quot;
+  readelf -SW ./frame | grep -E &quot;\.text|\.rodata|\.data|\.bss|\.got&quot; | sed 's/^/  /'
+  echo
+  echo &quot;=== stack limits in this process ===&quot;
+  ulimit -s | awk '{print &quot;  stack soft limit: &quot; $1 &quot; KB (&quot; $1/1024 &quot; MB)&quot;}'
+  ulimit -Hs | awk '{print &quot;  stack hard limit: &quot; $1 &quot; KB&quot;}'
+  echo
+  echo &quot;=== the red zone: 128 bytes below rsp usable without touching rsp ===&quot;
+  cat &gt; 07-red-zone.md &lt;&lt;'MD'
+# The red zone
+
+System V AMD64 reserves 128 bytes below `rsp` that a leaf function may use
+without adjusting `rsp`. It exists so a leaf function can spill registers
+without a prologue.
+
+Consequence for exploitation: a `sub rsp, N` before a `call` is a large
+NOP sled on x86-64, because everything in the red zone is writable memory
+you reach by changing `rsp`. That is why &quot;the stack has a red zone&quot; matters
+when you are writing a SROP frame or pivoting the stack.
+MD
+  echo &quot;  (see 07-red-zone.md)&quot;
+} 2&gt;&amp;1 | tee 08-regions.txt
+rm -f frame.c frame frame-noFP conv.S conv.c conv offset.asm
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong>: a C function calling a hand-written assembly function. If<br />
+<code>asm_sum6(1,2,3,4,5,6)</code> prints 21, your register assignments are right. If it prints<br />
+something else, your argument order is wrong — and that one line catches the mistake that<br />
+otherwise wastes an afternoon in a shellcode payload.</p>
+<p><strong>Step 3</strong> shows <code>rsp</code> moving and <code>rbp</code> staying fixed across the prologue. Those two registers<br />
+behaving differently is the entire reason the frame pointer exists.</p>
+<p><strong>Record:</strong> <code>01-frame.txt</code> and <code>03-convention.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Which region grows down, which grows up, and why does that matter for overflows?</li>
+<li>What is the difference between <code>rsp</code> and <code>rbp</code> within a frame?</li>
+<li>State the System V AMD64 argument registers in order.</li>
+<li>Which registers are caller-saved and which are callee-saved, and what must each side do?</li>
+<li>How do you compute a stack overflow offset when you cannot control the layout?</li>
+<li>Why does the red zone change how shellcode is written?</li>
+<li>How does Windows x64 differ, and what is the most common consequence of forgetting?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Stack Frame</strong> → <strong>Calling Convention</strong> → <strong>RBP/RSP</strong> → <strong>Buffer Overflow</strong> → <strong>ROP</strong> →<br />
+<strong>Stack Pivot</strong>.<br />
+<code>lo-03</code> covers the instructions these registers feed.</p>

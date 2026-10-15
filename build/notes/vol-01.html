@@ -1,0 +1,308 @@
+<h1 id="installing-volatility-3-on-kali">Installing Volatility 3 on Kali</h1>
+<h2 id="summary">Summary</h2>
+<p>Volatility 3 is a Python framework for memory forensics. Installing it correctly on Kali is<br />
+mostly about three things: <strong>isolating it from the system Python</strong>, <strong>getting a symbol table</strong>,<br />
+and <strong>knowing which image formats it reads</strong>.</p>
+<p>The framing that saves the most time: <strong>80% of Volatility failures are<br />
+the symbol table.</strong> When a plugin errors with something about<br />
+symbols, that is the whole problem, and no amount of reinstalling<br />
+fixes it.</p>
+<h2 id="why-it-is-not-on-kali-by-default">Why it is not on Kali by default</h2>
+<pre><code class="language-text">  Kali ships vol.py for Volatility 2, which is Python 2 only and
+  unmaintained. Volatility 3 is Python 3 and is a separate install.
+
+  Installing it into the system Python risks breaking other Kali
+  tools that pin dependencies. So: pipx (isolated) or a venv.
+
+    pipx install volatility3       -&gt; ~/.local/bin/vol.py
+    python3 -m venv ~/.venvs/vol3  -&gt; your own, fully controlled
+
+  pipx is the default recommendation. If it breaks, nothing else does.
+</code></pre>
+<h2 id="the-install-and-the-two-things-that-actually-matter">The install, and the two things that actually matter</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/vol-01 &amp;&amp; cd ~/aegis/labs/vol-01
+
+# --- 1. install, isolated ---
+{
+  echo &quot;=== current state ===&quot;
+  command -v vol.py &gt;/dev/null 2&gt;&amp;1 &amp;&amp; vol.py --version 2&gt;/dev/null | sed 's/^/  /' \
+    || echo &quot;  vol.py not installed&quot;
+  python3 -c &quot;import volatility3; print('  module:', volatility3.__file__)&quot; 2&gt;/dev/null \
+    || echo &quot;  volatility3 module not present&quot;
+  echo &quot;  Kali's python: $(python3 --version 2&gt;&amp;1)&quot;
+  echo
+  echo &quot;=== install via pipx (isolated; recommended) ===&quot;
+  echo &quot;  pipx install volatility3&quot;
+  echo &quot;  then: vol.py --version&quot;
+  echo
+  echo &quot;=== or a venv, if you want full control ===&quot;
+  echo &quot;  python3 -m venv ~/.venvs/vol3&quot;
+  echo &quot;  source ~/.venvs/vol3/bin/activate&quot;
+  echo &quot;  pip install volatility3&quot;
+  echo
+  echo &quot;=== the two things that actually matter after install ===&quot;
+  echo
+  echo &quot;  1. THE SYMBOL TABLE. Volatility 3 needs a PDB GUID -&gt; symbol&quot;
+  echo &quot;     map, built from a Microsoft symbol server. No symbols =&quot;
+  echo &quot;     every plugin fails. This is 80% of 'Volatility is broken'.&quot;
+  echo
+  echo &quot;  2. THE RIGHT IMAGE FORMAT. Volatility 3 reads raw physical&quot;
+  echo &quot;     memory, LiME, EWF (EWF-E01), and a few others. It does NOT&quot;
+  echo &quot;     read disk images directly; you must run it against a memory&quot;
+  echo &quot;     capture, not against a .dd of a disk.&quot;
+} 2&gt;&amp;1 | tee 01-install.txt
+</code></pre>
+<h2 id="the-symbol-table-in-detail">The symbol table, in detail</h2>
+<pre><code class="language-bash"># --- 2. the symbol table, which is the real content of this note ---
+cat &gt; 02-symbols.md &lt;&lt;'MD'
+# Symbols: why Volatility 3 fails and how to fix it
+
+```text
+  WHAT A SYMBOL TABLE IS
+
+    A Windows kernel contains references to debug symbols by GUID and
+    age. To turn those into function names, Volatility needs a map
+    from (PDB GUID, age) -&gt; a downloaded .pdb file.
+
+    Microsoft publishes PDBs on symbol servers. Volatility downloads
+    the ones it needs, caches them, and uses them to build the map.
+
+    NO NETWORK = NO NEW SYMBOLS = NO PLUGIN WORKS.
+
+  THE FAILURE, and it looks like this:
+
+    ERROR: symbol cache directory not found
+    or:  Unsatisfied requirement plugins.WindowsPslist.Pslist: symbol
+         cache directory not found
+    or:  ValueError: PDB GUID 1234abcd-... not found in cache
+
+  All three are the same problem.
+
+  THE FIX, in order:
+    1. run it ONCE on a networked machine, so the cache populates
+    2. copy the cache directory to the analysis machine
+    3. point --cache-path at the copy
+
+  THE CACHE LOCATION:
+    Linux   ~/.cache/volatility3/
+    Windows %APPDATA%\volatility3\
+
+  BUILDING IT (needs network, once):
+    vol.py --cache-path ~/.cache/volatility3/ windows.info -f image.raw
+       ^ this one plugin builds most of the cache as a side effect
+    vol.py windows.pslist -f image.raw
+       ^ and it adds the kernel's symbols
+
+  IF THE KERNEL IS VERY NEW:
+    symbols may not be published yet. Options:
+      - wait (a new hotfix can take hours to a day)
+      - point at an alternative symbol server:
+          --symbols https://msdl.microsoft.com/download/symbols
+      - accept that this particular plugin will not work and use
+        others that do not need those symbols
+MD
+</code></pre>
+<pre><code class="language-bash"># --- the cache, and checking it ---
+cat &gt; 03-cache.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+VOL=&quot;${VOL:-vol.py}&quot;
+CACHE=&quot;${VOLCACHE:-$HOME/.cache/volatility3}&quot;
+echo &quot;=== the symbol cache ===&quot;
+echo &quot;  path: $CACHE&quot;
+if [ -d &quot;$CACHE&quot; ]; then
+  echo &quot;  size: $(du -sh &quot;$CACHE&quot; 2&gt;/dev/null | cut -f1)&quot;
+  echo &quot;  files: $(find &quot;$CACHE&quot; -type f 2&gt;/dev/null | wc -l)&quot;
+  echo
+  echo &quot;  a cache with a handful of files means the population failed.&quot;
+  echo &quot;  a cache with thousands means it worked.&quot;
+  ls &quot;$CACHE&quot; 2&gt;/dev/null | head -10 | sed 's/^/    /'
+else
+  echo &quot;  NOT PRESENT. Populate it on a networked machine with:&quot;
+  echo &quot;    vol.py --cache-path $CACHE windows.info -f &lt;image&gt;&quot;
+fi
+echo
+echo &quot;=== the plugin list (what you can actually run) ===&quot;
+$VOL -h 2&gt;&amp;1 | grep -E &quot;^\s+(windows|linux|mac|banners)\.&quot; | head -20 | sed 's/^/  /'
+echo
+echo &quot;=== the config, which is where the defaults live ===&quot;
+$VOL -h 2&gt;&amp;1 | grep -A20 &quot;^\s*--\?\(cache\|symbols\|config\)&quot; | head -25 | sed 's/^/  /'
+EOF
+chmod +x 03-cache.sh
+./03-cache.sh 2&gt;&amp;1 | tee 04-cache-check.txt
+</code></pre>
+<h2 id="image-formats">Image formats</h2>
+<pre><code class="language-bash"># --- 3. what Volatility will accept ---
+{
+  echo &quot;=== formats Volatility 3 reads ===&quot;
+  cat &lt;&lt;'FORMATS'
+    raw      a flat physical memory image. The default and the safest.
+             A Windows crash dump is NOT raw; it needs a converter.
+
+    lime     LiME output (the Linux Memory Extractor format).
+             format=lime in LiME, or 'lime' as the filename suffix.
+
+    ewf      Expert Witness Format (.E01, .Ex01). What FTK Imager,
+             Magnet, and Guymager produce. This is what you will
+             usually have from a commercial acquisition tool.
+
+    compressed  Volatility 3 can read xz and gzip-compressed images.
+
+    NOT SUPPORTED: disk images (use TSK), VMDK/VHD directly
+      (convert first), and most virtual machine snapshots.
+FORMATS
+  echo
+  echo &quot;=== converting between them ===&quot;
+  echo &quot;  ewf -&gt; raw:   ewfverify image.E01 &amp;&amp; export EWF=/path/to/image.E01&quot;
+  echo &quot;                vol.py windows.info -f image.E01      (vol3 reads EWF natively)&quot;
+  echo &quot;  vmdk -&gt; raw:  qemu-img convert -f vmdk -O raw disk.vmdk mem.raw&quot;
+  echo &quot;  crash dump:   vol.py -f crash.dmp   (often works; if not, the&quot;
+  echo &quot;                'Offset' parameter or a converter is needed)&quot;
+  echo
+  echo &quot;=== the 'what image is this' check ===&quot;
+  file memory.raw memory.E01 crash.dmp 2&gt;/dev/null | sed 's/^/  /'
+  echo &quot;  A raw image is 'data'. An EWF says 'EWF' or 'Zip archive'.&quot;
+  echo &quot;  A crash dump says 'MS Windows memory dump' or 'crash dump'.&quot;
+} 2&gt;&amp;1 | tee 05-formats.txt
+</code></pre>
+<h2 id="the-first-run-and-what-to-do-when-it-fails">The first run, and what to do when it fails</h2>
+<pre><code class="language-bash"># --- 4. a diagnostic script ---
+cat &gt; 06-diag.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Why is Volatility failing? Check these in order.
+VOL=&quot;${VOL:-vol.py}&quot;
+IMG=&quot;${1:-}&quot;
+CACHE=&quot;${VOLCACHE:-$HOME/.cache/volatility3}&quot;
+
+echo &quot;=== 1. is it installed? ===&quot;
+command -v &quot;$VOL&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo &quot;  yes: $VOL&quot; || { echo &quot;  NO&quot;; exit 1; }
+$VOL --version 2&gt;&amp;1 | head -1 | sed 's/^/  /'
+
+echo
+echo &quot;=== 2. is the image readable? ===&quot;
+[ -f &quot;$IMG&quot; ] &amp;&amp; echo &quot;  $IMG ($(du -h &quot;$IMG&quot; | cut -f1))&quot; || echo &quot;  NO IMAGE SPECIFIED&quot;
+file &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo &quot;  ^ if this is 'disk partition' it is a DISK image. Volatility&quot;
+echo &quot;    does not read disks. You need a memory capture.&quot;
+
+echo
+echo &quot;=== 3. is the symbol cache populated? ===&quot;
+if [ -d &quot;$CACHE&quot; ] &amp;&amp; [ &quot;$(find &quot;$CACHE&quot; -type f 2&gt;/dev/null | wc -l)&quot; -gt 100 ]; then
+  echo &quot;  yes: $(find &quot;$CACHE&quot; -type f | wc -l) files, $(du -sh &quot;$CACHE&quot; | cut -f1)&quot;
+else
+  echo &quot;  EMPTY or MISSING. This is the most common cause of failure.&quot;
+  echo &quot;  Populate it on a networked machine:&quot;
+  echo &quot;    $VOL --cache-path $CACHE windows.info -f &lt;some-image&gt;&quot;
+fi
+
+echo
+echo &quot;=== 4. network (needed only for the FIRST population) ===&quot;
+timeout 5 curl -sI https://msdl.microsoft.com &gt;/dev/null 2&gt;&amp;1 \
+  &amp;&amp; echo &quot;  symbol server reachable&quot; \
+  || echo &quot;  NOT reachable. Fine IF the cache is populated.&quot;
+
+echo
+echo &quot;=== 5. RAM, which people forget ===&quot;
+free -h | awk 'NR==2{print &quot;  total: &quot; $2 &quot;  available: &quot; $7}'
+echo &quot;  ^ Volatility indexes the image. A 32 GB image wants 32 GB+&quot;
+echo &quot;    of RAM. If you have less, the fix is a bigger machine or&quot;
+echo &quot;    narrower plugin selection, not patience.&quot;
+
+echo
+echo &quot;=== 6. try the simplest possible plugin ===&quot;
+if [ -f &quot;$IMG&quot; ]; then
+  timeout 120 &quot;$VOL&quot; --cache-path &quot;$CACHE&quot; windows.info -f &quot;$IMG&quot; 2&gt;&amp;1 \
+    | head -12 | sed 's/^/  /'
+  echo
+  echo &quot;  if windows.info works, the install is fine and the problem&quot;
+  echo &quot;  is the specific plugin or its symbols.&quot;
+fi
+EOF
+chmod +x 06-diag.sh
+./06-diag.sh 2&gt;&amp;1 | tee 07-diag.txt
+</code></pre>
+<h2 id="making-your-own-memory-image-to-practise">Making your own memory image, to practise</h2>
+<pre><code class="language-bash"># --- 5. a memory image from THIS machine, without a VM ---
+cat &gt; 08-make-image.md &lt;&lt;'MD'
+# Making a practice memory image
+
+You do not need a VM to practise Volatility. On Linux you can build
+a synthetic image with the right structures, and for real practice
+you can capture a VM's memory with LiME.
+
+```bash
+# IN A LINUX VM (LiME is the kernel module)
+# build it:
+  sudo apt install linux-headers-$(uname -r)
+  git clone https://github.com/504ensicsLabs/LiME /tmp/lime
+  cd /tmp/lime/src &amp;&amp; make
+# capture:
+  sudo insmod lime.ko &quot;path=/tmp/mem.lime format=lime compress=0&quot;
+# clean up:
+  sudo rmmod lime
+# then analyse the .lime file with Volatility on any machine
+  vol.py linux.pslist -f /tmp/mem.lime
+
+# WHY A VM FOR PRACTICE:
+  a Linux image gives you linux.* plugins, which is a smaller set and
+  easier to verify. The windows.* plugins are the ones you need for
+  an AD environment, and they need a Windows image. CyberDefenders
+  (cd-03) provides free memory dumps of real Windows systems, which
+  is the correct way to build Windows-specific muscle memory.
+
+# VOLATILITY ON A LINUX HOST ANALYSING A WINDOWS IMAGE IS FINE.
+# Volatility analyses an IMAGE. The host it runs on is irrelevant,
+# which is exactly why it belongs on a Linux analysis box.
+```
+
+```bash
+# verifying an image you have been given, before you trust it
+sha256sum memory.raw
+file memory.raw
+# a raw memory image has no magic number; it is 'data'. That is correct.
+# The check is the size (roughly the installed RAM) and the fact that
+# windows.info parses it at all.
+```
+MD
+cat 08-make-image.md
+
+# --- 6. and the practice capture, if a VM is available ---
+{
+  echo &quot;=== a VM memory capture, for real practice ===&quot;
+  echo &quot;  1. create a VM with 4+ GB RAM on the host-only range&quot;
+  echo &quot;  2. install Windows (or use a CyberDefenders memory dump)&quot;
+  echo &quot;  3. from INSIDE the VM (LiME) or with a memory acquisition&quot;
+  echo &quot;     tool from outside (WinPmem)&quot;
+  echo &quot;  4. verify: the image size should be close to the VM's RAM&quot;
+  echo &quot;  5. FIRST RUN: vol.py windows.info -f image.raw&quot;
+  echo &quot;     ^ if this works, symbols are cached and the image is valid&quot;
+  echo
+  echo &quot;=== what windows.info tells you, and why it is first ===&quot;
+  echo &quot;  kernel version and build   -&gt; the symbols Volatility needs&quot;
+  echo &quot;  SystemTime                  -&gt; YOUR CLOCK REFERENCE for the timeline&quot;
+  echo &quot;  SystemRoot                  -&gt; confirm it is the system you think&quot;
+  echo &quot;  ProcessorCount, total phys  -&gt; sanity check against the image size&quot;
+  echo &quot;  Is64Bit                     -&gt; which plugin set applies&quot;
+  echo &quot;  NtSystemRoot                 -&gt; the system root for path comparisons&quot;
+  echo
+  echo &quot;  NOTE SystemTime. Every other timestamp in every other&quot;
+  echo &quot;  plugin is relative to it. Record it, and record the&quot;
+  echo &quot;  offset between it and your own clock. for-02 explains why.&quot;
+} 2&gt;&amp;1 | tee 09-first-run.txt
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why isn't Volatility 3 on Kali by default, and how should it be installed?</li>
+<li>What is the symbol table, and what percentage of Volatility failures is it?</li>
+<li>Name the three places the cache lives on Linux, macOS and Windows.</li>
+<li>How do you populate the cache on a machine with no network?</li>
+<li>What does <code>vol.py windows.info</code> build as a side effect, and why is it first?</li>
+<li>Which four image formats does Volatility 3 read?</li>
+<li>Why does <code>file memory.raw</code> returning <code>data</code> mean the file is <em>correct</em>?</li>
+<li>Why must you never point Volatility at a disk image?</li>
+<li>What does <code>SystemTime</code> from <code>windows.info</code> give you, and why is it first?</li>
+<li>Roughly how much RAM does Volatility need, and for what?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Volatility 3</strong> → <strong>Memory Forensics</strong> → <strong>Windows Artifacts</strong> →<br />
+<strong>Reverse Engineering</strong> → <strong>Incident Response</strong>.<br />
+<code>vol-02</code> is the plugin set; <code>for-03</code> is the surrounding methodology.</p>

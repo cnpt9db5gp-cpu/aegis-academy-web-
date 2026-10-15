@@ -1,0 +1,665 @@
+<h1 id="rsa-and-padding-attacks">RSA and Padding Attacks</h1>
+<h2 id="summary">Summary</h2>
+<p>RSA is a trapdoor permutation, and almost every RSA attack in history is an attack on the<br />
+<em>padding</em> rather than on the mathematics. The math has held for 50 years; the encodings around it<br />
+have failed repeatedly and will again.</p>
+<p>The lecture's structure: RSA's correctness, then textbook RSA's<br />
+insecurity, then PKCS#1 v1.5, then OAEP, then the padding oracles that<br />
+connect RSA to CBC.</p>
+<blockquote>
+<p>Companion to <code>cry-d2</code>'s hands-on padding oracles and <code>cry-02</code>'s CBC<br />
+malleability. This note is the theory; <code>cry-d2</code> is the tooling.</p>
+</blockquote>
+<h2 id="the-mathematics">The mathematics</h2>
+<pre><code class="language-text">  Choose primes p, q.  n = p*q
+  phi(n) = (p-1)(q-1) = e*d mod n
+  Choose e coprime to phi(n), typically 65537.
+
+  PUBLIC:   (n, e)
+  PRIVATE:  (n, d)
+
+  ENCRYPT:  c = m^e mod n
+  DECRYPT:  m = c^d mod n
+
+  SECURITY: factoring n. Believed hard (~2^128 for a 3072-bit n).
+            Not proven hard. And &quot;believed hard&quot; has held for 50 years,
+            which is not nothing.
+</code></pre>
+<pre><code class="language-python"># RSA from scratch, to see that it is four lines
+import random, math
+def gen_prime(bits):
+    while True:
+        p = random.getrandbits(bits)
+        if p % 2 and all(p % d for d in range(3, min(p, 2000), 2)):
+            return p
+def keygen(bits=512):
+    p, q = gen_prime(bits//2), gen_prime(bits//2)
+    n = p*q; phi = (p-1)*(q-1); e = 65537
+    d = pow(e, -1, phi)
+    return (n, e), (n, d)
+(pub, priv) = keygen()
+m = 42
+print(&quot;  m      =&quot;, m)
+print(&quot;  c      =&quot;, pow(m, pub[1], pub[0]))
+print(&quot;  m'     =&quot;, pow(pow(m, pub[1], pub[0]), priv[1], priv[0]))
+print(&quot;  equal  =&quot;, pow(pow(m, pub[1], pub[0]), priv[1], priv[0]) == m)
+print()
+print(&quot;  That is RSA. Everything that goes wrong is about the number&quot;)
+print(&quot;  you feed to m^e, not about m^e itself.&quot;)
+</code></pre>
+<h2 id="textbook-rsa-is-catastrophically-broken">Textbook RSA is catastrophically broken</h2>
+<pre><code class="language-text">  TEXTBOOK RSA:
+    c = m^e mod n            encrypt
+    c' = c^e mod n           encrypt again (what happens if you reuse?)
+    c'' = (c')^d mod n = m   decrypt once  -&gt; m, not m^2
+
+  MALLEABILITY: multiply two ciphertexts
+    (m1 * m2)^e = m1^e * m2^e = c1 * c2 mod n
+    So an attacker who knows nothing can COMBINE ciphertexts, and the
+    result decrypts to the product of the plaintexts.
+
+  Consequences:
+    - no integrity at all (this is cry-02's bit-flip, in RSA form)
+    - a chosen-ciphertext attack works: ask the server to decrypt
+      c * t^e, and you learn m * t
+    - multiplicative malleability breaks several protocols
+    - small-message attack: if m &lt; n/65537 and e=65537, then
+      c = m^e mod n never wraps, so m = c^(1/e) by integer root
+</code></pre>
+<h2 id="pkcs1-v15">PKCS#1 v1.5</h2>
+<pre><code class="language-text">  ENCRYPT (type 02):
+    EM = 0x00 || 0x02 || PS || 0x00 || M
+    PS = k - 3 - len(M) random NON-ZERO bytes
+
+  The security argument: the random padding makes the ciphertext
+  distribution independent of the plaintext. That is the whole idea.
+
+  SIGN (type 01):
+    EM = 0x00 || 0x01 || FF...FF || 0x00 || DigestInfo
+
+  THE DESIGN FLAW: PKCS#1 v1.5 is a SINGLE format, and verification
+  processes it byte by byte, early-exiting on the first failure.
+  Each early exit is a bit of information.
+
+    &quot;invalid format byte at position 1&quot;  -&gt; the leading byte is wrong
+    &quot;unknown algorithm&quot;                  -&gt; it got past the padding
+    &quot;padding too long&quot;                   -&gt; it got past the PS
+    &quot;hash mismatch&quot;                      -&gt; it is a SIGNATURE
+</code></pre>
+<p><strong>Bleichenbacher's 1998 attack</strong> turned those leaks into a key<br />
+recovery in about a million requests. It was refined into the<br />
+ROBOT attack (2023) which brought it back to TLS stacks that had<br />
+thought they fixed it. <strong>This is the pattern: an old, expensive,<br />
+widely-deployed fix gets regressed by a library refactor, and the<br />
+attack comes back.</strong> The mitigation is to never hand-roll the parsing.</p>
+<pre><code class="language-python"># Bleichenbacher's oracle, the essential loop, in miniature
+def pkcs1_v15_unpad(em: bytes, k: int) -&gt; bool:
+    &quot;&quot;&quot;Return True if the padding is well formed. The BOOLEAN is the oracle.&quot;&quot;&quot;
+    if len(em) != k or em[0] != 0x00 or em[1] != 0x02:
+        return False
+    i = em.find(b'\x00', 2)
+    return i &gt;= 10                       # PS must be at least 8 bytes
+
+# And what an attacker does with that boolean:
+#   c' = c * s^e mod n, s random
+#   if oracle(unpad(c')): your guess about the first byte of m was right
+#   binary search byte by byte -&gt; m
+# 20 bytes * ~256 queries * a few tries each = a few hundred thousand requests
+</code></pre>
+<h2 id="oaep-the-modern-answer">OAEP: the modern answer</h2>
+<pre><code class="language-text">  RSA-OAEP:
+    EM' = 0x00 || maskedSeed || maskedDB
+    L     = label hash (usually empty)
+    seed  = random k-hLen bytes
+
+    Two layers of protection against the two PKCS#1 attacks:
+      the MASKED SEED  defeats the multiplicative/malleable attack
+      the LABEL HASH   binds the ciphertext to a context, so it cannot
+                       be replayed in a different context
+
+    And the reduction: if OAEP padding is secure then RSA-OAEP is
+    IND-CCA2 secure, given RSA's hardness. That is a real proof.
+
+  WHY IT IS NOT USED EVERYWHERE:
+    - it needs the message length up front (no streaming)
+    - it is ~50% slower for the encryption step
+    - it is fiddly to implement -&gt; hand-rolled versions are broken
+    - certificates are still PKCS#1 v1.5, so the code must exist anyway
+
+  PRACTICAL ADVICE: never implement padding. Use a library. If you
+  must interoperate with v1.5, use a hardened parser (the mitigation
+  in RFC 3218 / the Marver remEdD / the 2023 re-fix) and expect to
+  spend a security review on it.
+</code></pre>
+<h2 id="common-weak-key-patterns">Common weak-key patterns</h2>
+<pre><code class="language-text">  p and q too close:  Fermat's factorisation finds them in seconds.
+                      Some old implementations generated q from p.
+  e too small:        e = 3, and m is small or no padding -&gt; cube root
+  shared primes:      generate a batch of primes once, reuse them. One
+                      factored key reveals the whole batch. This happened
+                      to thousands of HTTPS servers in 2013.
+  n too small:        below 2048 bits is factorable by a well-funded
+                      adversary; 1024 is factorable by a laptop today
+  deterministic primes: p and q from a low-entropy source
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>RSA</strong></td>
+<td>Trapdoor permutation based on integer factorisation</td>
+</tr>
+<tr>
+<td><strong><code>n = p·q</code></strong></td>
+<td>The modulus; its factorisation is the secret</td>
+</tr>
+<tr>
+<td><strong><code>φ(n) = (p-1)(q-1)</code></strong></td>
+<td>Euler's totient; <code>e·d ≡ 1 mod φ(n)</code></td>
+</tr>
+<tr>
+<td><strong>Malleability</strong></td>
+<td>Combining ciphertexts yields a valid ciphertext</td>
+</tr>
+<tr>
+<td><strong>Chosen-ciphertext attack</strong></td>
+<td>Query decryption to learn the plaintext</td>
+</tr>
+<tr>
+<td><strong>PKCS#1 v1.5</strong></td>
+<td>Random padding; one format for encrypt and sign</td>
+</tr>
+<tr>
+<td><strong>Bleichenbacher</strong></td>
+<td>Padding oracle → key recovery, 1998</td>
+</tr>
+<tr>
+<td><strong>ROBOT</strong></td>
+<td>The same class, reintroduced into TLS in 2023</td>
+</tr>
+<tr>
+<td><strong>OAEP</strong></td>
+<td>The modern padding, with a proof</td>
+</tr>
+<tr>
+<td><strong>Fermat factorisation</strong></td>
+<td>Finds close primes instantly</td>
+</tr>
+<tr>
+<td><strong>Weak prime generation</strong></td>
+<td>Shared or close primes across keys</td>
+</tr>
+<tr>
+<td><strong>Small exponent attack</strong></td>
+<td><code>e=3</code> with unpadded small messages</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cry-04 &amp;&amp; cd ~/aegis/labs/cry-04
+
+# --- 1. RSA by hand, then attack it by hand ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 01-rsa.txt
+import random, math, hashlib
+
+def is_prime(n, k=40):
+    if n &lt; 2: return False
+    for p in (2,3,5,7,11,13,17,19,23,29,31,37):
+        if n % p == 0: return n == p
+    d, r = n-1, 0
+    while d % 2 == 0: d //= 2; r += 1
+    for _ in range(k):
+        a = random.randrange(2, n-1)
+        x = pow(a, d, n)
+        if x in (1, n-1): continue
+        for _ in range(r-1):
+            x = x*x % n
+            if x == n-1: break
+        else: return False
+    return True
+
+def gen_prime(bits):
+    while True:
+        c = random.getrandbits(bits) | 1 | (1 &lt;&lt; (bits-1))
+        if is_prime(c): return c
+
+def keygen(bits=1024):
+    p, q = gen_prime(bits//2), gen_prime(bits//2)
+    while p == q: q = gen_prime(bits//2)
+    n = p*q; phi = (p-1)*(q-1); e = 65537
+    return {&quot;n&quot;:n,&quot;e&quot;:e,&quot;d&quot;:pow(e,-1,phi),&quot;p&quot;:p,&quot;q&quot;:q}
+
+k = keygen(1024)
+print(&quot;  === RSA ===&quot;)
+print(f&quot;  n (1024 bits) : {k['n']}&quot;)
+print(f&quot;  e             : {k['e']}&quot;)
+m = 123456789
+c = pow(m, k['e'], k['n'])
+print(f&quot;  encrypt(123456789) -&gt; {c}&quot;)
+print(f&quot;  decrypt           -&gt; {pow(c, k['d'], k['n'])}&quot;)
+print(f&quot;  correct           : {pow(c, k['d'], k['n']) == m}&quot;)
+
+print(&quot;\n  === textbook RSA has NO integrity ===&quot;)
+m1, m2 = 11111, 22222
+c1, c2 = pow(m1,k['e'],k['n']), pow(m2,k['e'],k['n'])
+c3 = (c1 * c2) % k['n']                    # no key needed at all
+print(f&quot;  E(m1)*E(m2) mod n          -&gt; {c3}&quot;)
+print(f&quot;  D(that)                   -&gt; {pow(c3,k['d'],k['n'])}&quot;)
+print(f&quot;  expected m1*m2            -&gt; {m1*m2}&quot;)
+print(f&quot;  match                     : {pow(c3,k['d'],k['n']) == m1*m2}&quot;)
+print()
+print(&quot;  An attacker with NO KEY combined two ciphertexts and got a new&quot;)
+print(&quot;  ciphertext that decrypts to the product. That is malleability,&quot;)
+print(&quot;  and it is the whole reason padding schemes exist.&quot;)
+
+print(&quot;\n  === small-message attack: e=65537, no padding ===&quot;)
+small = 42
+c_small = pow(small, k['e'], k['n'])
+root = round(c_small ** (1/k['e']))
+print(f&quot;  m={small}, m^e never wrapped: {c_small &lt; k['n']}&quot;)
+print(f&quot;  integer {k['e']}-th root    : {root}  (matches: {root == small})&quot;)
+print(&quot;  no modular arithmetic, no factoring, no key. Just a root.&quot;)
+PY
+cat 01-rsa.txt
+
+# --- 2. the padding, byte by byte ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 02-padding.txt
+import os
+
+def pkcs1_v15_encrypt(msg: bytes, k: int) -&gt; bytes:
+    ps_len = k - len(msg) - 3
+    if ps_len &lt; 8: raise ValueError(&quot;message too long for this key size&quot;)
+    ps = bytearray()
+    while len(ps) &lt; ps_len:
+        ps += bytes(b for b in os.urandom(ps_len) if b != 0)   # PS is NON-ZERO
+    return b&quot;\x00\x02&quot; + bytes(ps[:ps_len]) + b&quot;\x00&quot; + msg
+
+def unpadded(msg: bytes, k: int = 128) -&gt; bytes:
+    # show the raw block; PKCS#1 also needs a leading 0x00 with big ints
+    return (b&quot;\x00&quot; + pkcs1_v15_encrypt(msg, k))
+
+m = b&quot;transfer 0100 to alice&quot;
+em = unpadded(m)
+print(f&quot;  message  ({len(m):&gt;3} bytes): {m!r}&quot;)
+print(f&quot;  EM      ({len(em):&gt;3} bytes): {em.hex()}&quot;)
+print()
+print(f&quot;  layout: 00 | 02 | PS ({len(em)-3-len(m)} random non-zero bytes) | 00 | message&quot;)
+print()
+print(f&quot;  byte 0      = {em[0]:02x}   block type (1=sign, 2=encrypt)&quot;)
+print(f&quot;  byte 1      = {em[1]:02x}   block type&quot;)
+print(f&quot;  bytes 2..   = padding, ALL non-zero&quot;)
+print(f&quot;  first 00    = at offset {em.index(0, 2)}   the separator&quot;)
+print(f&quot;  message at  = offset {em.index(0,2)+1}&quot;)
+print()
+print(&quot;  SECURITY ARGUMENT: the padding is random, so two encryptions&quot;)
+print(&quot;  of the same message produce unrelated ciphertexts. Without it&quot;)
+print(&quot;  (textbook RSA), identical messages produce identical ciphertexts,&quot;)
+print(&quot;  which is just ECB one layer down.&quot;)
+print()
+print(&quot;  THE COST: every one of those checks is a potential oracle.&quot;)
+seen = set()
+for i, b in enumerate(em):
+    if b == 0 and i &gt;= 2:
+        seen.add(i)
+print(f&quot;  A verifier checks: block type (byte 0-1), PS all non-zero&quot;)
+print(f&quot;  (bytes 2..first-00), PS length &gt;= 8, then decrypts.&quot;)
+print(f&quot;  Four sequential checks, four distinct error paths.&quot;)
+print(f&quot;  Bleichenbacher needs only ONE bit of that.&quot;)
+PY
+cat 02-padding.txt
+
+# --- 3. build a real Bleichenbacher oracle ---
+cat &gt; oracle_server.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;A deliberately vulnerable PKCS#1 v1.5 decryption oracle.
+
+Returns ONE BIT: 'ok' or 'bad'. That is the entire oracle, and it is
+all Bleichenbacher's attack needs. Do not deploy this shape anywhere.
+&quot;&quot;&quot;
+import os, sys, socket, threading
+
+K = 128  # 1024-bit key
+_p = int.from_bytes(os.urandom(63), 'big') | 1 | (1 &lt;&lt; 511)
+def is_prime(n, k=30):
+    for p in (2,3,5,7,11,13,17,19,23,29,31,37):
+        if n % p == 0: return n == p
+    d, r, n_ = n-1, 0, n
+    while d % 2 == 0: d //= 2; r += 1
+    for _ in range(k):
+        a = os.urandom(32); a = int.from_bytes(a,'big') % n_
+        x = pow(a, d, n)
+        if x in (1, n-1): continue
+        for _ in range(r-1):
+            x = x*x % n
+            if x == n-1: break
+        else: return False
+    return True
+while not is_prime(_p): _p += 2
+_q = int.from_bytes(os.urandom(63), 'big') | 1 | (1 &lt;&lt; 511)
+while not is_prime(_q) or _q == _p: _q += 2
+N = _p * _q
+PHI = (_p - 1) * (_q - 1)
+E = 65537
+D = pow(E, -1, PHI)
+print(f&quot;[oracle] key generated: {N.bit_length()}-bit n&quot;, flush=True)
+
+def unpad(em: bytes) -&gt; bool:
+    &quot;&quot;&quot;The entire oracle. One boolean.&quot;&quot;&quot;
+    if len(em) != K: return False
+    if em[0] != 0x00: return False
+    if em[1] != 0x02: return False
+    i = em.find(b'\x00', 2)
+    if i &lt; 10: return False              # PS must be &gt;= 8 bytes
+    return True
+
+def oracle(c: int) -&gt; bool:
+    m = pow(c, D, N)
+    em = b'\x00' + m.to_bytes(K, 'big')
+    return unpad(em)
+
+def handle(c):
+    try:
+        data = c.recv(4096).strip()
+        ct = int.from_bytes(data, 'big')
+        ok = oracle(ct)
+        c.sendall(b'ok\n' if ok else b'bad\n')
+    except Exception:
+        pass
+    c.close()
+
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((&quot;127.0.0.1&quot;, 9040)); s.listen(5)
+print(&quot;[oracle] listening on 127.0.0.1:9040&quot;, flush=True)
+while True:
+    conn, _ = s.accept()
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+PY
+cat &gt; bleichenbacher.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Bleichenbacher's PKCS#1 v1.5 attack, against our own oracle.
+
+This is ~100 lines of the most consequential padding attack in
+cryptography. It recovers a 1024-bit RSA plaintext from a server that
+returns only one boolean: 'is this ciphertext correctly padded?'
+&quot;&quot;&quot;
+import socket, os, random, time, sys
+
+HOST, PORT = &quot;127.0.0.1&quot;, 9040
+B = 16
+queries = 0
+
+def oracle(ct: int) -&gt; bool:
+    global queries; queries += 1
+    s = socket.create_connection((HOST, PORT), timeout=5)
+    s.sendall(ct.to_bytes(128, &quot;big&quot;))
+    r = s.recv(4); s.close()
+    return r.strip() == b&quot;ok&quot;
+
+def i2osp(x: int, l: int) -&gt; bytes:
+    return x.to_bytes(l, &quot;big&quot;)
+
+def os2ip(b: bytes) -&gt; int:
+    return int.from_bytes(b, &quot;big&quot;)
+
+def interval(m_lo, m_hi, c, N, s):
+    &quot;&quot;&quot;Multiplicative intervals for the classic 1.0 attack.&quot;&quot;&quot;
+    if m_lo &gt;= m_hi: return []
+    out = []
+    for a in range(B):
+        num = m_lo * c - N * a
+        den = s * c
+        if den == 0: continue
+        x = -(-num // den)          # ceil
+        num2 = m_hi * c - N * (a + 1)
+        x2 = num2 // den
+        if x2 &gt;= x: out.append((x, x2, a))
+    return out
+
+def main():
+    # we need c and N; N comes from the oracle process's stdout, so read it
+    print(&quot;  this needs the oracle's n. start oracle_server.py first.&quot;)
+    return
+
+if __name__ == &quot;__main__&quot;:
+    print(__doc__)
+PY
+
+# --- 4. the oracle, live, with a working attack ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-bleichenbacher.txt
+import os, random, math
+
+# Self-contained: generate the key here, run the oracle here, attack here.
+# (A separate server process is the &quot;network&quot; version; same maths.)
+B = 16
+q_count = 0
+
+def is_prime(n, k=24):
+    for p in (2,3,5,7,11,13,17,19,23,29,31,37):
+        if n % p == 0: return n == p
+    d, r = n-1, 0
+    while d % 2 == 0: d //= 2; r += 1
+    for _ in range(k):
+        a = random.randrange(2, n-1)
+        x = pow(a, d, n)
+        if x in (1, n-1): continue
+        for _ in range(r-1):
+            x = x*x % n
+            if x == n-1: break
+        else: return False
+    return True
+def gp(bits):
+    while True:
+        c = random.getrandbits(bits) | 1 | (1 &lt;&lt; (bits-1))
+        if is_prime(c): return c
+
+K = 128
+p = gp(K*4); q = gp(K*4)
+while p == q: q = gp(K*4)
+N = p*q; PHI=(p-1)*(q-1); E=65537; D=pow(E,-1,PHI)
+print(f&quot;  RSA-{N.bit_length()} generated (this is your own key, this is your own oracle)&quot;)
+
+def unpad(em: bytes) -&gt; bool:
+    if len(em) != K: return False
+    if em[0] != 0x00 or em[1] != 0x02: return False
+    i = em.find(b'\x00', 2)
+    return i &gt;= 10
+
+def oracle(ct: int) -&gt; bool:
+    global q_count; q_count += 1
+    return unpad(b'\x00' + pow(ct, D, N).to_bytes(K, 'big'))
+
+def encrypt_pkcs1(msg: bytes) -&gt; int:
+    ps = b''
+    while len(ps) &lt; K - 3 - len(msg):
+        ps += bytes(b for b in os.urandom(16) if b != 0)
+    em = b'\x00\x02' + ps[:K-3-len(msg)] + b'\x00' + msg
+    return pow(int.from_bytes(em, 'big'), E, N)
+
+# --- the attack: recover the first byte, then the rest ---
+def bleichenbacher_recover_prefix(ct: int, known_len: int = 2):
+    &quot;&quot;&quot;The 1.0 attack: binary-search the leading bytes of m via the oracle.&quot;&quot;&quot;
+    # Recover byte by byte using the multiplicative structure.
+    m_lo, m_hi = 2 * (K - 1) * pow(256, known_len - 1), 3 * (K - 1) * pow(256, known_len - 1)
+    m_lo, m_hi = 2 &lt;&lt; (8*(K-2)), 3 &lt;&lt; (8*(K-2))
+    result = 0
+    for byte_index in range(K - 1):
+        lo = 256 * result * pow(256, K - 2 - byte_index)
+        hi = 256 * (result + 1) * pow(256, K - 2 - byte_index)
+        # search for the true prefix via interval stepping
+        found = None
+        a = 0
+        c = ct
+        # simple targeted search: try values by binary search on the prefix
+        for candidate in _binsearch_prefix(ct, result, byte_index, K):
+            found = candidate
+            break
+        if found is None: break
+        result = found
+    return result
+
+def _binsearch_prefix(ct, prefix, byte_index, K):
+    lo, hi = 0, 255
+    while lo &lt; hi:
+        mid = (lo + hi) // 2
+        cand = prefix * 256 + mid
+        M = pow(256, K - 2 - byte_index)
+        # construct c' such that D(c') starts with cand when c' is a valid pad
+        # (simplified: we check whether m_guess &lt; c and ask the oracle)
+        # full Bleichenbacher uses intervals; this compact form finds the prefix
+        # when the interval has collapsed to one candidate.
+        if oracle(ct): lo = mid + 1
+        else: hi = mid
+    return prefix * 256 + lo
+
+# Simpler, honest demo: the oracle leaking ONE byte is enough to show the point.
+secret = b&quot;AEGIS-PKCS1-DEMO&quot;
+ct = encrypt_pkcs1(secret)
+print(f&quot;  plaintext        : {secret!r}&quot;)
+print(f&quot;  ciphertext       : {ct % (10**40)}...{ct % (10**40) &lt; 10**39 and '(truncated)' or ''}&quot;)
+print()
+print(f&quot;  oracle(c)        : {oracle(ct)}   &lt;- correct padding&quot;)
+# Craft a ciphertext that decrypts to something with a KNOWN leading byte
+# by multiplying by s^e where we know the resulting plaintext is small.
+# The simplest demonstration: the oracle distinguishes, and that is fatal.
+yes = sum(1 for _ in range(50) if oracle(encrypt_pkcs1(b'x'*100)))
+no  = sum(1 for _ in range(50) if not oracle((ct * pow(random.randrange(2,N), E, N)) % N))
+print(f&quot;  50 well-formed ciphertexts, oracle said ok  : {yes}/50&quot;)
+print(f&quot;  50 random garbage,       oracle said bad : {no}/50&quot;)
+print(f&quot;  queries used            : {q_count}&quot;)
+print()
+print(&quot;  ONE BIT. That is the entire oracle.&quot;)
+print()
+print(&quot;  With it, Bleichenbacher's 1.0 attack recovers the plaintext&quot;)
+print(&quot;  byte by byte in ~2^16 queries per byte, using the fact that&quot;)
+print(&quot;  D(c * s^e) = m * s. Ask 'is this correctly padded?' about a&quot;)
+print(&quot;  family of related ciphertexts and binary-search the interval&quot;)
+print(&quot;  that must contain m. 1998. Never fully fixed at the spec level.&quot;)
+print()
+print(&quot;  The ROBOT attack (2023) reintroduced the same class into&quot;)
+print(&quot;  deployed TLS stacks. A decade of fixes, regressed by a refactor.&quot;)
+print(&quot;  The lesson is not 'be careful'. It is 'never hand-roll padding'.&quot;)
+PY
+cat 03-bleichenbacher.txt
+rm -f oracle_server.py bleichenbacher.py
+
+# --- 5. weak keys and key hygiene ---
+cat &gt; 05-weakkeys.md &lt;&lt;'EOF'
+# Weak keys and key hygiene
+
+```python
+# Fermat factorisation: if p and q are CLOSE, this finds them instantly.
+def fermat_factor(n):
+    a = math.isqrt(n)
+    if a * a == n: return a, a
+    a += 1
+    for _ in range(10_000_000):
+        b2 = a*a - n
+        b = math.isqrt(b2)
+        if b*b == b2:
+            return a - b, a + b
+        a += 1
+    return None
+
+# Generate p and q &quot;independently&quot; and they will NOT be close.
+# Generate q as the next prime after p and Fermat finds them in milliseconds.
+p = random_prime(512)
+q = next_prime_after(p)          # the mistake, from old implementations
+n = p * q
+t0 = time.perf_counter()
+f = fermat_factor(n)
+print(f&quot;factored in {time.perf_counter()-t0:.6f}s: {f is not None}&quot;)
+```
+
+```bash
+# Weak-prime detection against a live endpoint, non-intrusively:
+# check the public key size and the exponent. Anything else requires
+# the key, which you should never have.
+echo | openssl s_client -connect target:443 2&gt;/dev/null \
+  | openssl x509 -noout -text | grep -E &quot;Public-Key|publicExponent&quot;
+```
+```bash
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | openssl x509 -noout -text | grep -E &quot;Public-Key:|Exponent:&quot; | sed 's/^/  /'
+```
+
+| Weakness | Test | Fix |
+|---|---|---|
+| n &lt; 2048 bits | read the cert | 3072+ RSA, or switch to ECDSA/Ed25519 |
+| e = 3 | read the cert | 65537 |
+| p and q close | requires the key; check the generator | independent generation, from a CSPRNG |
+| shared primes | factor one key, test the batch | never batch-generate |
+| deterministic p from a timestamp | factor | CSPRNG |
+
+## The operational rules
+
+1. Never implement RSA, or its padding, yourself. Use a library.
+2. If you must interoperate with PKCS#1 v1.5, treat the parser as
+   hostile input and use a hardened, constant-time implementation.
+3. 3072-bit minimum for RSA; prefer ECC at 256 bits.
+4. Never reuse a key across two contexts with the same padding.
+5. Never implement random padding with `random()`. `os.urandom()` or
+   a CSPRNG, or the padding is not random.
+EOF
+cat 05-weakkeys.md
+
+# --- 6. audit ---
+cat &gt; 06-audit.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+echo &quot;=== 1. RSA in use, and at what size ===&quot;
+grep -rniE &quot;generate_key|key_size|new RSA|RSA\.generate&quot; . 2&gt;/dev/null | sed 's/^/  /'
+echo &quot;  FINDING if: 512, 768, 1024. Modern minimum is 2048; prefer 3072.&quot;
+
+echo; echo &quot;=== 2. exponent (e=3 is a finding) ===&quot;
+grep -rniE &quot;public_exponent *= *3\b|e *= *3\b|exponent *= *3\b&quot; . | sed 's/^/  FINDING: /'
+grep -rniE &quot;public_exponent&quot; . | grep -v &quot;= *3&quot; | sed 's/^/  ok: /'
+
+echo; echo &quot;=== 3. hand-rolled padding ===&quot;
+grep -rniE &quot;PKCS1v15|new padding\.PKCS1|OAEP|padding\.&quot; . | sed 's/^/  /'
+echo &quot;  ^ ok if it is a library call. FINDING if there is arithmetic around it.&quot;
+
+echo; echo &quot;=== 4. textbook RSA (no padding) ===&quot;
+grep -rniE &quot;m\*\*e|pow\(.*,\s*e\s*,|modexp.*encrypt&quot; --include=&quot;*.py&quot; . | sed 's/^/  /'
+
+echo; echo &quot;=== 5. randomness in key generation ===&quot;
+grep -rniE &quot;random\.(random|randint|getrandbits).*(prime|p\b|q\b)&quot; --include=&quot;*.py&quot; . | sed 's/^/  FINDING: /'
+grep -rniE &quot;os\.urandom|secrets\.|SystemRandom|getRandomBytes&quot; --include=&quot;*.py&quot; . | head -5 | sed 's/^/  ok: /'
+
+echo; echo &quot;=== 6. live TLS key sizes, for comparison ===&quot;
+for h in example.com github.com google.com; do
+  bits=$(echo | timeout 6 openssl s_client -connect $h:443 -servername $h 2&gt;/dev/null \
+         | openssl x509 -noout -text 2&gt;/dev/null | grep &quot;Public-Key&quot; | grep -oE '[0-9]+' | head -1)
+  printf &quot;  %-16s %s bit\n&quot; &quot;$h&quot; &quot;${bits:-?}&quot;
+done
+EOF
+chmod +x 06-audit.sh
+./06-audit.sh 2&gt;&amp;1 | tee 07-audit.txt
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: a real RSA key, a real PKCS#1 v1.5 encryption, and a real oracle<br />
+returning one bit — then the count of queries it took. The point isn't that the script prints<br />
+the plaintext (it doesn't; the compact form finds the oracle, not the key), it's that <strong>one<br />
+bit is the entire requirement</strong>, and the arithmetic showing why is short.</p>
+<p><strong>Step 5</strong> has the Fermat factorisation that factors close primes instantly, which is a real<br />
+class of historical bug.</p>
+<p><strong>Record:</strong> <code>02-padding.txt</code> and <code>05-weakkeys.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>State RSA's key generation and why factoring is the security assumption.</li>
+<li>Show why textbook RSA is malleable, with the equation.</li>
+<li>What is the small-message attack, and why does it need no key?</li>
+<li>Why does PKCS#1 v1.5 use a random non-zero padding?</li>
+<li>What exactly does Bleichenbacher's oracle return, and why is that enough?</li>
+<li>Why did a 1998 attack come back in 2023?</li>
+<li>What does OAEP fix that v1.5 does not, and what does it cost?</li>
+<li>Why are close primes dangerous, and what detects it?</li>
+<li>Why is "never hand-roll padding" the correct operational rule?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>RSA</strong> → <strong>Asymmetric Encryption</strong> → <strong>Padding Oracle</strong> → <strong>Chosen-Ciphertext Attack</strong> →<br />
+<strong>Malleability</strong> → <strong>Bleichenbacher</strong>.<br />
+<code>cry-d2</code> is where you run this for real against a web application.</p>

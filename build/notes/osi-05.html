@@ -1,0 +1,381 @@
+<h1 id="social-engineering-scope-consent-and-rules">Social Engineering: Scope, Consent and Rules</h1>
+<h2 id="summary">Summary</h2>
+<p>This is the note about the boundary. Social engineering is the highest-value and<br />
+highest-liability activity in security work, and the difference between an engagement and an<br />
+incident is almost always a piece of paper.</p>
+<p>The framing: <strong>with every other technique in this curriculum, the<br />
+worst case is a finding. With this one, the worst case is a person<br />
+being deceived.</strong> That changes the consent analysis completely.</p>
+<h2 id="the-rule-stated-once">The rule, stated once</h2>
+<pre><code class="language-text">  YOU MAY NOT MAKE A PERSON A PART OF AN ENGAGEMENT WITHOUT THEIR
+  CONSENT.
+
+  Not the receptionist. Not the &quot;new IT contractor&quot; they have never
+  met. Not the vendor's support desk. Not the executive who is in on
+  it and says yes.
+
+  THEIR CONSENT, not your client's.
+</code></pre>
+<p><strong>Why "the client said so" is not enough:</strong></p>
+<pre><code class="language-text">  THE TARGET IS NOT YOUR CLIENT.
+
+  An employee of the target organisation is not the party to the
+  contract. They are a data subject, a worker, and in many
+  jurisdictions a person whose consent has not been sought for being
+  deceived about a security matter.
+
+  THE CONSEQUENCES, in rough order of severity:
+    - employment consequences for a person who did nothing wrong
+    - disciplinary or dismissal for a careless employee
+    - a data breach notification triggered by your test
+    - the client learning about it from the employee rather than
+      from you
+    - and in a small organisation, someone who is genuinely upset
+
+  THE CLIENT AUTHORISES THE TEST. THE TARGET AUTHORISES BEING TESTED.
+  Those are different permissions and only the first is one you get
+  from a contract.
+</code></pre>
+<h2 id="what-consent-has-to-cover-in-writing">What consent has to cover, in writing</h2>
+<pre><code class="language-text">  1. WHO may be contacted, and who may not
+     named individuals, a named team, or &quot;anyone except &lt;list&gt;&quot;
+     the default should be &quot;nobody&quot; until the client names people.
+
+  2. WHAT may be asked
+     &quot;what is your password&quot; is different from &quot;can you confirm your
+     device is under management&quot;. One tests credential handling; the
+     other tests process.
+
+  3. WHAT may be PRETENDED
+     &quot;you are IT support&quot; - is that permitted? Or only &quot;you are
+     conducting a security survey&quot;? These are very different.
+
+  4. WHAT may be OBTAINED, and what must be destroyed
+     credentials collected must be destroyed immediately and the
+     destruction attested. Credentials left around are a breach you
+     created.
+
+  5. WHAT HAPPENS AFTER
+     who is told, when, and what they are told
+     and what an employee is told if they &quot;fall for it&quot; - because
+     many campaigns tell the target afterwards and that is its own
+     decision to make, not yours.
+
+  6. THE STOP
+     a named person who can halt the campaign mid-flight, reachable,
+     during the window.
+</code></pre>
+<h2 id="the-three-tiers-and-they-are-different-activities">The three tiers, and they are different activities</h2>
+<pre><code class="language-text">  TIER 1: PROCESS VERIFICATION (no person is deceived)
+    &quot;What is your name?&quot; to the receptionist, to test whether the
+    org publishes employee names.
+    &quot;I forgot my password&quot; to IT, to test whether helpdesk staff will
+    reset over the phone.
+    Usually fine, usually low risk, and often needs no formal
+    authorisation beyond the engagement letter.
+
+  TIER 2: PRETEXTED CONTACT (a person is misled, briefly)
+    Calling as a fake vendor to check whether the office is open at
+    a claimed time.
+    Needs named consent from the client. Low harm. Recoverable.
+
+  TIER 3: CREDENTIAL OR ACCESS HARVESTING (a person is deceived and
+          something is taken)
+    A phishing email to real staff. A call collecting a password. A
+    USB drop.
+    Needs consent, a legal review, a data-handling plan, and a named
+    individual accountable for it. High harm if it goes wrong. Often
+    prohibited outright.
+
+  THE COMMON MISTAKE: doing tier 3 because the engagement letter was
+  generic enough not to prohibit it. &quot;Not expressly forbidden&quot; is not
+  authorisation. See tcm-01's ROE template - if the activity is not
+  listed, it is out.
+</code></pre>
+<h2 id="what-good-engagement-letters-actually-say">What good engagement letters actually say</h2>
+<pre><code class="language-text">  WORDING THAT PERMITS NOTHING BY AMBIGUITY:
+
+    &quot;The tester may use any means necessary to identify and
+     demonstrate vulnerabilities.&quot;
+
+    ^ This is the clause that ends engagements. &quot;Any means necessary&quot;
+      is read by a court as including anything, and it is read by an
+      employee as including anything at all.
+
+  WORDING THAT WORKS:
+
+    &quot;Permitted: network scanning of the in-scope ranges; service and
+     version enumeration; exploitation of identified vulnerabilities
+     to demonstrate access; authenticated testing using the supplied
+     credentials.
+
+     Prohibited: denial of service of any kind; social engineering of
+     any kind, including phishing, pretexting, and telephone contact
+     with staff; physical testing; testing of any third-party
+     system; any contact with an employee who is not named in
+     Appendix A.
+
+     Appendix A lists the three staff members who have consented to
+     being contacted, and the questions the tester may ask them.&quot;
+
+  THE STRUCTURE: permitted / prohibited / appendix. Not &quot;any means&quot;.
+</code></pre>
+<h2 id="when-the-client-asks-for-something-you-should-decline">When the client asks for something you should decline</h2>
+<pre><code class="language-text">  THE REQUEST                                  WHY IT IS A PROBLEM
+  -----------------------------------------    ------------------------------
+  &quot;phish our staff to see who clicks&quot;          employment consequences for
+                                               real people; personal data
+                                               about individual performance
+
+  &quot;call the helpdesk and reset a password&quot;     it works. it also creates a
+                                               real credential issue
+
+  &quot;leave a USB stick in the car park&quot;          this is not a finding, it is
+                                               an intrusion, and it will
+                                               trigger a physical
+                                               security response
+
+  &quot;pretend to be a supplier and get in&quot;        a real commercial
+                                               relationship is forged
+
+  &quot;test the executive specifically&quot;            the most identifiable
+                                               target and the one with
+                                               the most to lose
+
+  WHAT TO SAY:
+    &quot;I can do this, with three conditions: named consent from the
+     people who will be contacted, a written plan for what happens
+     to their accounts, and an agreement that no individual's result
+     is used in any performance or disciplinary process. If you want
+     to measure click rate without that, I can run a phishing
+     awareness module instead and it will tell you more.&quot;
+
+  THAT ANSWER IS PROFESSIONAL AND IT IS RARELY REFUSED. The client
+  usually did not know the first version had a data protection
+  dimension.
+</code></pre>
+<h2 id="the-retrospective-question">The retrospective question</h2>
+<pre><code class="language-text">  AFTER ANY SOCIAL ENGINEERING ACTIVITY, these go in the report:
+
+    - who was contacted, when, by whom, and with what pretext
+    - what was asked and what was answered
+    - what was obtained, and confirmation it was destroyed
+    - the timeline of the campaign, to the minute
+    - what the client should change, specifically
+    - and: who inside the client knew, in advance, in writing
+
+  THE LAST LINE IS the one that distinguishes a professional
+  engagement from an incident. It is also the line that cannot be
+  added retroactively.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Social engineering</strong></td>
+<td>Influencing a person to act, using deception</td>
+</tr>
+<tr>
+<td><strong>Pretexting</strong></td>
+<td>A false scenario to obtain information or access</td>
+</tr>
+<tr>
+<td><strong>Vishing / Smishing</strong></td>
+<td>Social engineering by voice / by SMS</td>
+</tr>
+<tr>
+<td><strong>Consent</strong></td>
+<td>The target's own agreement to be deceived</td>
+</tr>
+<tr>
+<td><strong>Authorisation</strong></td>
+<td>The client's permission to conduct the test</td>
+</tr>
+<tr>
+<td><strong>Credential harvesting</strong></td>
+<td>Collecting credentials through deception</td>
+</tr>
+<tr>
+<td><strong>Phishing simulation</strong></td>
+<td>A phishing campaign run as an awareness control</td>
+</tr>
+<tr>
+<td><strong>Goad / tailgating</strong></td>
+<td>Physical access via persuasion</td>
+</tr>
+<tr>
+<td><strong>Dumpster diving</strong></td>
+<td>Searching discarded material; no person deceived</td>
+</tr>
+<tr>
+<td><strong>Vishing consent</strong></td>
+<td>A separate, specific permission for voice contact</td>
+</tr>
+<tr>
+<td><strong>"Any means necessary"</strong></td>
+<td>A clause that ends engagements</td>
+</tr>
+<tr>
+<td><strong>Data protection impact</strong></td>
+<td>The legal dimension of targeting real staff</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/osi-05 &amp;&amp; cd ~/aegis/labs/osi-05
+
+cat &gt; 01-scope.md &lt;&lt;'EOF'
+# Social engineering scope and consent template
+
+&gt; Fill every field. An unfilled field is an activity nobody
+&gt; authorised. (This is tcm-01's ROE template applied to the one
+&gt; category where the target, not the client, is the party at risk.)
+
+## 1. The tiers in scope for this engagement
+- [ ] Tier 1 - process verification (no person deceived)
+      Permitted: ______________________________________________
+- [ ] Tier 2 - pretexted contact (person misled briefly)
+      Permitted: ______________________________________________
+- [ ] Tier 3 - credential or access harvesting
+      Permitted: ____________________ [ ] NONE. Default is NONE.
+
+## 2. The prohibition, stated explicitly
+Social engineering of any kind is PROHIBITED unless listed in
+section 1. This includes:
+  - phishing, smishing, vishing, and any message or call designed to
+    obtain credentials, information, or access from a person
+  - pretexting any employee not named in Appendix A
+  - any contact with a third party (supplier, partner, customer)
+  - any physical deception (tailgating, goad doors, USB drops)
+  - impersonating any named individual
+
+If an activity is not listed in section 1, it is OUT OF SCOPE.
+
+## 3. Named individuals who have consented to contact
+| Name | Role | Contacted by | Pretexts permitted | Questions permitted |
+|---|---|---|---|---|
+| | | | | |
+| | | | | |
+
+Appendix A is the ONLY list of people who may be contacted.
+Nobody else, at any level, for any reason, including a
+&quot;just checking&quot; call.
+
+## 4. Data handling for anything obtained
+- Credentials collected: destroyed within ______ minutes,
+  destruction attested by: ______________________
+- Retention: none. Written confirmation on the day.
+- Any credential obtained must not be used for any purpose
+  whatsoever, including &quot;just to check&quot;.
+
+## 5. Who knows, in advance
+| Name | Role | Informed on | Method | Written confirmation |
+|---|---|---|---|---|
+| | | | | |
+
+If this section cannot be completed, the activity does not happen.
+There is no partial version.
+
+## 6. The stop
+Named person who can halt the activity mid-flight:
+  Name: ______________  Contact: ______________  Hours: ______
+
+## 7. Afterwards
+- [ ] The client is told what was done, in the report
+- [ ] Any individual who was contacted is told, if the client
+      decides to do so - this is the CLIENT's decision, not the
+      tester's
+- [ ] No individual's result is used in any performance review,
+      disciplinary process, or personnel record
+- [ ] The report states who knew, in advance, in writing
+EOF
+echo &quot;written: 01-scope.md&quot;
+
+cat &gt; 02-check.md &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Check a ROE for social-engineering ambiguity BEFORE the engagement.
+# Grep for the phrases that end engagements.
+F=&quot;${1:-../../docs/RULES-OF-ENGAGEMENT.md}&quot;
+[ -f &quot;$F&quot; ] || { echo &quot;no ROE at $F&quot;; exit 1; }
+
+echo &quot;=== the phrases that end engagements ===&quot;
+for p in &quot;any means necessary&quot; &quot;all techniques&quot; &quot;without restriction&quot; \
+         &quot;as necessary&quot; &quot;unspecified&quot; &quot;any method&quot; &quot;creative&quot;; do
+  if grep -qi &quot;$p&quot; &quot;$F&quot;; then
+    echo &quot;  FOUND: '$p'&quot;
+    echo &quot;    ^ read this clause. 'any means necessary' is interpreted&quot;
+    echo &quot;      by a court as unlimited, and by a nervous employee as&quot;
+    echo &quot;      unlimited. Replace with an explicit permitted/prohibited list.&quot;
+  fi
+done
+grep -qi &quot;any means necessary&quot; &quot;$F&quot; || echo &quot;  none found (good)&quot;
+
+echo
+echo &quot;=== the required clauses, present or not ===&quot;
+for c in &quot;social engineering&quot; &quot;phishing&quot; &quot;denial of service&quot; &quot;physical&quot; \
+         &quot;third-party&quot; &quot;scope&quot; &quot;out of scope&quot; &quot;authorised&quot; &quot;authoriz&quot; \
+         &quot;data handling&quot; &quot;destroy&quot; &quot;emergency contact&quot; &quot;stop&quot;; do
+  if grep -qi &quot;$c&quot; &quot;$F&quot;; then
+    printf &quot;  present: %s\n&quot; &quot;$c&quot;
+  else
+    printf &quot;  MISSING: %-22s &lt;- add it\n&quot; &quot;$c&quot;
+  fi
+done
+
+echo
+echo &quot;=== the specific question: is social engineering PERMITTED? ===&quot;
+if grep -qiE &quot;social engineering[^.]*(prohibit|not permitted|out of scope|excluded)&quot; &quot;$F&quot;; then
+  echo &quot;  PROHIBITED. Good. Do not do it.&quot;
+elif grep -qiE &quot;social engineering[^.]*(permitted|authoris|authoriz|allowed)&quot; &quot;$F&quot;; then
+  echo &quot;  PERMITTED somewhere. Read the sentence exactly. 'Permitted'&quot;
+  echo &quot;  with no list of people, pretexts, and questions is not&quot;
+  echo &quot;  permission - it is a liability.&quot;
+else
+  echo &quot;  NOT MENTIONED. That means NOT PERMITTED.&quot;
+  echo &quot;  Silent clauses are read as prohibitions by everyone except&quot;
+  echo &quot;  the tester.&quot;
+fi
+
+echo
+echo &quot;=== the Appendix A check ===&quot;
+if grep -qiE &quot;appendix a|appendix 1|named individual&quot; &quot;$F&quot;; then
+  echo &quot;  a named-individual appendix exists. Check it is not empty.&quot;
+else
+  echo &quot;  NO named-individual appendix. Nobody may be contacted.&quot;
+fi
+EOF
+chmod +x 02-check.sh
+./02-check.sh ../../docs/RULES-OF-ENGAGEMENT.md 2&gt;&amp;1 | sed 's/^/  /' | tee 03-check.txt
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong>: a script that greps a ROE <em>before</em> the engagement for the phrases<br />
+that end engagements — "any means necessary", "all techniques", "without restriction" — and for<br />
+the required clauses that should be present but often aren't. It ends with the question that<br />
+matters most: if social engineering isn't mentioned at all, <strong>that means NOT PERMITTED</strong>, because<br />
+silent clauses are read as prohibitions by everyone except the tester.</p>
+<p><strong><code>01-scope.md</code></strong> is the tiered consent template, with <strong>Tier 3 defaulting to NONE</strong> and the<br />
+Appendix A rule stated absolutely: <em>Appendix A is the only list of people who may be contacted —<br />
+nobody else, at any level, for any reason, including a "just checking" call.</em></p>
+<p><strong>Record:</strong> <code>01-scope.md</code> and <code>03-check.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>State the rule in one sentence. Who must consent, and who is not enough?</li>
+<li>Why is "the client authorised it" insufficient?</li>
+<li>Name the three tiers and what makes each different.</li>
+<li>What is wrong with "any means necessary"?</li>
+<li>What is the default if social engineering is not mentioned in the ROE?</li>
+<li>Why is the individual not the party to the contract?</li>
+<li>What must happen to any credential collected by deception?</li>
+<li>Give three client requests you would decline, and what you would offer instead.</li>
+<li>What goes in the retrospective, and which line distinguishes a professional engagement from an<br />
+   incident?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Social Engineering</strong> → <strong>Rules of Engagement</strong> → <strong>Scope</strong> → <strong>Phishing</strong> →<br />
+<strong>Risk Likelihood Impact</strong>.<br />
+This closes the OSINT tier. <code>rep-01</code> is the engagement letter these clauses come from.</p>

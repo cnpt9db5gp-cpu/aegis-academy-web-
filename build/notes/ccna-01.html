@@ -1,0 +1,178 @@
+<h1 id="devices-cables-switches-and-bridges">Devices, Cables, Switches and Bridges</h1>
+<h2 id="summary">Summary</h2>
+<p>Layer 1 physical and Layer 2 data link, from real cable to real switch. The goal is not to memorise<br />
+connector pinouts — it is to understand what a switch actually does with a frame, because every<br />
+Layer 2 attack depends on that behaviour.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Copper</strong>: twisted pair (UTP/STP), 100 m limit for a run, 4 pairs used for 1 GbE</li>
+<li><strong>Fibre</strong>: immune to EMI, far longer runs, two types (single-mode vs multi-mode)</li>
+<li><strong>Hubs vs switches</strong>: a hub repeats to every port; a switch forwards by MAC table</li>
+<li><strong>Bridge vs switch</strong>: a bridge connects LANs; a switch is a many-port bridge</li>
+<li><strong>Collision domains</strong>: a hub shares one; a switch gives one per port</li>
+<li><strong>Broadcast domain</strong>: a switch does <strong>not</strong> break it — only a router or VLAN does. This<br />
+  distinction causes most early mistakes.</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>UTP / STP</strong></td>
+<td>Unshielded / shielded twisted pair</td>
+</tr>
+<tr>
+<td><strong>Patch panel</strong></td>
+<td>Where runs terminate in a rack</td>
+</tr>
+<tr>
+<td><strong>Hub</strong></td>
+<td>Layer 1 repeater; one collision domain</td>
+</tr>
+<tr>
+<td><strong>Switch</strong></td>
+<td>Layer 2 device with a MAC table</td>
+</tr>
+<tr>
+<td><strong>Bridge</strong></td>
+<td>Connects two LAN segments at Layer 2</td>
+</tr>
+<tr>
+<td><strong>Collision domain</strong></td>
+<td>Where frames can collide</td>
+</tr>
+<tr>
+<td><strong>Broadcast domain</strong></td>
+<td>Where a broadcast is flooded</td>
+</tr>
+<tr>
+<td><strong>Full duplex</strong></td>
+<td>No collisions; send and receive simultaneously</td>
+</tr>
+<tr>
+<td><strong>Auto-MDIX</strong></td>
+<td>Switch auto-detects cable polarity</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- read the link, exactly like a switch does ---
+ip -br link
+cat /sys/class/net/*/speed 2&gt;/dev/null
+cat /sys/class/net/*/duplex 2&gt;/dev/null
+for i in /sys/class/net/*; do
+  n=$(basename $i)
+  echo &quot;  $n: $(cat $i/operstate 2&gt;/dev/null) $(cat $i/speed 2&gt;/dev/null)s&quot;
+done
+
+# --- the switch's CAM table, visible on Linux ---
+bridge fdb show 2&gt;/dev/null || echo &quot;(needs a bridge; see ip link)&quot;
+ip neigh show                      # the ARP cache is a Layer 2-adjacent table
+arp -n | head
+
+# --- cabling facts from the kernel ---
+ethtool eth0 2&gt;/dev/null
+ethtool -i eth0 2&gt;/dev/null
+cat /sys/class/net/eth0/supported_link_modes 2&gt;/dev/null
+
+# --- is anything bridging? ---
+lsmod | grep -E &quot;bridge|8021q&quot;
+ip link show type bridge 2&gt;/dev/null
+ip -d link show | grep -A2 bridge | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> observe a switch's forwarding behaviour from a Linux host.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/ccna-01 &amp;&amp; cd ~/aegis/labs/ccna-01
+
+# --- 1. your interfaces and their state ---
+{
+  echo &quot;=== links ===&quot;
+  ip -br link
+  echo
+  echo &quot;=== per-interface detail ===&quot;
+  for i in /sys/class/net/*; do
+    n=$(basename $i)
+    [ &quot;$n&quot; = &quot;lo&quot; ] &amp;&amp; continue
+    printf &quot;  %-8s state=%-3s mtu=%-6s mac=%s\n&quot; &quot;$n&quot; \
+      &quot;$(cat $i/operstate 2&gt;/dev/null)&quot; &quot;$(cat $i/mtu 2&gt;/dev/null)&quot; \
+      &quot;$(cat $i/address 2&gt;/dev/null)&quot;
+  done
+} 2&gt;&amp;1 | tee 01-links.txt
+
+# --- 2. the ARP cache IS a Layer 2 concept leaking into Layer 3 ---
+{
+  echo &quot;=== ip neigh (the ARP table) ===&quot;
+  ip neigh show
+  echo
+  echo &quot;note: entries in FAILED or INCOMPLETE state = nobody answered the ARP&quot;
+} 2&gt;&amp;1 | tee -a 01-links.txt
+
+# --- 3. PROVE the broadcast domain, and that a switch does not stop it ---
+sudo timeout 8 tcpdump -i lo -n -c 20 &quot;arp or (udp port 67)&quot; 2&gt;/dev/null | head -12 &amp;
+CAP=$!
+sleep 1
+# send an ARP request for a non-existent host - it must be visible to everything
+arping -c 3 -I lo 192.168.56.200 2&gt;/dev/null || ping -c1 -W1 192.168.56.200 &gt;/dev/null 2&gt;&amp;1 &amp;
+sleep 3; kill $CAP 2&gt;/dev/null; wait 2&gt;/dev/null
+echo &quot;  (if tcpdump captured the ARP, the broadcast reached this host)&quot;
+
+# --- 4. count broadcasts per interface, then think about segmentation ---
+{
+  echo &quot;=== how many broadcasts does this box see? (10s sample) ===&quot;
+  sudo timeout 10 tcpdump -i any -n &quot;arp&quot; 2&gt;/dev/null | wc -l
+} 2&gt;&amp;1 | tee 02-broadcast.txt
+
+# --- 5. your VLAN picture ---
+{
+  echo &quot;=== VLANs this host participates in ===&quot;
+  ip -d link show | grep -B2 -A2 vlan | head -20 || echo &quot;  (no VLAN interfaces configured)&quot;
+  echo
+  echo &quot;=== 802.1Q support loaded? ===&quot;
+  lsmod | grep -E &quot;^8021q&quot; || modinfo 8021q 2&gt;/dev/null | head -2
+} 2&gt;&amp;1 | tee 03-vlan.txt
+
+# --- 6. what this means for an assessment ---
+cat &gt; 04-notes.md &lt;&lt;'EOF'
+# Layer 2 observations
+
+- Broadcast domain on this host: ______ (fill in from 02-broadcast.txt)
+- ARP is unauthenticated: anyone on the segment can answer for any address
+- A switch isolates collisions but NOT broadcasts
+- Implication: an ARP spoof to become a MITM needs only L2 adjacency, no credentials
+EOF
+cat 04-notes.md
+</code></pre>
+<p><strong>Step 3 is the whole point.</strong> Seeing the broadcast arrive is the moment "the switch forwards<br />
+frames, not traffic selectively" becomes concrete — and it is the foundation of every MITM<br />
+technique in Tier 2.</p>
+<p><strong>Record:</strong> <code>02-broadcast.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does a switch do that a hub does not?</li>
+<li>Does a switch break a broadcast domain? Why does this matter?</li>
+<li>What is the 100 m limit on twisted pair, and what is it for?</li>
+<li>Why is ARP a security liability?</li>
+<li>Name two devices that <em>do</em> break a broadcast domain.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Ethernet Frame</strong> → <strong>Switching</strong> → <strong>MAC Table</strong> → <strong>Broadcast Domain</strong> → <strong>ARP</strong> →<br />
+<strong>Arp Spoofing</strong>.</p>

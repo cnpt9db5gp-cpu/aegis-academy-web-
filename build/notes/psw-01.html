@@ -1,0 +1,169 @@
+<h1 id="apprentice-track-walkthroughs-core-vulnerability-classes">Apprentice Track Walkthroughs: Core Vulnerability Classes</h1>
+<h2 id="summary">Summary</h2>
+<p>The PortSwigger Academy video walkthroughs are the same vulnerabilities as <code>ps-01</code>..<code>ps-03</code>, but<br />
+demonstrated end-to-end on the official labs. The value here is <strong>process</strong>: watching how a<br />
+practitioner moves from a URL in the sitemap to a confirmed finding, rather than learning the<br />
+payload from a list.</p>
+<p>The thing to take from this note is not the payloads. You have those. It is<br />
+the <em>sequence</em>: enumerate, form a hypothesis, test with the minimum<br />
+request, capture evidence, write it up while you still remember.</p>
+<blockquote>
+<p>Companion to <code>ps-01</code>, <code>ps-02</code> and <code>ps-03</code>. Those are the theory; this is<br />
+the walkthrough discipline.</p>
+</blockquote>
+<h2 id="the-walkthrough-loop">The walkthrough loop</h2>
+<pre><code class="language-text">  1. ENUMERATE          what is here? (sitemap, directory listing, JS files,
+                        robots.txt, the app's own links)
+  2. MAP THE INPUTS      every parameter, header, cookie, body field, path
+                        segment, and where it is rendered
+  3. FORM A HYPOTHESIS   &quot;this value is reflected in HTML, unencoded&quot;
+  4. PROVE IT            the smallest request that shows the effect
+  5. ESCALATE            from reflection to execution to impact
+  6. CAPTURE             request, response, screenshot, redacted
+  7. WRITE IT UP         before you forget what you actually sent
+  8. RESET               clean up, and verify you cleaned up
+</code></pre>
+<p>Step 8 is the one apprentices forget and professionals never do.</p>
+<h2 id="sql-injection-the-walkthrough">SQL injection, the walkthrough</h2>
+<pre><code class="language-text">  OBSERVATION    the product page takes ?productId=1 and renders
+                 &quot;Welcome back!&quot; for some values. Others 404.
+
+  HYPOTHESIS     the value is being concatenated into a query.
+
+  MINIMUM PROOF  productId=1            -&gt; &quot;Welcome back!&quot;
+                 productId=2            -&gt; 404
+                 productId=1'           -&gt; SQL error / 500   &lt;- injection confirmed
+                 productId=1 OR 1=1--   -&gt; every product     &lt;- impact demonstrated
+
+  THE ORDER MATTERS:
+    1' first proves it. If it 404s cleanly, the input may be validated
+    or may be numeric-only. You learn that from the FIRST test, not the last.
+
+  CAPTURE
+    - the exact URL
+    - both responses (the error one and the OR one)
+    - a note that no data was extracted, only the row count demonstrated
+
+  REPORT
+    &quot;ProductId is concatenated into a SQL query. A single quote causes an
+     error; ' OR 1=1-- returns all products, so the entire catalogue is
+     readable without authentication. Root cause: string concatenation in
+     the product handler. Fix: parameterised query.&quot;
+</code></pre>
+<h2 id="xss-the-walkthrough">XSS, the walkthrough</h2>
+<pre><code class="language-text">  OBSERVATION    the search page reflects your query.
+
+  HYPOTHESIS     the reflection is unencoded, and the page sets a cookie.
+
+  MINIMUM PROOF  search?q=&lt;img src=x onerror=alert(document.domain)&gt;
+                 -&gt; the alert fires. That is the proof.
+
+  ESCALATE       1. can you reach a cookie?   document.cookie
+                 2. is it HttpOnly?            if not, it is stealable
+                 3. can you make the payload persistent?  (stored)
+                 4. does a CSP block it?       check the header
+
+  CHECK THE CONTEXT, not just the tag
+    &lt;script&gt; not firing does not mean &quot;not vulnerable&quot;.
+    Try: &lt;img src=x onerror=...&gt;, &lt;svg onload=...&gt;, then &quot;&gt;&lt;img ...&gt;,
+    then javascript:alert(1) in an href.
+
+  THE ESCALATION THAT MATTERS
+    Reflected + HttpOnly cookie  -&gt; Medium (phishing-grade)
+    Reflected + no HttpOnly      -&gt; High  (session theft)
+    Stored    + no HttpOnly      -&gt; Critical (anyone who visits)
+
+  CAPTURE the raw request and response, with the payload visible.
+</code></pre>
+<h2 id="path-traversal-the-walkthrough">Path traversal, the walkthrough</h2>
+<pre><code class="language-text">  OBSERVATION    /files?filename=report.pdf
+
+  HYPOTHESIS     unsanitised path concatenation.
+
+  MINIMUM PROOF  /files?filename=../../../etc/passwd   -&gt; the file's contents
+
+  THE PROBES, in order:
+    ../                  -&gt; does it work at all?
+    ..%2f                -&gt; encoding around a filter?
+    ....//               -&gt; a filter that collapses once
+    ..%252f              -&gt; double encoding
+    /etc/passwd          -&gt; absolute, sometimes unfiltered entirely
+    ....\/               -&gt; backslashes
+
+  ESCALATE       can you read application source?  -&gt; it may contain a secret
+                 can you reach .env, .git/config, or a backup file?
+                 can you read something the WEB SERVER can execute?
+                   -&gt; php://filter/convert.base64-encode/resource=index.php
+
+  REPORT the highest-impact file you read, redacted, and stop there.
+</code></pre>
+<h2 id="access-control-the-walkthrough">Access control, the walkthrough</h2>
+<pre><code class="language-text">  OBSERVATION    you are logged in as a normal user. Another account exists
+                 (or you can register one).
+
+  HYPOTHESIS     objects are addressed by a client-supplied id.
+
+  MINIMUM PROOF  GET /download?id=1  -&gt; your document
+                 GET /download?id=2  -&gt; THEIR document    &lt;- confirmed
+
+  THE METHODOLOGY THAT FINDS IT
+    1. map every endpoint with an identifier
+    2. request your own object
+    3. request your SECOND ACCOUNT's object with the same request
+    4. also try: a GUID you did not receive, a negative id,
+       id=0, id=9999999
+
+  CHECK ALSO
+    - the UI hides /admin? request it directly
+    - is the check client-side? (a disabled button is not a check)
+    - can you reach the admin API directly?
+
+  CAPTURE one redacted request and response. Never fetch their full data.
+</code></pre>
+<h2 id="common-beginner-mistakes-and-their-fixes">Common beginner mistakes, and their fixes</h2>
+<pre><code class="language-text">  MISTAKE                         FIX
+  --------------------------------  ----------------------------------------
+  trying payloads in order of     work the CONTEXT: attribute payloads in
+  fame                           attributes, URL payloads in URLs
+  stopping at &quot;it reflects&quot;      demonstrate the EFFECT: alert fires, row
+                                 returns, file downloads
+  extracting all the data        prove and stop. The client needs the proof,
+                                 not the table
+  no second account               register one. It is the whole method.
+  no evidence captured            screenshot the request AND response
+  reporting the tool's name       report the vulnerability; a scanner name
+                                 is not a finding
+  no cleanup                      delete what you created, verify it is gone
+  rating everything Critical      state the prerequisite. A finding on an
+                                 unreachable service is not Critical.
+</code></pre>
+<h2 id="the-evidence-standard">The evidence standard</h2>
+<pre><code class="language-text">  A finding with a reproducible request is worth 10x one that says
+  &quot;we were able to access another user's invoice.&quot;
+
+  INCLUDE:
+    the exact request (headers and body)
+    the exact response (status, relevant headers, redacted body)
+    the account context (which account, which role)
+    the prerequisites, stated
+    a redacted screenshot as a human-readable copy
+
+  EXCLUDE:
+    real credentials, tokens, session cookies
+    other users' personal data, even one row
+    anything you did not actually observe
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the eight steps of the walkthrough loop.</li>
+<li>What is the minimum proof for SQL injection, and why does <code>1'</code> come first?</li>
+<li>Why does an XSS payload failing in one context not mean it is safe?</li>
+<li>What turns a reflected XSS from Medium into Critical?</li>
+<li>Why is a second account essential to access-control testing?</li>
+<li>What does a reproducible request add that a screenshot does not?</li>
+<li>Why should you extract the minimum data and stop?</li>
+<li>What must never go in a report?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OWASP Top 10</strong> → <strong>XSS</strong> → <strong>SQL Injection</strong> → <strong>Path Traversal</strong> → <strong>Access Control</strong>.<br />
+<code>psw-02</code> continues with access control and business logic.</p>

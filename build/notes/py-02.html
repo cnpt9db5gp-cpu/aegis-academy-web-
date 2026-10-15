@@ -1,0 +1,323 @@
+<h1 id="functions-decomposition-and-scope">Functions, Decomposition, and Scope</h1>
+<h2 id="summary">Summary</h2>
+<p>Functions are how you stop rewriting the same thing, and how you make a concept <em>nameable</em> — which<br />
+matters in security because naming a concept is how you reason about it.</p>
+<p>The design idea that matters most is <strong>decomposition</strong>: break a problem into pieces that each do<br />
+exactly one thing.</p>
+<h2 id="defining-and-calling">Defining and calling</h2>
+<pre><code class="language-python">def greet(name):
+    return f&quot;hello {name}&quot;
+
+def connect(host, port=22, timeout=5):
+    ...
+
+connect(&quot;127.0.0.1&quot;, 2222)           # positional
+connect(&quot;127.0.0.1&quot;, port=2222)     # keyword - clearer, prefer this
+</code></pre>
+<h3 id="the-mutable-default-bug-it-bites-everyone-once">The mutable-default bug — it bites everyone once</h3>
+<pre><code class="language-python">def append(item, lst=[]):     # BAD: created ONCE, shared by every call
+    lst.append(item)
+    return lst
+
+append(1); append(2)
+print(append(3))              # [1, 2, 3] - not [3]
+
+def append(item, lst=None):   # correct
+    if lst is None:
+        lst = []
+    lst.append(item)
+    return lst
+</code></pre>
+<p>Where this bites in security: a default argument holding a mutable buffer, session object, or<br />
+request state becomes <strong>shared across every call</strong> — a real source of data leaking between<br />
+requests.</p>
+<h2 id="multiple-return-values">Multiple return values</h2>
+<pre><code class="language-python">def check_port(host, port):
+    return True, &quot;SSH-2.0-OpenSSH_9.2&quot;      # a tuple
+
+is_open, banner = check_port(&quot;127.0.0.1&quot;, 22)
+</code></pre>
+<p>Use a tuple for a fixed small record, a dict when the shape is open-ended.</p>
+<h2 id="scope-legb">Scope: LEGB</h2>
+<pre><code>Local -&gt; Enclosing -&gt; Global -&gt; Built-in
+</code></pre>
+<pre><code class="language-python">count = 0                        # global
+
+def outer():
+    msg = &quot;enclosing&quot;
+    def inner():
+        print(count, msg, len)  # found in global, enclosing, builtin
+        local_var = 1            # this is LOCAL to inner
+    inner()
+</code></pre>
+<p><strong>Rule:</strong> assigning inside a function makes that name local for the <em>whole</em> function body.</p>
+<pre><code class="language-python">n = 10
+def broken():
+    print(n)      # UnboundLocalError - n is local from the assignment below
+    n = 20
+broken()
+</code></pre>
+<p>Python decides this at compile time by seeing the assignment, not at runtime. It surprises<br />
+everyone once.</p>
+<h2 id="decomposition-the-actual-skill">Decomposition: the actual skill</h2>
+<pre><code class="language-python"># BAD - one function doing four things
+def scan_and_exploit():
+    ...  # 80 lines of sockets, parsing, printing and exploitation
+
+# BETTER - each function names one idea
+def tcp_connect(host, port, timeout=3.0):
+    &quot;&quot;&quot;Open a TCP connection. Returns a socket or None.&quot;&quot;&quot;
+    ...
+
+def read_banner(sock, limit=256):
+    &quot;&quot;&quot;Read up to `limit` bytes of banner.&quot;&quot;&quot;
+    ...
+
+def identify(banner):
+    &quot;&quot;&quot;Turn a banner into a service name.&quot;&quot;&quot;
+    ...
+
+def scan_host(host, ports):
+    &quot;&quot;&quot;Scan many ports, return a list of result dicts.&quot;&quot;&quot;
+    results = []
+    for port in ports:
+        sock = tcp_connect(host, port)
+        if sock:
+            results.append({&quot;port&quot;: port, &quot;banner&quot;: read_banner(sock)})
+            sock.close()
+    return results
+</code></pre>
+<p>Now every function is independently testable, readable, and replaceable. <strong>This is the most<br />
+transferable habit in the lecture.</strong></p>
+<h2 id="command-line-entry-points">Command-line entry points</h2>
+<pre><code class="language-python">import sys
+
+def main(argv):
+    if len(argv) &lt; 2:
+        print(f&quot;usage: {argv[0]} &lt;target&gt;&quot;, file=sys.stderr)
+        return 2                 # a real exit code
+    return scan(argv[1])
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main(sys.argv))
+</code></pre>
+<p><code>if __name__ == "__main__":</code> lets the file be <strong>imported</strong> (to reuse its functions) or<br />
+<strong>executed</strong> (to run as a CLI). Every serious tool has it, and it is what makes the lab's reuse<br />
+step possible.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Function</strong></td>
+<td>Named reusable block with parameters and a return value</td>
+</tr>
+<tr>
+<td><strong>Parameter / argument</strong></td>
+<td>Declaration name / value passed in</td>
+</tr>
+<tr>
+<td><strong>Scope (LEGB)</strong></td>
+<td>Local, Enclosing, Global, Built-in lookup order</td>
+</tr>
+<tr>
+<td><strong><code>global</code> / <code>nonlocal</code></strong></td>
+<td>Rebind a name from an outer scope</td>
+</tr>
+<tr>
+<td><strong>Mutable default</strong></td>
+<td><code>def f(x=[])</code> — evaluated once, shared forever</td>
+</tr>
+<tr>
+<td><strong>Decomposition</strong></td>
+<td>Splitting into single-purpose functions</td>
+</tr>
+<tr>
+<td><strong>Side effect</strong></td>
+<td>Changing something outside the function</td>
+</tr>
+<tr>
+<td><strong>Docstring</strong></td>
+<td>The string literal under <code>def</code> documenting intent</td>
+</tr>
+<tr>
+<td><strong><code>__name__</code></strong></td>
+<td><code>"__main__"</code> when executed, module name when imported</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 --version
+
+# --- the mutable default, live ---
+python3 - &lt;&lt;'PY'
+def bad(item, lst=[]):
+    lst.append(item); return lst
+def good(item, lst=None):
+    if lst is None: lst = []
+    lst.append(item); return lst
+print(&quot;bad :&quot;, bad(1), bad(2), bad(3))
+print(&quot;good:&quot;, good(1), good(2), good(3))
+PY
+
+# --- scope, demonstrated ---
+python3 - &lt;&lt;'PY'
+x = 1
+def outer():
+    y = 2
+    def inner():
+        print(&quot;  x, y, len:&quot;, x, y, len(&quot;abc&quot;))
+    inner()
+outer()
+PY
+
+# --- inspect any library function ---
+python3 -c 'import inspect, json; print(inspect.signature(json.dumps))'
+python3 -c 'import socket; help(socket.create_connection)'
+python3 -c 'import socket, inspect; print(inspect.getsource(socket.getfqdn))'
+
+# --- import vs execute ---
+cat &gt; /tmp/mylib.py &lt;&lt;'EOF'
+def shout(s): return s.upper()
+if __name__ == &quot;__main__&quot;:
+    print(&quot;running directly&quot;)
+EOF
+cd /tmp &amp;&amp; python3 mylib.py
+python3 -c 'import mylib; print(&quot;imported:&quot;, mylib.shout(&quot;hi&quot;))'
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a decomposed network utility with an enforced scope guard.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/py-02 &amp;&amp; cd ~/aegis/labs/py-02
+
+cat &gt; netscan.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+# netscan - a decomposed TCP port scanner.
+# Each function does exactly one thing. Loopback and authorised lab ranges only.
+import socket, sys, time
+
+TIMEOUT = 2.0
+
+def tcp_connect(host, port, timeout=TIMEOUT):
+    # Returns a socket on success, None on failure.
+    try:
+        return socket.create_connection((host, port), timeout=timeout)
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        return None
+
+def read_banner(sock, limit=256):
+    # Read up to `limit` bytes of banner without blocking forever.
+    try:
+        sock.settimeout(1.0)
+        return sock.recv(limit).decode(&quot;utf8&quot;, &quot;replace&quot;).strip()
+    except (socket.timeout, OSError):
+        return &quot;&quot;
+
+def identify(banner):
+    # Map a banner to a service name using prefix matching.
+    if not banner:
+        return &quot;unknown&quot;
+    for prefix, name in [(&quot;SSH-&quot;, &quot;ssh&quot;), (&quot;220 ProFTPD&quot;, &quot;ftp&quot;),
+                         (&quot;HTTP/1&quot;, &quot;http&quot;), (&quot;HTTP/2&quot;, &quot;http&quot;),
+                         (&quot;* &quot;, &quot;telnet&quot;), (&quot;RFB&quot;, &quot;vnc&quot;)]:
+        if banner.startswith(prefix):
+            return name
+    return &quot;unknown&quot;
+
+def is_lab_address(host):
+    # Refuse anything outside loopback and RFC1918 private space.
+    try:
+        p = socket.inet_aton(host)
+        if p[0] == 127: return True
+        if p[0] == 10: return True
+        if p[0] == 172 and 16 &lt;= p[1] &lt;= 31: return True
+        if p[0] == 192 and p[1] == 168: return True
+    except OSError:
+        return False
+    return False
+
+def scan_host(host, ports):
+    # Scan a list of ports. Returns a list of result dicts.
+    results = []
+    for port in ports:
+        started = time.time()
+        sock = tcp_connect(host, port)
+        if sock is None:
+            continue
+        banner = read_banner(sock)
+        sock.close()
+        results.append({&quot;port&quot;: port, &quot;service&quot;: identify(banner),
+                        &quot;banner&quot;: banner[:80],
+                        &quot;ms&quot;: int((time.time() - started) * 1000)})
+    return results
+
+def main(argv):
+    if len(argv) &lt; 2:
+        print(f&quot;usage: {argv[0]} &lt;host&gt; [port ...]&quot;, file=sys.stderr)
+        return 2
+    host = argv[1]
+    if not is_lab_address(host):
+        print(f&quot;REFUSING {host}: not loopback or RFC1918. &quot;
+              f&quot;See docs/RULES-OF-ENGAGEMENT.md&quot;, file=sys.stderr)
+        return 3
+    ports = [int(a) for a in argv[2:]] or [22, 80, 443, 8080, 3306, 5432]
+    print(f&quot;scanning {host}: {ports}\n&quot;)
+    rows = scan_host(host, ports)
+    if not rows:
+        print(&quot;  no open ports found&quot;)
+        return 0
+    print(f&quot;{'PORT':&lt;7}{'SERVICE':&lt;10}{'MS':&lt;7}BANNER&quot;)
+    print(&quot;-&quot; * 60)
+    for r in rows:
+        print(f&quot;{r['port']:&lt;7}{r['service']:&lt;10}{r['ms']:&lt;7}{r['banner']}&quot;)
+    return 0
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main(sys.argv))
+PY
+chmod +x netscan.py
+
+# --- run it ---
+python3 netscan.py 127.0.0.1 | tee 01-netscan.txt
+python3 netscan.py 127.0.0.1 22 80 8080 | tee -a 01-netscan.txt
+
+# --- THE SCOPE GUARD: it must refuse ---
+python3 netscan.py 8.8.8.8 ; echo &quot;exit code: $?  (expect 3)&quot;
+python3 netscan.py 93.184.216.34 ; echo &quot;exit code: $?  (expect 3)&quot;
+
+# --- your lab range, if built ---
+python3 netscan.py 192.168.56.101 22 80 139 445 3306 8080 | tee -a 01-netscan.txt
+
+# --- prove it is importable, not just executable ---
+python3 -c '
+import netscan
+print(&quot;imported; reusing single functions:&quot;)
+print(&quot;  identify(\&quot;SSH-2.0-OpenSSH_9.2\&quot;) -&gt;&quot;, netscan.identify(&quot;SSH-2.0-OpenSSH_9.2&quot;))
+print(&quot;  is_lab_address(\&quot;127.0.0.1\&quot;)    -&gt;&quot;, netscan.is_lab_address(&quot;127.0.0.1&quot;))
+print(&quot;  is_lab_address(\&quot;8.8.8.8\&quot;)      -&gt;&quot;, netscan.is_lab_address(&quot;8.8.8.8&quot;))
+'
+
+# --- compare against nmap ---
+file &quot;$(which nmap)&quot;
+nmap -sV -p22,80,8080 127.0.0.1 -oN 02-nmap.txt 2&gt;/dev/null &amp;&amp; grep open 02-nmap.txt
+</code></pre>
+<p><strong>Step 3 matters most.</strong> The scanner refuses to touch anything outside private space. Copy that<br />
+guard into every tool you write.</p>
+<p><strong>Step 5 is the payoff.</strong> You wrote a tool other programs can import. That is how <code>impacket</code>,<br />
+<code>scapy</code> and <code>metasploit</code> are built.</p>
+<p><strong>Record:</strong> <code>netscan.py</code>. You extend it in <code>py-06</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the mutable-default bug and why does <code>def f(x=[])</code> exhibit it?</li>
+<li>Explain LEGB scope with one example that would confuse a beginner.</li>
+<li>Why does <code>print(n); n = 20</code> raise <code>UnboundLocalError</code>?</li>
+<li>What does <code>if __name__ == "__main__":</code> protect against?</li>
+<li>Why is <code>is_lab_address()</code> a pattern worth copying into every tool?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Python Fundamentals</strong> → <strong>Sockets</strong> → <strong>Automation</strong> → <strong>Exploitation Ethics</strong>.<br />
+The scope guard is the code form of <code>rules-of-engagement</code>.</p>

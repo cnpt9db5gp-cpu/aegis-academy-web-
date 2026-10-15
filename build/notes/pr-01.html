@@ -1,0 +1,208 @@
+<h1 id="enumeration-with-linpeas-and-manual-verification">Enumeration with linpeas and Manual Verification</h1>
+<h2 id="summary">Summary</h2>
+<p>Enumeration is 80% of a successful engagement. This lecture is the habit: run an automated tool<br />
+first, then <strong>verify every finding by hand</strong> before believing it.</p>
+<p><code>linpeas</code> is the best Linux enumeration script available. But a finding you cannot explain is a<br />
+finding you cannot report. The skill is the manual verification.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Always enumerate first.</strong> Nothing else works without knowing what you have.</li>
+<li><code>linpeas</code> colours results by severity; read the colour, then confirm the finding</li>
+<li>Manual equivalents: <code>id</code>, <code>sudo -l</code>, <code>ps</code>, <code>ss</code>, <code>env</code>, <code>mount</code>, <code>cat /proc/1/cmdline</code></li>
+<li><strong>Verify, do not trust.</strong> A tool that reports a "vulnerability" that does not exist wastes<br />
+  more time than no tool.</li>
+<li>Record findings in a structured format from the start</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Enumeration</strong></td>
+<td>Building the full picture of a system</td>
+</tr>
+<tr>
+<td><strong>linpeas</strong></td>
+<td>Automated Linux privilege escalation enumerator</td>
+</tr>
+<tr>
+<td><strong><code>sudo -l</code></strong></td>
+<td>List permitted sudo rules — the highest-value single command</td>
+</tr>
+<tr>
+<td><strong><code>/proc</code></strong></td>
+<td>Live process state, readable</td>
+</tr>
+<tr>
+<td><strong>Capability</strong></td>
+<td>Specific authority in <code>CapEff</code></td>
+</tr>
+<tr>
+<td><strong>World-writable</strong></td>
+<td><code>-o+w</code> — writable by anyone</td>
+</tr>
+<tr>
+<td><strong>Abuse</strong></td>
+<td>Turning a misconfiguration into access</td>
+</tr>
+<tr>
+<td><strong>Triage</strong></td>
+<td>Deciding what matters first</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">command -v linpeas linenum recon 2&gt;/dev/null
+ls /usr/share/linpeas 2&gt;/dev/null || echo &quot;(linpeas: pipx install linpeas, or fetch linpeas.sh)&quot;
+linpeas 2&gt;/dev/null | head -40 || ./linpeas.sh 2&gt;/dev/null | head -40
+
+# --- the manual set, in priority order ---
+id; groups; echo &quot;---&quot;; sudo -l 2&gt;/dev/null
+cat /etc/os-release | head -3
+uname -a
+echo &quot;---&quot;; ps aux --sort=-%mem | head -10
+echo &quot;---&quot;; ss -tulpn
+echo &quot;---&quot;; env | sort
+echo &quot;---&quot;; cat /proc/1/cmdline | tr '\0' ' '; echo
+echo &quot;---&quot;; mount | head -10
+echo &quot;---&quot;; cat /proc/self/status | grep -E &quot;Cap|Uid|Gid&quot;
+echo &quot;---&quot;; ls -la /home/
+echo &quot;---&quot;; crontab -l 2&gt;/dev/null; ls -la /etc/cron* 2&gt;/dev/null
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> run a full enumeration of your own machine, verify each automated finding by hand,<br />
+and produce a structured note.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/pr-01 &amp;&amp; cd ~/aegis/labs/pr-01
+
+# --- 1. the automated pass ---
+if command -v linpeas &gt;/dev/null; then
+  linpeas 2&gt;/dev/null | tee 01-linpeas.txt
+elif [ -x ./linpeas.sh ]; then
+  ./linpeas.sh 2&gt;/dev/null | tee 01-linpeas.txt
+else
+  echo &quot;linpeas not installed. Fetch it, then re-run this lab:&quot;
+  echo &quot;  pipx install linpeas  ||  wget -O linpeas.sh https://github.com/peass-ng/linpeas/releases/latest/download/linpeas.sh&quot;
+fi
+echo &quot;linpeas output: $(wc -l &lt; 01-linpeas.txt 2&gt;/dev/null || echo 0) lines&quot;
+
+# --- 2. the manual pass, item by item ---
+{
+  echo &quot;================ IDENTITY ================&quot;
+  id
+  echo &quot;groups: $(groups)&quot;
+  echo
+  echo &quot;================ PRIVILEGE ================&quot;
+  echo &quot;sudo rules:&quot;
+  sudo -n -l 2&gt;/dev/null || sudo -l 2&gt;&amp;1 | head -20
+  echo
+  echo &quot;capabilities:&quot;
+  grep -E &quot;Cap(Inh|Prm|Eff|Bnd|Amb)&quot; /proc/self/status
+  echo
+  echo &quot;sudoers files:&quot;
+  sudo ls -la /etc/sudoers /etc/sudoers.d/ 2&gt;/dev/null
+  echo
+  echo &quot;================ SYSTEM ================&quot;
+  cat /etc/os-release | head -3
+  uname -a
+  echo
+  echo &quot;================ NETWORK ================&quot;
+  ss -tulpn
+  echo
+  echo &quot;ip route:&quot;; ip route
+  echo &quot;interfaces:&quot;; ip -br addr
+  echo
+  echo &quot;================ PROCESSES ================&quot;
+  ps aux --sort=-%mem | head -12
+  echo
+  echo &quot;PID 1:&quot;; tr '\0' ' ' &lt; /proc/1/cmdline; echo
+  echo
+  echo &quot;================ FILESYSTEM ================&quot;
+  mount | head -12
+  echo
+  echo &quot;writable in /etc (escalation candidates):&quot;
+  find /etc -writable -type f 2&gt;/dev/null | head -15
+  echo
+  echo &quot;SUDO BINARIES:&quot;; find / -perm -4000 -type f 2&gt;/dev/null | head -15
+  echo
+  echo &quot;recently modified in /etc:&quot;
+  find /etc -xdev -type f -mtime -7 2&gt;/dev/null | head -10
+  echo
+  echo &quot;================ SCHEDULED TASKS ================&quot;
+  crontab -l 2&gt;/dev/null || echo &quot;(no user crontab)&quot;
+  sudo crontab -l -u root 2&gt;/dev/null
+  ls -la /etc/cron.d/ /var/spool/cron/crontabs/ 2&gt;/dev/null
+  systemctl list-timers --all --no-pager 2&gt;/dev/null | head -8
+  echo
+  echo &quot;================ CREDENTIALS ON DISK ================&quot;
+  echo &quot;history files:&quot;
+  ls -la ~/.bash_history ~/.python_history 2&gt;/dev/null
+  echo &quot;config files mentioning secrets:&quot;
+  sudo grep -ril &quot;password\|secret\|api_key&quot; /etc /opt /srv 2&gt;/dev/null | head -10
+  echo &quot;ssh keys:&quot;
+  ls -la ~/.ssh/ 2&gt;/dev/null
+  echo
+  echo &quot;================ ENVIRONMENT ================&quot;
+  env | sort
+  echo
+  echo &quot;LD_PRELOAD=${LD_PRELOAD:-&lt;empty&gt;}&quot;
+  cat /etc/ld.so.preload 2&gt;/dev/null || echo &quot;/etc/ld.so.preload absent (good)&quot;
+} 2&gt;&amp;1 | tee 02-manual.txt
+
+# --- 3. VERIFY: compare the automated and manual passes ---
+{
+  echo &quot;=== does linpeas flag anything the manual pass confirms? ===&quot;
+  echo &quot;Manual findings to check by hand:&quot;
+  echo &quot;  [1] sudo rules listed above      -&gt; actually usable? try one with -n&quot;
+  echo &quot;  [2] SUID binaries               -&gt; any that are unusual for your distro?&quot;
+  echo &quot;  [3] world-writable in /etc      -&gt; can you write it as your user?&quot;
+  echo &quot;  [4] cron/systemd jobs          -&gt; do they run as root, from a writable path?&quot;
+  echo &quot;  [5] credentials in configs      -&gt; do they actually work?&quot;
+} | tee 03-verify.txt
+
+echo &quot;=== TEST sudo -n on each rule (no password prompt, so it is safe to probe) ===&quot;
+sudo -n true 2&gt;/dev/null &amp;&amp; echo &quot;  passwordless sudo: YES - that is the finding&quot; || echo &quot;  no blanket passwordless sudo&quot;
+sudo -n -l 2&gt;/dev/null | tail -5
+
+echo &quot;=== TEST write access to the writable-in-/etc findings ===&quot;
+find /etc -writable -type f 2&gt;/dev/null | head -3 | while read -r f; do
+  if [ -w &quot;$f&quot; ]; then echo &quot;  WRITABLE NOW: $f&quot;; else echo &quot;  not writable: $f&quot;; fi
+done
+
+# --- 4. same enumeration against your misconfigured lab VM ---
+# (from pr-04 / kr-06) - run linpeas there and compare the output.
+# The differences between the two reports ARE the misconfigurations.
+
+# --- 5. structured findings file ---
+cat &gt; 04-findings.md &lt;&lt;'EOF'
+# Enumeration findings - &lt;hostname&gt; - &lt;date&gt;
+
+| # | Finding | Evidence | Exploitable? | Verified how |
+|---|---|---|---|---|
+| 1 | | | | |
+| 2 | | | | |
+
+## Verdict
+One line: is there a path to root, and what is it?
+EOF
+echo &quot;template written to 04-findings.md - fill it in from 02-manual.txt&quot;
+</code></pre>
+<p><strong>Step 3 is the point of the whole lecture.</strong> <code>sudo -n -l</code> costs nothing and tells you whether a<br />
+rule is real. Copy-pasting linpeas output into a report without testing is how engagements fail<br />
+at the debrief.</p>
+<p><strong>Record:</strong> <code>04-findings.md</code> filled in with real findings from your own machine.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is <code>sudo -l</code> the highest-value single command in a Linux engagement?</li>
+<li>What does <code>CapEff</code> tell you that <code>id</code> does not?</li>
+<li>Why verify an automated finding by hand before reporting it?</li>
+<li>Name four places credentials leak from on a Linux host.</li>
+<li>What makes a cron job dangerous versus merely useful?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Enumeration</strong> → <strong>linpeas</strong> → <strong>Linux Privilege Escalation</strong> → <strong>SUID Binaries</strong> →<br />
+<strong>Credential Exposure</strong> → <strong>/proc Filesystem</strong>.</p>

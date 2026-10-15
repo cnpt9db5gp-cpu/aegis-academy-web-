@@ -1,0 +1,304 @@
+<h1 id="strings-files-and-reading-data">Strings, Files and Reading Data</h1>
+<h2 id="summary">Summary</h2>
+<p>Security work is text processing: parsing nmap output, reading logs, extracting hashes from<br />
+<code>/etc/shadow</code>, building wordlists. Python makes this short and safe, and the <code>with</code> statement<br />
+makes it reliable.</p>
+<p>The most important idea: <strong>stream vs whole-file</strong>. A 4 GB memory dump will crash a script that<br />
+reads it all at once.</p>
+<h2 id="file-modes">File modes</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>r</code></td>
+<td>read (default, text)</td>
+</tr>
+<tr>
+<td><code>w</code></td>
+<td>write, <strong>truncates the file first</strong></td>
+</tr>
+<tr>
+<td><code>a</code></td>
+<td>append</td>
+</tr>
+<tr>
+<td><code>x</code></td>
+<td>write, fails if the file exists</td>
+</tr>
+<tr>
+<td><code>rb</code> / <code>wb</code></td>
+<td>binary — required for pcaps, images, binaries</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>w</code> destroys the file immediately.</strong> A diagnostic script opening the wrong path in <code>w</code> mode can<br />
+destroy the very evidence you are investigating.</p>
+<h2 id="with-is-not-optional"><code>with</code> is not optional</h2>
+<pre><code class="language-python">with open(&quot;/etc/passwd&quot;) as f:          # closes even if an exception occurs
+    for line in f:
+        print(line.strip())
+
+f = open(&quot;/etc/passwd&quot;)                 # works, but leaks the handle on exception
+...
+f.close()
+</code></pre>
+<p>In security tooling, the <code>with</code> failure mode is "you exhausted your file descriptors after 1000<br />
+iterations". Use it every time.</p>
+<h2 id="stream-dont-slurp">Stream, don't slurp</h2>
+<pre><code class="language-python"># BAD - a 4 GB memory image becomes a 4 GB Python string
+data = open(&quot;memdump.raw&quot;).read()
+
+# GOOD - constant memory regardless of file size
+with open(&quot;memdump.raw&quot;, &quot;rb&quot;) as f:
+    while chunk := f.read(1024 * 1024):   # walrus: assign and test in one step
+        process(chunk)
+</code></pre>
+<p>Line-oriented streaming, the common case:</p>
+<pre><code class="language-python">with open(&quot;/var/log/auth.log&quot;, errors=&quot;replace&quot;) as f:
+    for line in f:                      # never fully loaded
+        if &quot;Failed password&quot; in line:
+            print(line.strip())
+</code></pre>
+<h2 id="reading-binary-data">Reading binary data</h2>
+<pre><code class="language-python">with open(&quot;sample.bin&quot;, &quot;rb&quot;) as f:
+    header = f.read(16)
+    print(header.hex())     # hex dump - your first malware triage step
+    print(header[:4])       # magic bytes
+
+SIGNATURES = {
+    b&quot;\x7fELF&quot;:   &quot;ELF executable&quot;,
+    b&quot;MZ&quot;:        &quot;Windows PE executable&quot;,
+    b&quot;PK\x03\x04&quot;: &quot;Zip archive&quot;,
+    b&quot;\x89PNG&quot;:   &quot;PNG image&quot;,
+    b&quot;%PDF&quot;:      &quot;PDF document&quot;,
+    b&quot;\xd0\xcf\x11\xe0&quot;: &quot;OLE2 (legacy Office)&quot;,
+}
+kind = next((v for k, v in SIGNATURES.items() if header.startswith(k)), &quot;unknown&quot;)
+print(kind)
+</code></pre>
+<p><strong>That is <code>file(1)</code> in six lines.</strong> Knowing magic bytes is how you identify a payload that has<br />
+been renamed — one of the oldest tricks in the book.</p>
+<h2 id="parsing-for-security-work">Parsing for security work</h2>
+<pre><code class="language-python"># /etc/passwd
+with open(&quot;/etc/passwd&quot;) as f:
+    for line in f:
+        if line.startswith(&quot;#&quot;):
+            continue
+        p = line.strip().split(&quot;:&quot;)
+        username, uid, gid, gecos, home, shell = p[:6]
+
+# hashes from /etc/shadow (needs root)
+with open(&quot;/etc/shadow&quot;) as f:
+    for line in f:
+        user, pw_hash = line.split(&quot;:&quot;, 2)[:2]
+        if pw_hash not in (&quot;&quot;, &quot;*&quot;, &quot;!&quot;):
+            print(f&quot;{user}: {pw_hash}&quot;)
+
+# nmap line
+&quot;22/tcp   open   ssh      OpenSSH 9.2p1 Debian&quot;
+port, proto = parts[0].split(&quot;/&quot;)
+service, version = parts[2], &quot; &quot;.join(parts[3:])
+
+# splitlines handles \r\n and \n - matters on captured Windows output
+&quot;a\r\nb\nc&quot;.splitlines()    # ['a', 'b', 'c']
+</code></pre>
+<h2 id="encoding-the-eternal-footgun">Encoding: the eternal footgun</h2>
+<pre><code class="language-python"># ALWAYS pass errors= - one bad byte otherwise kills the script
+text = data.decode(&quot;utf8&quot;, errors=&quot;replace&quot;)
+with open(&quot;suspect.log&quot;, errors=&quot;replace&quot;) as f:
+    lines = f.readlines()
+</code></pre>
+<p>In Python 3 the default encoding comes from your locale. Never assume; pass it explicitly.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Text vs binary mode</strong></td>
+<td><code>'r'</code> decodes to <code>str</code>; <code>'rb'</code> gives raw <code>bytes</code></td>
+</tr>
+<tr>
+<td><strong>Encoding</strong></td>
+<td>The byte↔character mapping (UTF-8, latin-1)</td>
+</tr>
+<tr>
+<td><strong><code>with</code></strong></td>
+<td>Context manager guaranteeing cleanup</td>
+</tr>
+<tr>
+<td><strong>Stream</strong></td>
+<td>Read incrementally without loading the whole file</td>
+</tr>
+<tr>
+<td><strong>Magic bytes</strong></td>
+<td>Leading bytes identifying a file type</td>
+</tr>
+<tr>
+<td><strong>Walrus <code>:=</code></strong></td>
+<td>Assign-and-test in one expression</td>
+</tr>
+<tr>
+<td><strong>Decode vs encode</strong></td>
+<td><code>bytes→str</code> is decode; <code>str→bytes</code> is encode</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 - &lt;&lt;'PY'
+import pathlib
+p = pathlib.Path(&quot;/tmp/demo.txt&quot;)
+p.write_text(&quot;line1\nline2\n&quot;)
+with p.open(&quot;a&quot;) as f: f.write(&quot;line3\n&quot;)
+print(p.read_text(), p.read_text().splitlines())
+PY
+
+# --- the binary identification logic, for real ---
+python3 - &lt;&lt;'PY'
+SIG = {b&quot;\x7fELF&quot;:&quot;ELF&quot;, b&quot;MZ&quot;:&quot;PE&quot;, b&quot;PK\x03\x04&quot;:&quot;zip&quot;, b&quot;\x89PNG&quot;:&quot;png&quot;,
+       b&quot;%PDF&quot;:&quot;pdf&quot;, b&quot;\x1f\x8b&quot;:&quot;gzip&quot;}
+for path in [&quot;/usr/bin/nmap&quot;, &quot;/usr/bin/bash&quot;, &quot;/bin/ls&quot;]:
+    with open(path, &quot;rb&quot;) as f: head = f.read(8)
+    kind = next((v for k, v in SIG.items() if head.startswith(k)), &quot;unknown&quot;)
+    print(f&quot;{path:&lt;16} {head.hex():&lt;20} {kind}&quot;)
+PY
+
+# --- extract hashes from your own /etc/shadow ---
+sudo python3 - &lt;&lt;'PY'
+with open(&quot;/etc/shadow&quot;, errors=&quot;replace&quot;) as f:
+    for line in f:
+        u, h = line.split(&quot;:&quot;, 2)[:2]
+        if h not in (&quot;&quot;, &quot;*&quot;, &quot;!&quot;): print(u, h)
+PY
+
+# --- stream a big file without loading it ---
+sudo dd if=/dev/zero of=/tmp/big.bin bs=1M count=200 2&gt;/dev/null
+python3 -c &quot;
+total=0
+f=open('/tmp/big.bin','rb')
+while (c := f.read(1&lt;&lt;20)): total += len(c)
+print('streamed', total, 'bytes in 1MB chunks')&quot;
+rm -f /tmp/big.bin
+
+xxd -l 16 /usr/bin/nmap
+file /usr/bin/nmap
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a file identifier and a streaming log parser.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/py-03 &amp;&amp; cd ~/aegis/labs/py-03
+
+nmap -sV -sC -p- 127.0.0.1 -oN scan.txt 2&gt;/dev/null
+sudo cp /var/log/auth.log ./auth-sample.log 2&gt;/dev/null || \
+  sudo journalctl -n 200 --no-pager &gt; auth-sample.log
+
+# --- file(1) in Python ---
+cat &gt; identify.py &lt;&lt;'PY'
+import sys, pathlib
+SIGNATURES = [
+    (b&quot;\x7fELF&quot;, &quot;ELF executable&quot;), (b&quot;MZ&quot;, &quot;Windows PE executable&quot;),
+    (b&quot;PK\x03\x04&quot;, &quot;Zip / Office / JAR&quot;), (b&quot;\x89PNG&quot;, &quot;PNG image&quot;),
+    (b&quot;\xff\xd8\xff&quot;, &quot;JPEG image&quot;), (b&quot;GIF8&quot;, &quot;GIF image&quot;),
+    (b&quot;%PDF&quot;, &quot;PDF document&quot;), (b&quot;\x1f\x8b&quot;, &quot;gzip stream&quot;),
+    (b&quot;BZh&quot;, &quot;bzip2&quot;), (b&quot;\xfd7zXZ&quot;, &quot;xz&quot;), (b&quot;7z\xbc\xaf\x27\x1c&quot;, &quot;7-zip&quot;),
+    (b&quot;Rar!&quot;, &quot;RAR archive&quot;), (b&quot;\xd0\xcf\x11\xe0&quot;, &quot;OLE2 (legacy Office)&quot;),
+    (b&quot;\xca\xfe\xba\xbe&quot;, &quot;Java class / Mach-O fat&quot;),
+    (b&quot;SQLite format 3&quot;, &quot;SQLite database&quot;),
+]
+def identify(path):
+    with open(path, &quot;rb&quot;) as f:
+        head = f.read(4096)
+    for magic, name in SIGNATURES:
+        if head.startswith(magic):
+            return name
+    return &quot;data&quot;
+if __name__ == &quot;__main__&quot;:
+    for arg in sys.argv[1:]:
+        p = pathlib.Path(arg)
+        if p.is_file():
+            print(f&quot;{str(p):&lt;40} {p.stat().st_size:&gt;10}  {identify(str(p))}&quot;)
+PY
+python3 identify.py /usr/bin/nmap /bin/bash /etc/passwd 2&gt;/dev/null | tee 01-identify.txt
+file /usr/bin/nmap /bin/bash /etc/passwd | tee -a 01-identify.txt
+
+# --- a log parser that streams ---
+cat &gt; logparse.py &lt;&lt;'PY'
+import re, sys, collections
+
+PATTERNS = {
+    &quot;failed_ssh&quot;:   re.compile(r&quot;Failed password for (?:invalid user )?(?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.]+)&quot;),
+    &quot;accepted_ssh&quot;: re.compile(r&quot;Accepted password for (?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.]+)&quot;),
+    &quot;sudo&quot;:         re.compile(r&quot;sudo:\s+(\S+)\s*:.*COMMAND=(?P&lt;cmd&gt;.+)&quot;),
+}
+def parse(path):
+    counts, attackers, users = collections.Counter(), collections.Counter(), collections.Counter()
+    with open(path, errors=&quot;replace&quot;) as f:
+        for line in f:
+            if m := PATTERNS[&quot;failed_ssh&quot;].search(line):
+                counts[&quot;failed_ssh&quot;] += 1
+                attackers[m.group(&quot;ip&quot;)] += 1
+                users[m.group(&quot;user&quot;)] += 1
+            elif m := PATTERNS[&quot;accepted_ssh&quot;].search(line):
+                counts[&quot;accepted_ssh&quot;] += 1
+                users[m.group(&quot;user&quot;)] += 1
+            elif m := PATTERNS[&quot;sudo&quot;].search(line):
+                counts[&quot;sudo&quot;] += 1
+    return counts, attackers, users
+if __name__ == &quot;__main__&quot;:
+    c, a, u = parse(sys.argv[1] if len(sys.argv) &gt; 1 else &quot;auth-sample.log&quot;)
+    print(f&quot;events: {dict(c)}\n&quot;)
+    print(&quot;top source IPs:&quot;)
+    for ip, n in a.most_common(10): print(f&quot;  {ip:&lt;20} {n}&quot;)
+    print(&quot;\ntop targeted usernames:&quot;)
+    for name, n in u.most_common(10): print(f&quot;  {name:&lt;20} {n}&quot;)
+PY
+python3 logparse.py auth-sample.log | tee 02-logparse.txt
+
+# --- the same job with shell tools ---
+{
+  echo &quot;failed: $(grep -c 'Failed password' auth-sample.log || true)&quot;
+  echo &quot;ok:     $(grep -c 'Accepted password' auth-sample.log || true)&quot;
+  grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' auth-sample.log | sort | uniq -c | sort -rn | head -5
+} | tee -a 02-logparse.txt
+
+# --- streaming vs slurping: the memory difference ---
+sudo dd if=/dev/urandom of=/tmp/big.bin bs=1M count=300 2&gt;/dev/null
+/usr/bin/time -v python3 -c &quot;
+f=open('/tmp/big.bin','rb'); t=0
+while (c:=f.read(1&lt;&lt;20)): t+=len(c)
+print('streamed',t)&quot; 2&gt;&amp;1 | grep -E &quot;Maximum resident|streamed&quot;
+/usr/bin/time -v python3 -c &quot;print(len(open('/tmp/big.bin','rb').read()))&quot; 2&gt;&amp;1 \
+  | grep &quot;Maximum resident&quot;
+rm -f /tmp/big.bin
+
+# --- encoding traps ---
+python3 - &lt;&lt;'PY'
+raw = b&quot;\xff\xfe invalid utf8 \x00\x01&quot;
+try: raw.decode(&quot;utf8&quot;)
+except UnicodeDecodeError as e: print(&quot;naive      :&quot;, type(e).__name__)
+print(&quot;errors=replace:&quot;, raw.decode(&quot;utf8&quot;, errors=&quot;replace&quot;))
+print(&quot;latin-1 (never fails):&quot;, repr(raw.decode(&quot;latin-1&quot;)[:20]))
+PY
+</code></pre>
+<p><strong>Step 6 is the engineering lesson.</strong> Streaming 300 MB costs constant small memory; reading it<br />
+whole costs 300 MB. On a 4 GB memory image that difference decides whether your tool works.</p>
+<p><strong>Record:</strong> <code>logparse.py</code> is a genuine IR tool; you extend it in <code>for-02</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does <code>open(path, "w")</code> do to an existing file, and why is that dangerous in a script?</li>
+<li>Why must a parser handling capture files pass <code>errors="replace"</code>?</li>
+<li>Name three file signatures and what they identify.</li>
+<li>Memory difference between <code>f.read()</code> and chunked <code>f.read(n)</code>?</li>
+<li><code>bytes.decode()</code> vs <code>bytes.hex()</code> — when is each right?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Python Fundamentals</strong> → <strong>Text Processing Tools</strong> → <strong>Log Analysis</strong> → <strong>Timeline Analysis</strong> →<br />
+<strong>Regex</strong>. This is the foundation for Tier 6.</p>

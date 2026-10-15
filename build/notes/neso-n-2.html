@@ -1,0 +1,184 @@
+<h1 id="data-link-layer-framing-mac-error-control">Data Link Layer: Framing, MAC, Error Control</h1>
+<h2 id="summary">Summary</h2>
+<p>How bits become frames, how frames find their destination, and how errors are detected. Layer 2<br />
+is where the first security boundary of any network appears — and where the first attack surface<br />
+does too.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Framing</strong>: delimiters, addresses, type/length, payload, FCS</li>
+<li><strong>MAC addressing</strong> is flat: every node listens to every frame. No hierarchy, no broadcast<br />
+  control. That single property enables ARP poisoning and MAC flooding</li>
+<li><strong>Error control</strong>: CRC/FCS detects corruption but does not correct; the frame is simply dropped</li>
+<li><strong>Flow control</strong>: not really present in shared Ethernet; collision handling came with CSMA/CD</li>
+<li><strong>Switching</strong> replaced the collision domain problem but kept the broadcast domain intact</li>
+<li><strong>Promiscuous mode</strong> is what a sniffer needs, and why a switched network does not help you</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Frame</strong></td>
+<td>The Layer 2 unit with a header and FCS</td>
+</tr>
+<tr>
+<td><strong>FCS / CRC</strong></td>
+<td>Frame Check Sequence; detects, does not repair</td>
+</tr>
+<tr>
+<td><strong>CSMA/CD</strong></td>
+<td>Carrier sense with collision detection; historical</td>
+</tr>
+<tr>
+<td><strong>Promiscuous mode</strong></td>
+<td>Accept every frame, not just your own</td>
+</tr>
+<tr>
+<td><strong>MTU</strong></td>
+<td>Largest frame payload a link carries</td>
+</tr>
+<tr>
+<td><strong>NIC</strong></td>
+<td>The network interface card, and its MAC</td>
+</tr>
+<tr>
+<td><strong>BPDU</strong></td>
+<td>Bridge Protocol Data Unit; STP frames</td>
+</tr>
+<tr>
+<td><strong>Frame flood</strong></td>
+<td>Sending a frame to every port</td>
+</tr>
+<tr>
+<td><strong>NIC offload</strong></td>
+<td>Kernel features that change what a sniffer sees</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- layer 2 of this host ---
+ip -br link
+cat /sys/class/net/*/address
+cat /sys/class/net/*/mtu
+
+# --- the ARP table is a layer 2 structure leaking into layer 3 ---
+ip neigh show
+cat /proc/net/arp
+
+# --- sniffer capability, loopback only ---
+sudo timeout 8 tcpdump -i lo -n -e -c 10 2&gt;/dev/null | head -10
+sudo timeout 8 tcpdump -i lo -n -e -X -c 1 2&gt;/dev/null | head -20
+command -v tshark tcpdump wireshark
+
+# --- promiscuous mode on your own interface (needs root) ---
+ip link show eth0 2&gt;/dev/null | head -1
+sudo ip link set eth0 promisc on 2&gt;/dev/null &amp;&amp; echo &quot;promiscuity ON&quot; &amp;&amp; \
+  ip link show eth0 | head -1 &amp;&amp; sudo ip link set eth0 promisc off
+cat /sys/class/net/*/flags 2&gt;/dev/null | head -3
+
+# --- how many frames does this box see vs transmit? ---
+cat /sys/class/net/lo/statistics/rx_packets /sys/class/net/lo/statistics/tx_packets 2&gt;/dev/null
+ip -s link show lo | head -4
+
+# --- offload, which explains confusing sniffer output ---
+command -v ethtool
+ethtool -k eth0 2&gt;/dev/null | grep -E &quot;rx-checksumming|tx-checksumming|gso&quot; | head -5
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read a real frame's fields by hand, and understand what promiscuous mode changes.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-n-2 &amp;&amp; cd ~/aegis/labs/neso-n-2
+
+# --- 1. capture and annotate one frame ---
+sudo timeout 10 tcpdump -i lo -n -e -X -c 1 &quot;icmp&quot; 2&gt;/dev/null | tee 01-frame.txt
+
+# --- 2. decode it by hand ---
+python3 - &lt;&lt;'PY' | tee 02-decode.txt
+import struct
+# A minimal Ethernet II + IPv4 + ICMP echo frame
+eth = bytes.fromhex(&quot;0200000000020200000000010800&quot;)
+ip  = bytes.fromhex(&quot;4500003c1c460000400101000a0a0a0aa0a0a0a01&quot;)
+icmp= bytes.fromhex(&quot;080000e0d9045a3f00000100010000000000000000&quot;)
+frame = eth + ip + icmp
+
+print(f&quot;  total frame: {len(frame)} bytes\n&quot;)
+print(&quot;  --- ETHERNET (14 bytes) ---&quot;)
+print(f&quot;  dst MAC     : {frame[0:6].hex(':')}   (all zeros here: loopback)&quot;)
+print(f&quot;  src MAC     : {frame[6:12].hex(':')}&quot;)
+print(f&quot;  ethertype   : 0x{frame[12:14].hex()}  (0x0800 = IPv4)&quot;)
+print()
+print(&quot;  --- IPv4 (20 bytes) ---&quot;)
+print(f&quot;  version/ihl : {frame[14] &gt;&gt; 4}.{frame[14] &amp; 0xf}&quot;)
+print(f&quot;  total len   : {struct.unpack('!H', frame[16:18])[0]}&quot;)
+print(f&quot;  ttl         : {frame[22]}&quot;)
+print(f&quot;  protocol    : {frame[23]}  (1 = ICMP)&quot;)
+print(f&quot;  src ip      : {'.'.join(map(str, frame[26:30]))}&quot;)
+print(f&quot;  dst ip      : {'.'.join(map(str, frame[30:34]))}&quot;)
+print()
+print(&quot;  --- ICMP ---&quot;)
+print(f&quot;  type/code   : {frame[34]}/{frame[35]}&quot;)
+print(f&quot;  checksum    : {frame[36:38].hex()}&quot;)
+print()
+print(&quot;  Every byte above is overhead the network paid to carry 8 bytes of ping.&quot;)
+PY
+
+# --- 3. promiscuous mode, on your own interface only ---
+{
+  echo &quot;=== before ===&quot;
+  ip link show lo | head -1
+  sudo ip link set lo promisc on 2&gt;/dev/null
+  ip link show lo | head -1
+  echo
+  echo &quot;  'PROMISC' in the flags means every frame is delivered to the host,&quot;
+  echo &quot;  not just frames addressed to it. A sniffer needs this.&quot;
+  sudo ip link set lo promisc off 2&gt;/dev/null
+  echo
+  echo &quot;=== restored ===&quot;
+  ip link show lo | head -1
+} 2&gt;&amp;1 | tee 03-promisc.txt
+
+# --- 4. NIC offload: why your captures look wrong ---
+{
+  echo &quot;=== checksum / GRO offload (explains corrupt checksums in captures) ===&quot;
+  for i in /sys/class/net/*; do
+    n=$(basename $i)
+    printf &quot;  %-8s rx-checksumming=%s tx-checksumming=%s gro=%s\n&quot; &quot;$n&quot; \
+      &quot;$(cat $i/flags 2&gt;/dev/null | grep -oE 'rx-checksumming' || echo off)&quot; \
+      &quot;$(cat $i/flags 2&gt;/dev/null | grep -oE 'tx-checksumming' || echo off)&quot; \
+      &quot;$(cat $i/features 2&gt;/dev/null | head -1 || echo n/a)&quot;
+  done
+  echo
+  echo &quot;Offload means the checksum is computed after capture, so a pcap taken on&quot;
+  echo &quot;a normal host shows 'bad' checksums. This is a capture artefact, not corruption.&quot;
+  echo &quot;Disable with: sudo ethtool -K eth0 rx off tx off gro off&quot;
+} 2&gt;&amp;1 | tee 04-offload.txt
+
+# --- 5. frame volume: what a switch floods ---
+{
+  echo &quot;=== frames seen on loopback in 5 seconds ===&quot;
+  a=$(cat /sys/class/net/lo/statistics/rx_packets)
+  sleep 5
+  b=$(cat /sys/class/net/lo/statistics/rx_packets)
+  echo &quot;  received: $((b - a)) packets in 5s&quot;
+  echo
+  echo &quot;=== and how many are distinct destinations (broadcasts included) ===&quot;
+  sudo timeout 6 tcpdump -i lo -n -e -c 50 2&gt;/dev/null | awk '{print $NF}' | sort | uniq -c | sort -rn | head -5
+} 2&gt;&amp;1 | tee 05-frames.txt
+</code></pre>
+<p><strong>Step 2 is the deliverable</strong> — after decoding a frame by hand, hex dumps stop being noise.</p>
+<p><strong>Record:</strong> <code>02-decode.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the six fields of an Ethernet frame.</li>
+<li>What does the FCS do, and what does it not do?</li>
+<li>Why does a switch not protect you from an attacker sniffing the LAN?</li>
+<li>What is promiscuous mode, and why do sniffers need it?</li>
+<li>Why do captured packets show invalid checksums on a modern host?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Ethernet Frame</strong> → <strong>MAC Address</strong> → <strong>Switching</strong> → <strong>Sniffer</strong> → <strong>Protocol Analysis</strong> →<br />
+<strong>Broadcast Domain</strong>.</p>

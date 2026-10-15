@@ -1,0 +1,275 @@
+<h1 id="phishing-analysis-and-awareness-defensive">Phishing Analysis and Awareness (Defensive)</h1>
+<h2 id="summary">Summary</h2>
+<p>This note is about <em>detecting</em> phishing, not about sending it. Phishing analysis is a defensive<br />
+skill with a clean authorisation line: analysing a suspicious message that arrived is always<br />
+permitted; sending one is social engineering and needs a separate, explicit authorisation.</p>
+<p>The framing: <strong>a phishing email is a document with an embedded<br />
+executable attachment, and it leaves the same forensic traces any<br />
+other malicious document does.</strong> The analysis is the document<br />
+analysis from <code>osi-03</code>, plus headers.</p>
+<blockquote>
+<p>Companion to <code>osi-03</code> (documents) and <code>osi-05</code> (the consent<br />
+boundary). This note is the defensive analysis.</p>
+</blockquote>
+<h2 id="the-authorisation-line">The authorisation line</h2>
+<pre><code class="language-text">  ALWAYS PERMITTED, no authorisation needed
+    - analysing a message that arrived in your own or your
+      organisation's mailbox
+    - reporting it internally
+    - detonating it in a sandbox you control
+    - blocking the indicators
+
+  REQUIRES EXPLICIT WRITTEN AUTHORISATION
+    - sending a test message to real people
+    - a phishing simulation campaign
+    - any pretexting, even to a &quot;friendly&quot; internal contact
+
+  NEVER PERMITTED without written authorisation AND a named
+  stakeholder who has decided
+    - anything that reaches a real person who did not consent
+
+  THE SIMULATION QUESTION, and it is asked in every organisation:
+    a phishing simulation is a security awareness control. It is also
+    a dataset of which employees clicked, which is sensitive personal
+    data about individual performance, and in some jurisdictions it
+    needs its own legal basis.
+
+    IF YOU ARE RECOMMENDING ONE, the recommendation includes:
+      - a legal opinion, not just a security one
+      - a data-handling plan for the click data, including retention
+      - a non-punitive framing, because a punitive one suppresses
+        reporting of real phishing
+      - a plan for what happens to someone who clicks
+</code></pre>
+<h2 id="the-header-analysis">The header analysis</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/osi-04 &amp;&amp; cd ~/aegis/labs/osi-04
+mkdir -p samples work
+
+cat &gt; 01-headers.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Header analysis of a message you RECEIVED.
+# This is analysis of an inbound artefact. It sends nothing to anyone.
+M=&quot;${1:?usage: ./01-headers.sh &lt;message.eml or header text&gt;}&quot;
+echo &quot;=== 1. THE AUTHENTICATION RESULTS (the summary) ===&quot;
+if command -v spamassassin &gt;/dev/null 2&gt;&amp;1 &amp;&amp; [[ &quot;$M&quot; == *.eml ]]; then
+  spamassassin -t &lt; &quot;$M&quot; 2&gt;&amp;1 | grep -E &quot;^[0-9.]+ |points|described&quot; | sed 's/^/  /'
+fi
+echo
+echo &quot;=== 2. THE HOP CHAIN ===&quot;
+echo &quot;  Received: from X by Y with ESMTP id Z; &lt;date&gt;&quot;
+grep -i &quot;^received:&quot; &quot;$M&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  READ THIS ORDERING. The top header is the most recent hop and&quot;
+echo &quot;  was added by the receiving server. The BOTTOM is the closest&quot;
+echo &quot;  to the sender. A hop claiming to be internal, above a hop&quot;
+echo &quot;  claiming to be external, in the wrong order, is the signature&quot;
+echo &quot;  of a spoofed Received header added by the sender's server.&quot;
+echo
+echo &quot;=== 3. RETURN-PATH vs FROM (the classic) ===&quot;
+grep -iE &quot;^(return-path|from|sender|reply-to):&quot; &quot;$M&quot; | sed 's/^/  /'
+echo
+echo &quot;  ^ From: the display name and address the user sees.&quot;
+echo &quot;    Return-Path: where bounces go, set by the SENDER.&quot;
+echo &quot;    Reply-To: where a reply goes.&quot;
+echo &quot;    All three differing is not proof, but it is a question.&quot;
+echo
+echo &quot;=== 4. AUTHENTICATION RESULTS, IN DETAIL ===&quot;
+grep -iE &quot;^(authentication-results|received-spf|dkim-signature|arc-authentication-results|arc-seal|domainkey-signature)&quot; &quot;$M&quot; \
+  | cut -c1-160 | sed 's/^/  /'
+echo
+echo &quot;  spf=pass       the sending IP is authorised for the domain&quot;
+echo &quot;  spf=fail       it is NOT. Combined with a visible From: of&quot;
+echo &quot;                 the client, that is spoofing.&quot;
+echo &quot;  dkim=pass      the message is signed and it verifies&quot;
+echo &quot;  dkim=none      the domain does not sign. Perfectly normal.&quot;
+echo &quot;  dkim=fail      the signature broke in transit. Or was&quot;
+echo &quot;                 stripped. Or was forged.&quot;
+echo &quot;  dmarc=pass     the sending domain's policy was satisfied&quot;
+echo &quot;  dmarc=fail     it was not, and the receiving MTA applied&quot;
+echo &quot;                 whatever policy the domain publishes&quot;
+echo
+echo &quot;  NOTE the spf/dkim/dmarc pattern. A real message from a&quot;
+echo &quot;  domain that publishes all three passes all three. A spoofed&quot;
+echo &quot;  one fails at least one, and commonly fails dmarc with&quot;
+echo &quot;  spf=softfail.&quot;
+echo
+echo &quot;=== 5. THE BODY, AS TEXT ONLY ===&quot;
+grep -iE &quot;^(subject|from|date|reply-to|return-path|message-id|x-mailer|user-agent)&quot; &quot;$M&quot; \
+  | cut -c1-120 | sed 's/^/  /'
+echo
+echo &quot;=== 6. THE LINK TEXT vs THE LINK TARGET ===&quot;
+echo &quot;  (copy the href and the visible text out by hand; they are&quot;
+echo &quot;   usually both visible in the raw source, and a mismatch is&quot;
+echo &quot;   the whole trick)&quot;
+echo
+echo &quot;  Look for:&quot;
+echo &quot;    - a visible URL that differs from the href&quot;
+echo &quot;    - a href with a different registrable domain&quot;
+echo &quot;    - a URL with an @ (user@evil.com), a lookalike character&quot;
+echo &quot;      (rn for m, 0 for O), or an unexpected subdomain depth&quot;
+echo &quot;    - a shortened URL that does not expand to the expected host&quot;
+echo
+echo &quot;=== 7. THE ATTACHMENT ===&quot;
+grep -iE &quot;^(content-type|content-disposition|filename)&quot; &quot;$M&quot; | sed 's/^/  /'
+echo
+echo &quot;  A PDF with a zip filename, a .doc that is really a .exe, an&quot;
+echo &quot;  archive with a password, or an .html attachment are all&quot;
+echo &quot;  findings. Check the attachment's REAL type with 'file'.&quot;
+EOF
+chmod +x 01-headers.sh
+
+cat &gt; 02-analysis.md &lt;&lt;'MD'
+# The indicator set, and how to report it
+
+```text
+  WHAT TO EXTRACT FROM A SUSPICIOUS MESSAGE
+
+    HEADERS
+      the authentication verdict (spf / dkim / dmarc)
+      the reply-to, if different from the from
+      the message-id, and the date
+
+    LINKS
+      every href, and the visible text
+      every URL, resolved ONCE, and where it goes
+      ^ resolve it yourself. A phishing domain's TLS certificate is
+        free information and sometimes self-signed with the
+        campaign name in it.
+
+    ATTACHMENTS
+      sha256 (never md5 alone)
+      file type, and the type it CLAIMS
+      size
+      ^ do not open it. Analyse the container (osi-03's script).
+
+    INFRASTRUCTURE
+      the sending IP, its ASN, its reverse DNS, its geolocation
+      the subject line's specificity (a generic subject is a
+      campaign; a specific one is a spearphish)
+
+    BEHAVIOURAL
+      does it create urgency?
+      does it ask for credentials?
+      does it reference something you would know (a project name,
+      a person's name, a recent event)?
+      is the greeting generic (&quot;Dear User&quot;) or specific?
+
+  THE REPORT, which is short by design
+
+    Subject: [Verdict] - [verdict in one word] - [date]
+
+    VERDICT: phishing | suspicious | benign | inconclusive
+      &quot;inconclusive&quot; is a real answer and it is better than a guess.
+
+    WHAT MADE IT SUSPICIOUS
+      the specific indicators, with evidence
+
+    WHAT TO DO
+      block the sender, the domain, the URL, the hash
+      report it internally
+      if anyone entered credentials, reset that account and revoke
+      the sessions (this is the important line)
+
+    WHAT NOT TO DO
+      forward it to colleagues &quot;so they know&quot;
+      ^ that spreads it. Block and report. If awareness training is
+        needed, use a sanitised version with the indicators removed.
+```
+MD
+cat 02-analysis.md
+
+# --- the offline concept ---
+python3 - &lt;&lt;'PY' | tee 03-verdict.txt
+print(&quot;  === the verdict, and why 'inconclusive' is the best one ===\n&quot;)
+print(&quot;  FOUR VERDICTS, and what each permits you to do:\n&quot;)
+print(&quot;  PHISHING      the indicators are consistent and several are&quot;)
+print(&quot;                present. Block it. Report it. If a credential was&quot;)
+print(&quot;                entered, treat the account as compromised.&quot;)
+print()
+print(&quot;  SUSPICIOUS    one or two indicators, no corroboration.&quot;)
+print(&quot;                Block it, report it, but do NOT tell the user&quot;)
+print(&quot;                they were hacked.&quot;)
+print()
+print(&quot;  BENIGN        nothing found after checking.&quot;)
+print()
+print(&quot;  INCONCLUSIVE  you could not check. The headers were stripped,&quot;)
+print(&quot;                the content was blocked by your own gateway, or&quot;)
+print(&quot;                the domain's DMARC policy is not available.&quot;)
+print()
+print(&quot;  WHY INCONCLUSIVE IS THE BEST ANSWER:&quot;)
+print()
+print(&quot;    1. A false 'phishing' call destroys trust in the whole&quot;)
+print(&quot;       reporting channel. If the report is wrong often enough,&quot;)
+print(&quot;       the true ones get ignored, and that is when someone&quot;)
+print(&quot;       actually clicks one.&quot;)
+print()
+print(&quot;    2. A false 'benign' call is how a real credential theft&quot;)
+print(&quot;       succeeds quietly. The asymmetry is brutal: being wrong&quot;)
+print(&quot;       in the cautious direction costs a wasted report, and&quot;)
+print(&quot;       being wrong in the other direction costs an account.&quot;)
+print()
+print(&quot;    3. 'Inconclusive' tells the reader what you need to make&quot;)
+print(&quot;       the call: the original message with full headers, the&quot;)
+print(&quot;       attachment, and the domain's DMARC record. It is&quot;)
+print(&quot;       actionable in a way that 'phishing, probably' is not.&quot;)
+print()
+print(&quot;  THE INDICATOR WEIGHTS, and why they are weighted:\n&quot;)
+print(f&quot;  {'INDICATOR':&lt;42} {'WEIGHT':&lt;8} WHY&quot;)
+print(&quot;  &quot; + &quot;-&quot;*84)
+rows = [
+ (&quot;spf=fail AND dmarc=fail on a visible From&quot;, &quot;CRITICAL&quot;,
+  &quot;the domain did not authorise the sending IP, and the policy says so&quot;),
+ (&quot;Reply-To differs from From&quot;, &quot;HIGH&quot;,
+  &quot;the visible sender is not where the reply goes&quot;),
+ (&quot;Attachment: real type differs from claimed&quot;, &quot;CRITICAL&quot;,
+  &quot;the extension is a lie; that is the delivery mechanism&quot;),
+ (&quot;A credential request&quot;, &quot;CRITICAL&quot;,
+  &quot;the objective of the campaign, stated openly&quot;),
+ (&quot;Generic greeting or generic subject&quot;, &quot;MEDIUM&quot;,
+  &quot;campaign volume. Weak alone; strong combined&quot;),
+ (&quot;Urgency or threat language&quot;, &quot;MEDIUM&quot;,
+  &quot;pressure to act before you check&quot;),
+ (&quot;A lookalike domain (rn for m, extra .co)&quot;, &quot;HIGH&quot;,
+  &quot;the display is designed to be read quickly and wrong&quot;),
+ (&quot;Link text differs from href&quot;, &quot;CRITICAL&quot;,
+  &quot;the entire mechanism, visible in the source&quot;),
+ (&quot;Sender's TLS certificate self-signed with a name&quot;, &quot;HIGH&quot;,
+  &quot;free infrastructure, and they named it&quot;),
+ (&quot;Everything present but the domain is the client's own&quot;, &quot;INCONCLUSIVE&quot;,
+  &quot;an internal account may have been compromised. Escalate, do not dismiss.&quot;),
+]
+for a, b, c in rows:
+    print(f&quot;  {a:&lt;42} {b:&lt;8} {c}&quot;)
+print()
+print(&quot;  THE LAST ROW IS THE ONE PEOPLE GET WRONG.&quot;)
+print(&quot;  A phishing email FROM the client's OWN domain, from an&quot;)
+print(&quot;  internal-looking sender, is more likely a compromised mailbox&quot;)
+print(&quot;  than a typo-squat. It is an incident, not a phishing report,&quot;)
+print(&quot;  and the response is completely different.&quot;)
+PY
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: the indicator weight table, including the last row — <strong>a phishing<br />
+email from the client's <em>own</em> domain is more likely a compromised mailbox than a typo-squat</strong>, and<br />
+that is an incident with a completely different response, not a phishing report.</p>
+<p>And the asymmetry: a false "phishing" call destroys trust in the whole channel — and if the<br />
+report is wrong often enough, the <em>true</em> ones get ignored, which is exactly when someone clicks<br />
+one. But a false "benign" call is how a real credential theft succeeds quietly.</p>
+<p><strong><code>01-headers.sh</code></strong> includes the hop-chain ordering note: <em>a hop claiming to be internal, above<br />
+a hop claiming to be external, in the wrong order, is the signature of a spoofed <code>Received</code><br />
+header added by the sender's server.</em></p>
+<p><strong>Record:</strong> <code>02-analysis.md</code> and <code>03-verdict.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is always permitted versus what needs written authorisation?</li>
+<li>What four questions must a phishing simulation proposal answer?</li>
+<li>How do you read the <code>Received</code> chain, and what does a wrong ordering indicate?</li>
+<li>Why does <code>From</code> differ from <code>Reply-To</code> matter, and why is it not proof alone?</li>
+<li>Give the three indicators weighted CRITICAL.</li>
+<li>Why is 'inconclusive' often the correct verdict?</li>
+<li>Name the asymmetric costs of a false 'phishing' versus a false 'benign'.</li>
+<li>What does a phish from the client's own domain most likely mean?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Phishing</strong> → <strong>OSINT</strong> → <strong>Security Awareness</strong> → <strong>Incident Response</strong> →<br />
+<strong>Email Security</strong>.<br />
+<code>osi-05</code> is the other side of that line, and why it needs consent.</p>

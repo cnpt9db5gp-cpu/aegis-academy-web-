@@ -1,0 +1,284 @@
+<h1 id="how-kali-is-organised-recon-scanning-exploitation-forensics">How Kali Is Organised: Recon, Scanning, Exploitation, Forensics</h1>
+<h2 id="summary">Summary</h2>
+<p>New users see ~3000 executables and assume Kali is a magic box that knows how to hack. It is not.<br />
+Kali is a <strong>Debian distribution with a curated set of tools</strong>, and those tools belong to about a<br />
+dozen <strong>categories</strong>. Learn the categories and Kali stops being a wall of names and starts being<br />
+a toolbox you reach into deliberately.</p>
+<p>This is the most important conceptual lecture in Tier 0. Everything else here is mechanics.</p>
+<h2 id="the-engagement-lifecycle">The engagement lifecycle</h2>
+<p>Almost every offensive tool maps to a phase. Memorise the phases, not the tools.</p>
+<pre><code>        ┌──────────────┐
+        │  1. RECON     │  passive: what exists, publicly?
+        └──────┬───────┘
+               ▼
+        ┌──────────────┐
+        │  2. ENUMERATION│ active: what is running, on which version?
+        └──────┬───────┘
+               ▼
+        ┌──────────────┐
+        │  3. VULN ASSESS│ which known flaws match what I found?
+        └──────┬───────┘
+               ▼
+        ┌──────────────┐
+        │  4. EXPLOITATION│ turn a flaw into code execution
+        └──────┬───────┘
+               ▼
+        ┌──────────────┐
+        │  5. POST-EXPL │ maintain access, escalate, move laterally
+        └──────┬───────┘
+               ▼
+        ┌──────────────┐
+        │  6. REPORTING │ what did I find, what is the risk, what do you fix?
+        └──────────────┘
+</code></pre>
+<p><strong>80% of real work is steps 1-3.</strong> Beginners want to jump to 4; professionals live in 1-3.</p>
+<h2 id="the-categories-and-what-they-actually-do">The categories, and what they actually do</h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Tools</th>
+<th>Question it answers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Information gathering</strong></td>
+<td><code>nmap</code>, <code>maltego</code>, <code>theharvester</code>, <code>subfinder</code></td>
+<td>What exists out there?</td>
+</tr>
+<tr>
+<td><strong>Vulnerability analysis</strong></td>
+<td><code>nikto</code>, <code>searchsploit</code>, <code>nessus</code>, <code>nuclei</code></td>
+<td>What known flaws match?</td>
+</tr>
+<tr>
+<td><strong>Web application</strong></td>
+<td><code>burpsuite</code>, <code>sqlmap</code>, <code>ffuf</code>, <code>gobuster</code>, <code>nikto</code></td>
+<td>How does this HTTP app break?</td>
+</tr>
+<tr>
+<td><strong>Password attacks</strong></td>
+<td><code>john</code>, <code>hashcat</code>, <code>hydra</code>, <code>responder</code></td>
+<td>What secrets can I recover?</td>
+</tr>
+<tr>
+<td><strong>Exploitation</strong></td>
+<td><code>metasploit</code>, <code>gdb</code>, <code>pwntools</code>, <code>radare2</code></td>
+<td>How do I get code execution?</td>
+</tr>
+<tr>
+<td><strong>Post-exploitation</strong></td>
+<td><code>mimikatz</code>, <code>impacket</code>, <code>linpeas</code>, <code>bloodhound</code>, <code>crackmapexec</code></td>
+<td>What can I reach from here?</td>
+</tr>
+<tr>
+<td><strong>Sniffing / spoofing</strong></td>
+<td><code>wireshark</code>, <code>tcpdump</code>, <code>ettercap</code>, <code>bettercap</code></td>
+<td>What is crossing the wire?</td>
+</tr>
+<tr>
+<td><strong>Forensics</strong></td>
+<td><code>volatility</code>, <code>autopsy</code>, <code>foremost</code>, <code>binwalk</code>, <code>exiftool</code></td>
+<td>What happened here?</td>
+</tr>
+<tr>
+<td><strong>Credential access</strong></td>
+<td><code>john</code>, <code>hashcat</code>, <code>mimikatz</code>, <code>responder</code></td>
+<td>Where are secrets stored?</td>
+</tr>
+<tr>
+<td><strong>Reporting</strong></td>
+<td><code>metasploit</code>, <code>faraday</code>, <code>cutycapt</code></td>
+<td>How do I prove it?</td>
+</tr>
+</tbody>
+</table>
+<h2 id="how-to-find-a-tool-by-purpose">How to find a tool by purpose</h2>
+<pre><code class="language-bash"># by name
+apt-cache search '^nmap$'
+apt-cache search metasploit | head
+
+# by description keyword
+apt-cache search &quot;network scanner&quot;
+apt-cache search --names-only 'password' | head
+
+# by metapackage - this is the taxonomy, by category
+apt-cache search --names-only '^kali-tools-' | sort
+apt-cache depends kali-tools-recon          # everything in the recon category
+apt-cache depends kali-tools-exploitation   # everything in the exploitation category
+
+# is it installed, and where?
+dpkg -S &quot;$(command -v nmap)&quot;
+dpkg -l | grep '^ii  kali-tools'
+
+# what does this metapackage pull in? (simulate, never install blindly)
+apt-get -s install kali-tools-web | grep '^Inst' | wc -l
+</code></pre>
+<h2 id="the-decision-you-actually-make">The decision you actually make</h2>
+<p>When a challenge says "the web server is 10.10.10.5:8080", your first question is never "which<br />
+tool?" — it is <strong>"which phase am I in, and what do I not know yet?"</strong></p>
+<pre><code class="language-bash"># phase 0: understand the target
+curl -s -I http://127.0.0.1:8080
+# phase 1: what's there?       -&gt; recon / enumeration tools
+nmap -sV -p- 10.10.10.5
+# phase 2: what does it run?   -&gt; version -&gt; CVE
+searchsploit apache 2.4.49
+# phase 3: does the flaw exist? -&gt; verify before exploiting
+curl -s -I http://10.10.10.5/cgi-bin/..%2f..%2f..%2fetc/passwd
+# phase 4: get a shell
+# phase 5: establish persistence, enumerate the host
+# phase 6: write it up
+</code></pre>
+<p><strong>Skipping to phase 4 without phases 1-3 is how people spend six hours on a machine that was<br />
+patched.</strong> Enumeration is not the boring part; it is the job.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Reconnaissance (recon)</strong></td>
+<td>Discovering what exists, before touching anything</td>
+</tr>
+<tr>
+<td><strong>Enumeration (enum)</strong></td>
+<td>Identifying services, versions, users, shares on live systems</td>
+</tr>
+<tr>
+<td><strong>Fingerprinting</strong></td>
+<td>Determining the exact software and version behind a port</td>
+</tr>
+<tr>
+<td><strong>CVE</strong></td>
+<td>Public catalogue entry for a vulnerability</td>
+</tr>
+<tr>
+<td><strong>Exploit</strong></td>
+<td>Working code that turns a vulnerability into impact</td>
+</tr>
+<tr>
+<td><strong>Payload</strong></td>
+<td>What the exploit delivers (shell, file, etc.)</td>
+</tr>
+<tr>
+<td><strong>Post-exploitation</strong></td>
+<td>Everything after initial access</td>
+</tr>
+<tr>
+<td><strong>Lateral movement</strong></td>
+<td>Compromising additional hosts</td>
+</tr>
+<tr>
+<td><strong>Persistence</strong></td>
+<td>Surviving reboot while staying quiet</td>
+</tr>
+<tr>
+<td><strong>Attack surface</strong></td>
+<td>Every point where untrusted input can enter</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the taxonomy, printed ---
+apt-cache search --names-only '^kali-tools-' | cut -d- -f3 | sort -u
+
+# --- what is in each category (simulated, not installed) ---
+for cat in recon scanning exploitation post-exploitation forensics reporting \
+           password-attacks web-application sniffer credential-stuffing; do
+  n=$(apt-get -s install kali-tools-$cat 2&gt;/dev/null | grep -c '^Inst')
+  printf &quot;kali-tools-%-22s %s packages\n&quot; &quot;$cat&quot; &quot;$n&quot;
+done
+
+# --- what is already installed by category ---
+dpkg -l | grep '^ii  kali-tools' | awk '{print $2}' | sort
+
+# --- the single most valuable command in Kali ---
+searchsploit --help
+searchsploit apache 2.4.49
+searchsploit -t apache -t httpd
+searchsploit --keyword=&quot;kerberoast&quot;   # a technique, not a product
+
+# --- offline CVE data (works with no internet) ---
+ls /usr/share/exploitdb/
+ls /usr/share/nmap/scripts/ | wc -l
+ls /usr/share/seclists/ | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> produce your own taxonomy map, and go from a port number to a candidate exploit<br />
+using only offline data.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/doc-01 &amp;&amp; cd ~/aegis/labs/doc-01
+
+# --- 1. The taxonomy ---
+apt-cache search --names-only '^kali-tools-' | cut -d- -f3 | sort -u | tee 01-taxonomy.txt
+echo &quot;categories: $(wc -l &lt; 01-taxonomy.txt)&quot;
+
+# --- 2. Size of each category (simulated - shows what &quot;recon&quot; really means) ---
+{
+  for cat in $(cat 01-taxonomy.txt); do
+    n=$(apt-get -s install kali-tools-$cat 2&gt;/dev/null | grep -c '^Inst')
+    printf &quot;%-28s %4s packages\n&quot; &quot;kali-tools-$cat&quot; &quot;$n&quot;
+  done
+} | sort -k2 -rn | tee 02-category-sizes.txt
+
+# --- 3. Offline exploit knowledge base ---
+{
+  echo &quot;=== exploitdb entries ===&quot;; searchsploit -c 2&gt;/dev/null | head -5
+  echo &quot;=== nmap NSE scripts ===&quot;; ls /usr/share/nmap/scripts/*.nse | wc -l
+  echo &quot;=== sample NSE scripts (these ARE automation) ===&quot;
+  ls /usr/share/nmap/scripts/ | grep -E 'vuln|enum' | head -20
+} | tee 03-offline-db.txt
+
+# --- 4. Port -&gt; service -&gt; CVE chain, entirely offline ---
+{
+  echo &quot;=== all known exploits for Apache ===&quot;
+  searchsploit apache | head -15
+  echo
+  echo &quot;=== a specific version ===&quot;
+  searchsploit &quot;apache 2.4.49&quot;
+  echo
+  echo &quot;=== by technique rather than product ===&quot;
+  searchsploit --keyword=kerberoast | head -10
+  searchsploit --keyword=&quot;privilege escalation&quot; | head -10
+} | tee 04-searchsploit.txt
+
+# --- 5. Practice the lifecycle on YOUR OWN loopback ---
+nmap -sV -p- -oN 05-loopback.txt 127.0.0.1 2&gt;/dev/null
+{
+  echo &quot;PHASE 1-2: what is open on my own machine?&quot;
+  grep &quot;open&quot; 05-loopback.txt
+  echo
+  echo &quot;PHASE 3: which known flaws match these versions?&quot;
+  while read -r svc ver; do
+    [ -z &quot;$svc&quot; ] &amp;&amp; continue
+    hits=$(searchsploit &quot;$svc $ver&quot; 2&gt;/dev/null | grep -c &quot; - &quot;)
+    printf &quot;  %-12s %-15s %s known exploits\n&quot; &quot;$svc&quot; &quot;$ver&quot; &quot;$hits&quot;
+  done &lt; &lt;(grep &quot;open&quot; 05-loopback.txt | awk '{print $2, $3&quot; &quot;$4}')
+} | tee 06-lifecycle.txt
+
+# --- 6. NSE scripts are pre-written reconnaissance - read one ---
+less /usr/share/nmap/scripts/vulners.nse
+nmap -sV --script vuln 127.0.0.1 -oN 07-vulnscan.txt 2&gt;/dev/null
+tail -20 07-vulnscan.txt
+</code></pre>
+<p><strong>Step 6 is a revelation if you have not seen it.</strong> Nmap's NSE library is hundreds of pre-written<br />
+reconnaissance scripts. Reading <code>vulners.nse</code> teaches you how vulnerability scanning is<br />
+implemented — and what its blind spots are.</p>
+<p><strong>Record:</strong> in your scratchpad, keep <code>02-category-sizes.txt</code>. The next time someone says "just<br />
+use Kali for X", you will know which category to reach into.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the six phases of an engagement and give one tool per phase.</li>
+<li>Why is enumeration "the job" rather than a preliminary to it?</li>
+<li>How would you find every package in Kali's information-gathering category without installing<br />
+   them all?</li>
+<li>What does <code>searchsploit</code> give you that a web search does not?</li>
+<li>Why is reading an NSE script educational in a way that running it is not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kali Tool Taxonomy</strong> → <strong>Reconnaissance</strong> → <strong>Enumeration</strong> → <strong>Service Fingerprinting</strong> →<br />
+<strong>CVE Identifier</strong> → <strong>Exploit-DB</strong>.</p>

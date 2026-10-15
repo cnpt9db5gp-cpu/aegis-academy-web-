@@ -1,0 +1,136 @@
+<h1 id="the-kali-directory-layout">The Kali Directory Layout</h1>
+<h2 id="summary">Summary</h2>
+<p>Once you know where Kali keeps its data, the toolset stops being a mystery and starts being<br />
+navigable. Every tool in this curriculum is a binary in <code>/usr/bin</code>, but the <em>interesting</em> parts<br />
+of Kali — the scripts, the wordlists, the payload templates, the exploits — live in <code>/usr/share</code><br />
+directories that have a consistent, learnable layout.</p>
+<p>This is the single highest-value five minutes of orientation you will spend on Kali.</p>
+<h2 id="the-map">The map</h2>
+<pre><code>/usr/bin/                     the executables themselves (nmap, john, sqlmap…)
+/usr/share/nmap/              nmap scripts, service probes, NSE libraries
+/usr/share/nmap/nmap-services  port → service database
+/usr/share/nmap/nmap-protocols protocol → port mapping
+/usr/share/wordlists/         SecLists: passwords, usernames, directories, web
+/usr/share/seclists/          older copy of the same, kept for compatibility
+/usr/share/metasploit-framework/
+    modules/                  exploits, payloads, aux, encoders, evasion
+    data/                     wordlists, targets, documentation
+/usr/share/john/              jumbo's wordlists and config files
+/usr/share/seclists/Discovery/Web-Content/   directory bruteforce lists
+/usr/share/responder/         Responder's config and spoofing lists
+/usr/share/impacket/          example scripts and requirements
+/usr/share/amap/              protocol mapper data
+/usr/share/ettercap/          etterfilter plugins and services
+/usr/share/lynis/             auditing scripts (hardening checks)
+
+/var/log/syslog, auth.log     system logs — your own forensic evidence
+/var/log/auth.log             authentication history, sudo usage, SSH attempts
+/var/log/wtmp, /var/log/btmp  login/logout records and failed attempts
+/proc/                        live process state (read-only virtual filesystem)
+/etc/passwd, /etc/shadow      user database and password hashes
+/etc/apt/                     repository configuration
+</code></pre>
+<h2 id="why-this-matters-operationally">Why this matters operationally</h2>
+<p>Three reasons an operator cares:</p>
+<ol>
+<li><strong>Discovery is a file read.</strong> <code>ls /usr/share/wordlists/</code> tells you exactly what you can brute<br />
+   force. On a target you have compromised, the equivalent directory tells you what the <em>defender</em><br />
+   expects you to try.</li>
+<li><strong>Nmap's port knowledge is a file.</strong> <code>grep -E '^(http|ssh|mysql)\b' /usr/share/nmap/nmap-services</code><br />
+   gives you every port for a service. When you need a port and cannot remember it, read the<br />
+   database instead of guessing.</li>
+<li><strong>Metasploit's modules are a browsable database.</strong> Not something to memorise — something to<br />
+<code>grep</code>.</li>
+</ol>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the directory map, generated live ---
+du -sh /usr/share/* 2&gt;/dev/null | sort -h | tail -20
+
+# --- wordlists: what is actually available ---
+ls /usr/share/wordlists/
+wc -l /usr/share/wordlists/rockyou.txt 2&gt;/dev/null
+ls /usr/share/seclists/ | head -20
+find /usr/share/seclists -iname &quot;*directory*&quot; -type d | head
+
+# --- nmap's protocol database: stop memorising ports ---
+head -20 /usr/share/nmap/nmap-services
+grep -E '\bhttp/https?\b' /usr/share/nmap/nmap-services | head -15
+grep -E '\bmysql\b' /usr/share/nmap/nmap-services
+grep -E '\bssh\b' /usr/share/nmap/nmap-services
+
+# --- metasploit as a searchable database ---
+ls /usr/share/metasploit-framework/modules/exploits/ | head
+find /usr/share/metasploit-framework/modules -name &quot;*.rb&quot; | wc -l
+grep -rl &quot;eternalblue&quot; /usr/share/metasploit-framework/modules/ 2&gt;/dev/null | head
+
+# --- john's wordlists ---
+ls /usr/share/john/
+grep -c . /usr/share/john/password.lst 2&gt;/dev/null
+
+# --- the kernel's live view (read-only, never modify) ---
+ls /proc/ | head
+cat /proc/version
+cat /proc/self/status | head -20
+ls -l /proc/self/fd/          # this process's open file descriptors
+
+# --- your own authentication history (forensic habit) ---
+last -20
+sudo lastb 2&gt;/dev/null | head -20    # failed logins
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build a reference map of your own toolset that you will use every single day.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/kr-04 &amp;&amp; cd ~/aegis/labs/kr-04
+
+# 1. Size of each data directory - what is big, and why
+du -sh /usr/share/* 2&gt;/dev/null | sort -h | tail -25 | tee 01-share-sizes.txt
+
+# 2. Your available wordlists, with line counts (this is your brute-force capability)
+for f in /usr/share/wordlists/*.txt /usr/share/seclists/Passwords/*.txt; do
+  [ -f &quot;$f&quot; ] &amp;&amp; printf &quot;%-60s %s\n&quot; &quot;$f&quot; &quot;$(wc -l &lt; &quot;$f&quot;)&quot;
+done 2&gt;/dev/null | sort -k2 -n | tee 02-wordlists.txt
+
+# 3. Build your own port reference from nmap's database
+grep -vE '^#|^$' /usr/share/nmap/nmap-services &gt; 03-ports.txt
+echo &quot;=== HTTP ports ===&quot;; grep -E '\bhttps?\b' 03-ports.txt | head -10
+echo &quot;=== SMB / Windows ===&quot;; grep -E '\b(smb|netbios|smb2)\b' 03-ports.txt
+echo &quot;=== Database ===&quot;; grep -E '\b(mysql|postgres|mssql|oracle|mongo)\b' 03-ports.txt
+echo &quot;=== Remote access ===&quot;; grep -E '\b(ssh|rdp|winrm|vnc)\b' 03-ports.txt
+
+# 4. How much exploit code do you have locally?
+echo &quot;metasploit modules: $(find /usr/share/metasploit-framework/modules -name '*.rb' 2&gt;/dev/null | wc -l)&quot;
+find /usr/share/metasploit-framework/modules/exploits -maxdepth 1 -type d | sed 's|.*/||' | sort | head -30
+
+# 5. Your live kernel state - proof that /proc is a filesystem, not a folder of files
+ls /proc/ | grep -E '^[0-9]+$' | wc -l    # running processes
+cat /proc/uptime                          # seconds since boot
+cat /proc/net/tcp | head -5               # live TCP table in HEX (little-endian!)
+
+# 6. Authentication history on your own box
+last -n 10 | tee 06-logins.txt
+sudo grep &quot;Accepted\|Failed&quot; /var/log/auth.log 2&gt;/dev/null | tail -20 &gt;&gt; 06-logins.txt
+</code></pre>
+<p><strong>Observation worth having:</strong> <code>/proc/net/tcp</code> prints ports in <strong>little-endian hexadecimal</strong>.<br />
+<code>0100007F:1F90</code> means <code>127.0.0.1:8080</code>. This trips up everyone once. Decode it like this:</p>
+<pre><code class="language-bash"># decode /proc/net/tcp into readable form
+printf &quot;%-22s %s\n&quot; &quot;LOCAL&quot; &quot;SERVICE&quot;
+awk 'NR&gt;1 &amp;&amp; $4==&quot;0A&quot; {
+  split($2, a, &quot;:&quot;);
+  printf &quot;listen  %d.%d.%d.%d:%d\n&quot;,
+    strtonum(&quot;0x&quot; substr(a[1],7,2)), strtonum(&quot;0x&quot; substr(a[1],5,2)),
+    strtonum(&quot;0x&quot; substr(a[1],3,2)), strtonum(&quot;0x&quot; substr(a[1],1,2)), strtonum(&quot;0x&quot; a[2])
+}' /proc/net/tcp
+</code></pre>
+<p><strong>Record:</strong> save <code>01-share-sizes.txt</code> and <code>02-wordlists.txt</code>. When you start password attacks in<br />
+Tier 4, this is your shopping list.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Where does Kali keep its wordlists, and why does knowing this matter during an engagement?</li>
+<li>Nmap knows that port 3306 is MySQL. Which file told you that?</li>
+<li>What does <code>/proc/net/tcp</code> show, and why are the ports in hexadecimal and byte-reversed?</li>
+<li>Metasploit's modules live in which directory? How would you grep for a specific CVE's module?</li>
+<li><code>du -sh /usr/share/seclists</code> is 0 bytes on your install. What are two possible reasons and<br />
+   how would you fix it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kali Directory Layout</strong> → <strong>Wordlists</strong> → <strong>Password Hashing</strong> → <strong>John &amp; hashcat</strong>.<br />
+Every one of those is a Tier 4 lecture, and this map is how you get there without guessing.</p>

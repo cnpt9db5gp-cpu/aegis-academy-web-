@@ -1,0 +1,403 @@
+<h1 id="memory-safety-and-buffer-overflows">Memory Safety and Buffer Overflows</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161's memory-safety block is the formal counterpart to MIT 6.858's Lab 1. Same bug class, but<br />
+presented as a <em>language</em> problem with a taxonomy, which is what makes the fix structural rather<br />
+than defensive.</p>
+<blockquote>
+<p>Companion to <code>mit858-04</code> and <code>ex-01</code>..<code>ex-06</code>. This note is the taxonomy and<br />
+the language argument; those are the exploitation mechanics.</p>
+</blockquote>
+<h2 id="the-taxonomy">The taxonomy</h2>
+<p>CS161 groups memory-safety bugs into five families. Knowing the list is most<br />
+of knowing what to look for.</p>
+<table>
+<thead>
+<tr>
+<th>Bug</th>
+<th>Definition</th>
+<th>Typical consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Buffer overflow</strong></td>
+<td>Write/read outside a fixed-size buffer</td>
+<td>Overwrite adjacent memory</td>
+</tr>
+<tr>
+<td><strong>Integer overflow</strong></td>
+<td>Arithmetic wraps past a type's bound</td>
+<td>Wrong size, wrong index, undersized allocation</td>
+</tr>
+<tr>
+<td><strong>Use after free</strong></td>
+<td>Reference memory after it was released</td>
+<td>Dangling pointer, type confusion</td>
+</tr>
+<tr>
+<td><strong>Uninitialized memory</strong></td>
+<td>Read memory never written</td>
+<td>Information disclosure</td>
+</tr>
+<tr>
+<td><strong>Type confusion</strong></td>
+<td>Treat one type as another</td>
+<td>Arbitrary read/write via mismatched layout</td>
+</tr>
+</tbody>
+</table>
+<p>They are not independent. <strong>Integer overflow causes most heap bugs</strong>: an<br />
+<code>int</code> size computation wraps, an allocation is too small, and the<br />
+subsequent write is an overflow.</p>
+<h2 id="c-specifics-that-create-the-bugs">C specifics that create the bugs</h2>
+<pre><code class="language-c">char buf[32];
+strcpy(buf, input);                 // unbounded: no size exists in the type
+snprintf(buf, sizeof buf, ...);     // bounded: the compiler knows the size
+
+int n = count * sizeof(struct x);    // count * 8 can overflow int
+struct x *p = malloc(n);            // -&gt; undersized allocation
+
+free(p); use(p);                    // use-after-free
+
+struct y z; printf(&quot;%s&quot;, z.s);      // uninitialized read: info leak
+</code></pre>
+<p><strong>The root cause is that C's type system carries no size information.</strong> <code>char *</code><br />
+is just an address. A bounds-checked type (<code>char[32]</code>) or a bounds-annotated<br />
+pointer is what makes the bug unrepresentable.</p>
+<h2 id="why-the-mitigations-are-not-enough">Why the mitigations are not enough</h2>
+<pre><code class="language-text">canary  -&gt; detects the corruption, after the fact
+NX      -&gt; prevents execution, not the write
+ASLR    -&gt; makes addresses hard to guess
+RELRO   -&gt; protects one specific table
+</code></pre>
+<p>Each is a <em>mitigation of a consequence</em>. None removes the bug, because the<br />
+bug is still a bug. CS161's argument is that the only fix that eliminates the<br />
+class is a language where the bug cannot be expressed.</p>
+<h2 id="memory-safe-languages-honestly">Memory-safe languages, honestly</h2>
+<table>
+<thead>
+<tr>
+<th>Language</th>
+<th>Mechanism</th>
+<th>Residual C-interop risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Java</td>
+<td>GC + bounds checks + type checks</td>
+<td>JNI, <code>sun.misc.Unsafe</code></td>
+</tr>
+<tr>
+<td>C#</td>
+<td>GC + bounds + no pointer arithmetic</td>
+<td><code>unsafe</code>, P/Invoke</td>
+</tr>
+<tr>
+<td>Go</td>
+<td>GC + bounds + no user pointers</td>
+<td><code>unsafe</code>, cgo</td>
+</tr>
+<tr>
+<td>Rust</td>
+<td>Ownership + borrowing, checked at compile time</td>
+<td><code>unsafe</code> blocks, FFI</td>
+</tr>
+<tr>
+<td>Python</td>
+<td>Reference counting + dynamic typing</td>
+<td>Everything in C underneath</td>
+</tr>
+</tbody>
+</table>
+<p><strong>None are safe by default when interoperating with C.</strong> Rust's <code>unsafe</code> and<br />
+Go's <code>cgo</code> are escape hatches that concentrate risk rather than removing it,<br />
+which is exactly the right design: the unsafe part is small and reviewable.</p>
+<h2 id="the-bounded-type-argument">The bounded-type argument</h2>
+<p>The structural fix CS161 explores (and the lecture's <code>baggy-bounds</code> reading):</p>
+<pre><code class="language-text">Instead of:  char *p            (size unknown)
+Provide:     bounded_ptr&lt;char, 32&gt;
+             - carries its bound
+             - the compiler requires the bound to be provable at every use
+             - the hardware checks it on every access
+</code></pre>
+<p>Now an out-of-bounds access is <strong>detected precisely</strong>, not probabilistically.<br />
+The cost is memory and code size. The benefit is the whole class goes away<br />
+for any code that uses the type.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Memory safety</strong></td>
+<td>No undefined behaviour from memory access</td>
+</tr>
+<tr>
+<td><strong>Buffer overflow</strong></td>
+<td>Access outside a fixed-size buffer</td>
+</tr>
+<tr>
+<td><strong>Integer overflow</strong></td>
+<td>Arithmetic wrapping past a type's bound</td>
+</tr>
+<tr>
+<td><strong>Use-after-free</strong></td>
+<td>Access to released memory</td>
+</tr>
+<tr>
+<td><strong>Uninitialized read</strong></td>
+<td>Reading memory never written</td>
+</tr>
+<tr>
+<td><strong>Type confusion</strong></td>
+<td>One type interpreted as another</td>
+</tr>
+<tr>
+<td><strong>Garbage collection</strong></td>
+<td>Automatic reclamation; removes use-after-free</td>
+</tr>
+<tr>
+<td><strong>Ownership</strong></td>
+<td>Rust's compile-time lifetime discipline</td>
+</tr>
+<tr>
+<td><strong>Bounded type</strong></td>
+<td>A type that carries its own bounds</td>
+</tr>
+<tr>
+<td><strong>Undefined behaviour</strong></td>
+<td>Anything the standard does not specify</td>
+</tr>
+<tr>
+<td><strong>Sanitiser</strong></td>
+<td>Runtime or compile-time detector</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- find the bugs, don't read for them ---
+command -v cppcheck clang gcc
+cppcheck --enable=all --inconclusive target.c 2&gt;&amp;1 | head -15
+
+# --- sanitizers are the highest-value tool in this lecture ---
+# AddressSanitizer: finds OOB, UAF, leaks, with the exact source line
+gcc -g -O0 -fsanitize=address,undefined target.c -o target-asan
+ASAN_OPTIONS=detect_leaks=1 ./target-asan &quot;AAAA&quot;
+
+# UndefinedBehaviorSanitizer: integer overflow, misaligned access
+gcc -g -O0 -fsanitize=undefined target.c -o target-ubsan
+./target-ubsan
+
+# GCC's own warnings for the classic patterns
+gcc -Wall -Wextra -Wformat-security -Wstringop-overflow \
+    -Warray-bounds=2 -Wnull-dereference -g -c target.c -o /dev/null 2&gt;&amp;1 | head -15
+
+# --- the integer overflow, demonstrated ---
+cat &gt; intovf.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+struct rec { char name[8]; int value; };
+int main(int argc, char **argv) {
+    int count = argc + 2147483640;          /* wraps to a small/negative number */
+    printf(&quot;  count = %d\n&quot;, count);
+    size_t n = (size_t)count * sizeof(struct rec);
+    printf(&quot;  allocation size = %zu\n&quot;, n);
+    struct rec *p = malloc(n);
+    if (!p) { printf(&quot;  malloc refused\n&quot;); return 1; }
+    strcpy(p[0].name, &quot;AAAAAAAAAAAAAAAAAAAA&quot;);   /* overflows the block */
+    printf(&quot;  wrote past the allocation\n&quot;);
+    return 0;
+}
+EOF
+gcc -g -O0 -fsanitize=address intovf.c -o intovf 2&gt;/dev/null &amp;&amp; ./intovf 2&gt;&amp;1 | head -8
+rm -f intovf.c intovf
+
+# --- hardening flags, for when you must ship C ---
+{
+  echo &quot;=== the flags that make a C binary harder to exploit ===&quot;
+  for flags in &quot;-g -O0&quot; \
+               &quot;-g -O0 -fstack-protector-strong&quot; \
+               &quot;-g -O0 -fstack-protector-strong -pie -fPIE&quot; \
+               &quot;-g -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pie -fPIE -Wformat -Werror=format-security&quot; \
+               &quot;-g -O2 -fstack-protector-all -pie -fPIE -Wl,-z,relro,-z,now -fcf-protection=full -mshstk&quot;; do
+    printf &quot;  %-30s &quot; &quot;$(echo $flags | cut -c1-28)&quot;
+    gcc $flags target.c -o /tmp/h 2&gt;/dev/null &amp;&amp; \
+      checksec --file=/tmp/h 2&gt;/dev/null | grep -cE &quot;found|full|enabled&quot; | xargs printf &quot;%s protections\n&quot; || echo &quot;did not compile&quot;
+  done
+  rm -f /tmp/h
+}
+
+# --- valgrind, when you cannot use a sanitiser ---
+valgrind --leak-check=full --track-origins=yes ./target 2&gt;&amp;1 | head -12
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> find every memory-safety bug class in a deliberately buggy program, using tools<br />
+rather than reading.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cs161-03 &amp;&amp; cd ~/aegis/labs/cs161-03
+
+cat &gt; buggy.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+
+struct node { struct node *next; int value; };
+
+void b_overflow(const char *in) {
+    char buf[16];
+    strcpy(buf, in);                       /* 1. buffer overflow */
+}
+
+int b_intoverflow(int n) {
+    int total = n * 100;                   /* 2. integer overflow */
+    int *p = malloc(total * sizeof(int));
+    for (int i = 0; i &lt; total; i++) p[i] = i;
+    free(p);
+    return total;
+}
+
+void b_uaf(void) {
+    struct node *a = malloc(sizeof(struct node));
+    a-&gt;value = 42;
+    free(a);
+    printf(&quot;%d\n&quot;, a-&gt;value);              /* 3. use after free */
+}
+
+void b_uninit(void) {
+    int secret[4];
+    printf(&quot;%d\n&quot;, secret[0]);             /* 4. uninitialized read */
+}
+
+void b_typeconfusion(void *p) {
+    printf(&quot;%d\n&quot;, *(int *)p);             /* 5. type confusion */
+}
+
+int main(int argc, char **argv) {
+    int which = argc &gt; 1 ? atoi(argv[1]) : 0;
+    switch (which) {
+        case 1: b_overflow(&quot;AAAAAAAAAAAAAAAA&quot;); break;
+        case 2: printf(&quot;%d\n&quot;, b_intoverflow(100000)); break;
+        case 3: b_uaf(); break;
+        case 4: b_uninit(); break;
+        case 5: { int x = 7; b_typeconfusion(&amp;x); } break;
+    }
+    return 0;
+}
+EOF
+
+# --- 1. static analysis finds them without running anything ---
+echo &quot;=== cppcheck ===&quot;
+cppcheck --enable=warning,style,security,performance buggy.c 2&gt;&amp;1 | head -20 | tee 01-cppcheck.txt
+
+# --- 2. AddressSanitizer finds them at runtime, with the exact line ---
+echo
+echo &quot;=== AddressSanitizer ===&quot;
+gcc -g -O0 -fsanitize=address,undefined buggy.c -o buggy-asan 2&gt;/dev/null
+for n in 1 2 3 4 5; do
+  echo &quot;  --- trigger $n ---&quot;
+  ASAN_OPTIONS=detect_leaks=1 ./buggy-asan $n 2&gt;&amp;1 | grep -E &quot;ERROR|SUMMARY|runtime error|#1 &quot; | head -3 | sed 's/^/    /'
+done | tee 02-asan.txt
+
+# --- 3. the integer overflow, isolated ---
+cat &gt; intovf.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+int main(int argc, char **argv) {
+    int count = 100000 * 100;          /* 10,000,000 - fits */
+    int bad  = argc + 2147483640;      /* wraps on overflow */
+    printf(&quot;  good count  = %d  -&gt; bytes = %lld\n&quot;, count, (long long)count * 4);
+    printf(&quot;  wrapped     = %d  -&gt; bytes = %lld\n&quot;, bad, (long long)bad * 4);
+    printf(&quot;  size_t value= %zu  (the cast happens AFTER the overflow)\n&quot;,
+           (size_t)(bad * 4));
+    return 0;
+}
+EOF
+gcc -g -O0 -fsanitize=undefined intovf.c -o intovf 2&gt;/dev/null
+./intovf 2&gt;&amp;1 | sed 's/^/  /' | tee 03-intov.txt
+rm -f intovf.c intovf
+
+# --- 4. the compiler's own warnings ---
+echo
+echo &quot;=== gcc warnings on the same file ===&quot;
+gcc -Wall -Wextra -Wformat-security -Wstringop-overflow -Warray-bounds=2 \
+    -Wnull-dereference -g -c buggy.c -o /dev/null 2&gt;&amp;1 | head -20 | tee 04-gcc-warn.txt
+
+# --- 5. valgrind, for the case where you cannot rebuild ---
+if command -v valgrind &gt;/dev/null; then
+  echo
+  echo &quot;=== valgrind ===&quot;
+  gcc -g -O0 buggy.c -o buggy 2&gt;/dev/null
+  for n in 3 4; do
+    echo &quot;  --- trigger $n ---&quot;
+    valgrind --leak-check=full --track-origins=yes ./buggy $n 2&gt;&amp;1 \
+      | grep -E &quot;Invalid|uninitialised|definitely lost|at 0x&quot; | head -4 | sed 's/^/    /'
+  done | tee 05-valgrind.txt
+else
+  echo &quot;  valgrind not installed: sudo apt install valgrind&quot; | tee 05-valgrind.txt
+fi
+
+# --- 6. the hardening ladder ---
+echo
+echo &quot;=== what the compiler can do for you ===&quot;
+{
+  echo &quot;  These are not substitutes for fixing the bug. They change what an&quot;
+  echo &quot;  attacker can do once it has one.&quot;
+  echo
+  printf &quot;  %-58s %s\n&quot; &quot;FLAG&quot; &quot;EFFECT&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-----&quot; &quot;------&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-Wall -Wextra&quot; &quot;catch the obvious&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-Wformat-security&quot; &quot;format string bugs&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-Wstringop-overflow&quot; &quot;strcpy overflows at compile time&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-fstack-protector-strong&quot; &quot;canary on vulnerable functions&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-D_FORTIFY_SOURCE=2&quot; &quot;bounds-check str/mem functions&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-fPIE -pie&quot; &quot;randomised binary base&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-Wl,-z,relro,-z,now&quot; &quot;read-only GOT&quot;
+  printf &quot;  %-58s %s\n&quot; &quot;-fcf-protection=full -mshstk&quot; &quot;shadow stack&quot;
+} | tee 06-ladder.txt
+
+# --- 7. the structural argument ---
+cat &gt; 07-structural.md &lt;&lt;'EOF'
+# The structural argument
+
+You cannot compile your way out of a memory-safety bug. You can only make it
+more expensive to exploit.
+
+```text
+  fix the bug            -&gt; the only real fix
+  bounds-checked types   -&gt; makes a whole bug class unrepresentable
+  sanitiser in dev/CI    -&gt; catches the bug at the moment it is written
+  canary + NX + ASLR     -&gt; raises the cost after the bug already exists
+</code></pre>
+<p><strong>Use all four, in that order of importance.</strong> The last one is what everyone<br />
+remembers and the one that matters least.</p>
+<h2 id="the-review-question">The review question</h2>
+<p>Every C function you write should be answerable for:<br />
+1. What untrusted data reaches it?<br />
+2. What bounds does every access respect?<br />
+3. What happens when an allocation fails?<br />
+4. Who frees this, and exactly once?</p>
+<p>If you cannot answer all four, the function is a finding waiting for a fuzzer.<br />
+EOF<br />
+cat 07-structural.md<br />
+```</p>
+<p><strong>Step 2 is the deliverable</strong>: ASan pinpoints all five bug classes with exact source lines. That<br />
+is the difference between "I think this is safe" and "a tool verified it."</p>
+<p><strong>Record:</strong> <code>02-asan.txt</code> and <code>07-structural.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the five memory-safety bug classes CS161 teaches.</li>
+<li>How does an integer overflow lead to a heap overflow?</li>
+<li>Why can a stack canary not be considered a fix?</li>
+<li>What does <code>sprintf(buf, sizeof buf, ...)</code> do that <code>sprintf(buf, ...)</code> does not?</li>
+<li>Why do safe languages still need care when interfacing with C?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Memory Safety</strong> → <strong>Buffer Overflow</strong> → <strong>Integer Overflow</strong> → <strong>Use-After-Free</strong> →<br />
+<strong>Undefined Behaviour</strong> → <strong>C Fundamentals</strong>.<br />
+Pairs with <code>ex-03</code>..<code>ex-06</code> for the exploitation side.</p>

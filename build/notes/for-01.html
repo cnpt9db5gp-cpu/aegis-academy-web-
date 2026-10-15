@@ -1,0 +1,358 @@
+<h1 id="evidence-handling-imaging-and-chain-of-custody">Evidence Handling, Imaging and Chain of Custody</h1>
+<h2 id="summary">Summary</h2>
+<p>Before any technique, there is the procedure. Everything else in this course is worthless if the<br />
+evidence cannot be shown to be what you claim it was.</p>
+<p>The framing that makes it stick: <strong>an exhibit that cannot be authenticated is<br />
+worth nothing in court.</strong> Hashing an image takes one second. Being unable<br />
+to prove the image was not altered takes away the entire case.</p>
+<blockquote>
+<p>This note governs every lab in this course. Follow it even on CTF<br />
+challenges — the habit is the point.</p>
+</blockquote>
+<h2 id="the-chain-of-custody">The chain of custody</h2>
+<pre><code class="language-text">  WHAT IT IS: a documented record of every person who handled the
+  evidence, when, and why. Its purpose is to answer one question in
+  cross-examination: &quot;can you prove this is the evidence you examined?&quot;
+
+  THE FIELDS, and each one exists because a case was lost without it:
+
+    CASE IDENTIFIER    ties this to a specific incident
+    EVIDENCE ID        a unique label that travels with the item
+    DESCRIPTION        what it is, in plain language
+    ACQUIRED BY        a person, not a team
+    DATE/TIME          with timezone, and UTC, not local
+    SOURCE             where it came from, specifically
+    METHOD             tool, version, and every setting
+    HASH               SHA-256 of the acquired image
+    STORAGE            where the working copy lives
+    HANDLING LOG       every subsequent access, with who and why
+
+  THE PROPERTY THAT MATTERS: the log is APPEND-ONLY. A gap in it is
+  worse than a documented irregularity, because an irregularity has
+  an explanation and a gap does not.
+</code></pre>
+<h2 id="order-of-volatility-and-why-acquisition-order-is-forced">Order of volatility, and why acquisition order is forced</h2>
+<pre><code class="language-text">  MOST VOLATILE                    WHY IT GOES FIRST
+  ---------------------------      --------------------------------
+  CPU registers, cache            gone in microseconds
+  Network state                   one packet changes it
+  Running processes               gone on reboot
+  Disk (file system)              survives a reboot
+  Swap / hibernation               survives a reboot
+  Physical memory                 lost on power off
+  Remote logs                     retained per policy
+  Backups                         retained per policy
+  Physical configuration          static
+
+  THE RULE THAT FOLLOWS: acquire from the top down, and NEVER from
+  the bottom up. Booting a machine to &quot;look at the files&quot; destroys
+  the memory, the pagefile's relevance, the running processes, and
+  often the malware's own defence. Every responder who has booted a
+  live machine has permanently damaged that incident.
+</code></pre>
+<h2 id="the-two-acquisition-paths">The two acquisition paths</h2>
+<pre><code class="language-text">  DEAD ACQUISITION                 LIVE ACQUISITION
+  ----------------                 -----------------
+  the machine is off               the machine is running
+
+  + the only defensible image      + you get memory
+  + no tool can influence it       + you get the running processes
+  + simplest to explain            + you get the pagefile contents live
+                                  + you get network state
+
+  - you lose memory                - the acquisition is never
+  - you lose the encryption keys     PERFECT. Every read is a
+    resident in RAM (VeraCrypt,       chance to change a byte.
+    BitLocker's volume key)         - you need a validated write
+  - you may not be authorised to      blocker, and your tool is
+    power it down                     running on the system you
+                                      are capturing
+
+  WHEN LIVE IS PERMITTED: the
+  business says &quot;do not shut it
+  down&quot; (a financial service during
+  trading, a hospital, a domain
+  controller during business hours).
+  It is a business decision, not a
+  forensic one. Document who decided.
+</code></pre>
+<h2 id="imaging">Imaging</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/for-01 &amp;&amp; cd ~/aegis/labs/for-01
+mkdir -p cases/{images,working,notes,tools,output}
+chmod 700 cases
+
+# --- 1. the case structure, which is the whole procedure ---
+cat &gt; cases/README.md &lt;&lt;'EOF'
+# Case directory structure
+
+  images/      ACQUIRED images. WRITE ONCE. Never mounted, never modified.
+  working/     Derivative copies, mounted read-only, extracted from.
+  notes/       Your analysis notes, timeline, findings. Text, versioned.
+  output/      Extracted artefacts (carved files, screenshots, reports).
+  tools/       Copies of the tools you used, with their versions.
+  logs/        The chain of custody, the acquisition log, tool logs.
+
+# THE INVARIANT: images/ is append-only. Everything else is derived
+# from it and can be regenerated. If you lose working/ you lose a day.
+# If you lose images/ you lose the case.
+EOF
+
+# --- 2. the acquisition log, as a template ---
+cat &gt; cases/ACQUISITION-LOG.md &lt;&lt;'EOF'
+# Acquisition log
+
+| Field | Value |
+|---|---|
+| Case ID | AEGIS-2026-001 |
+| Evidence ID | EV-001 |
+| Description | Laptop disk, 512 GB NVMe, `/dev/nvme0n1p2` |
+| Source | Physically removed from host 2405-9800-b920, in my possession |
+| Acquired by | nwpcs |
+| Date/time (UTC) | 2026-10-14 18:30:00Z |
+| Tool | `dd` |
+| Tool version | GNU coreutils 9.7 |
+| Block size | 512 bytes |
+| Compression | none (raw) |
+| Source SHA-256 | _(hash of the live device, computed with `dd | sha256sum`)_ |
+| Image SHA-256 | _(identical, because dd is a byte-for-byte copy)_ |
+| Stored at | `cases/images/EV-001.dd`, mode 0444 |
+| Notes | Machine was powered off. No live acquisition. |
+
+# HOW TO FILL THIS IN, AND WHY EACH FIELD
+#
+#   &quot;dd&quot; alone is not a method description. The method is
+#   &quot;dd bs=512, one read at a time, from a powered-off device&quot;.
+#   A reviewer needs to know the tool could not have written to
+#   the source.
+#
+#   The source hash and image hash being IDENTICAL is the
+#   verification. If they differ, the image is not a faithful copy
+#   and you must start over.
+#
+#   &quot;read-only, mode 0444&quot; on the image file prevents the most
+#   common accident: mounting it rw, or a tool that opens it for
+#   append.
+EOF
+
+# --- 3. the acquisition, with verification ---
+cat &gt; acquire.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Acquire an image from a device or file, with verification.
+# Usage: ./acquire.sh &lt;source-device-or-file&gt; &lt;case-id&gt; &lt;evidence-id&gt; &lt;description&gt;
+#
+# Refuses to run against anything that is not a block device or a
+# file you name explicitly. There is no default target.
+set -euo pipefail
+SRC=&quot;$1&quot;; CASE=&quot;${2:?case id}&quot;; EV=&quot;${3:?evidence id}&quot;; DESC=&quot;${4:?description}&quot;
+ROOT=&quot;$HOME/aegis/labs/for-01/cases/$CASE&quot;
+mkdir -p &quot;$ROOT&quot;/{images,working,notes,output,logs}
+IMG=&quot;$ROOT/images/$EV.dd&quot;
+
+if [ -e &quot;$IMG&quot; ]; then
+  echo &quot;REFUSED: $IMG already exists. Images are never overwritten.&quot;
+  echo &quot;  Choose a new evidence ID, or start a new case.&quot;
+  exit 3
+fi
+
+echo &quot;[acquire] source : $SRC&quot;
+echo &quot;[acquire] image  : $IMG&quot;
+echo &quot;[acquire] $(date -u +%Y-%m-%dT%H:%M:%SZ)&quot;
+
+echo &quot;[acquire] hashing the SOURCE (this takes as long as the copy)&quot;
+SRC_HASH=$(dd if=&quot;$SRC&quot; bs=4M status=none | sha256sum | awk '{print $1}')
+echo &quot;[acquire] source SHA-256 : $SRC_HASH&quot;
+
+echo &quot;[acquire] copying&quot;
+dd if=&quot;$SRC&quot; of=&quot;$IMG&quot; bs=4M conv=noerror,sync status=progress 2&gt;&amp;1 | tail -2
+
+echo &quot;[acquire] hashing the IMAGE&quot;
+IMG_HASH=$(sha256sum &quot;$IMG&quot; | awk '{print $1}')
+echo &quot;[acquire] image SHA-256  : $IMG_HASH&quot;
+
+if [ &quot;$SRC_HASH&quot; = &quot;$IMG_HASH&quot; ]; then
+  echo &quot;[acquire] VERIFIED: the image is a faithful copy.&quot;
+else
+  echo &quot;[acquire] FAILED: the hashes differ. THE IMAGE IS NOT TRUSTWORTHY.&quot;
+  rm -f &quot;$IMG&quot;
+  exit 1
+fi
+
+chmod 0444 &quot;$IMG&quot;
+
+cat &gt; &quot;$ROOT/ACQUISITION-LOG.md&quot; &lt;&lt;LOG
+# Acquisition log
+
+| Field | Value |
+|---|---|
+| Case ID | $CASE |
+| Evidence ID | $EV |
+| Description | $DESC |
+| Source | $SRC |
+| Acquired by | $(whoami)@$(hostname) |
+| Date/time (UTC) | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
+| Tool | dd (GNU coreutils $(dd --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)) |
+| Block size | 4M (conv=sync, so errors are zero-filled) |
+| Source SHA-256 | $SRC_HASH |
+| Image SHA-256 | $IMG_HASH |
+| Verification | IDENTICAL - image is a faithful copy |
+| Stored at | $IMG (mode 0444) |
+LOG
+echo &quot;[acquire] log written to $ROOT/ACQUISITION-LOG.md&quot;
+EOF
+chmod +x acquire.sh
+echo &quot;written: acquire.sh&quot;
+
+# --- 4. practice on a device you own, right now ---
+{
+  echo &quot;=== this host's block devices (practice acquisition target) ===&quot;
+  lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL 2&gt;/dev/null | sed 's/^/  /'
+  echo
+  echo &quot;  DO NOT acquire /dev/nvme0n1 - that is your running system.&quot;
+  echo &quot;  The practice target below is a file you create, and it&quot;
+  echo &quot;  teaches exactly the same verification workflow.&quot;
+} | tee 01-devices.txt
+
+echo
+echo &quot;=== build a practice image from a file (no risk) ===&quot;
+{
+  echo &quot;AEGIS FORENSICS PRACTICE IMAGE&quot; &gt; practice.img
+  echo &quot;timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)&quot; &gt;&gt; practice.img
+  head -c 1048576 /dev/urandom &gt;&gt; practice.img
+  echo &quot;SECRET-MARKER-7f3a9c2e&quot; &gt;&gt; practice.img
+  head -c 1048576 /dev/urandom &gt;&gt; practice.img
+  echo &quot;second marker&quot; &gt;&gt; practice.img
+}
+ls -la practice.img | sed 's/^/  /'
+
+{
+  echo &quot;=== THE VERIFICATION, which is the whole note ===&quot;
+  echo &quot;  1. hash the source&quot;
+  sha256sum practice.img | sed 's/^/     /'
+  echo &quot;  2. copy it&quot;
+  cp practice.img practice-copy.img
+  echo &quot;  3. hash the copy&quot;
+  sha256sum practice-copy.img | sed 's/^/     /'
+  echo &quot;  4. compare&quot;
+  a=$(sha256sum practice.img | awk '{print $1}')
+  b=$(sha256sum practice-copy.img | awk '{print $1}')
+  [ &quot;$a&quot; = &quot;$b&quot; ] &amp;&amp; echo &quot;     IDENTICAL -&gt; the copy is faithful&quot; \
+                || echo &quot;     DIFFERENT -&gt; the copy is not trustworthy&quot;
+  echo &quot;  5. make the copy read-only&quot;
+  chmod 0444 practice-copy.img
+  ls -l practice.img practice-copy.img | sed 's/^/     /'
+  echo
+  echo &quot;  That is the entire acquisition procedure. Everything else&quot;
+  echo &quot;  in this course is analysis, and analysis is only credible&quot;
+  echo &quot;  because of these five steps.&quot;
+} 2&gt;&amp;1 | tee 02-verification.txt
+rm -f practice-copy.img
+</code></pre>
+<h2 id="the-tools-and-which-is-which">The tools, and which is which</h2>
+<pre><code class="language-text">  SLEUTH KIT (installed here)
+    fls      list the file system structure, from an image
+    icat     extract a single file by inode, without mounting
+    mmls     find partition boundaries
+    blkls    extract a partition into a separate image
+    istat    show the metadata of one inode
+    TSK has no dependencies and is the safest default for
+    file-system work. Prefer icat over mounting: mounting an
+    image attaches it to your kernel, and your kernel will not
+    preserve every timestamp.
+
+  DMDE / Magician / commercial tools
+    better at deleted-file recovery, but they want write access to
+    a working copy, and they are GUI. Use sleuthkit first.
+
+  FTK Imager / Guymager / dd
+    the acquisition tools. dd is always available and always
+    defensible. FTK and Guymager are easier and produce the same
+    bytes.
+
+  WHY NOT JUST MOUNT IT?
+    - timestamps are not preserved through a mount
+    - you risk writing to the image (the kernel can do this)
+    - some filesystems (HFS+, APFS, BitLocker, ReFS) do not mount
+      read-only reliably on Linux
+    - TSK's icat does the same job for a specific file with zero risk
+</code></pre>
+<pre><code class="language-bash"># --- 5. sleuthkit, read-only, against the practice image ---
+{
+  echo &quot;=== does it even have a file system? ===&quot;
+  file practice.img | sed 's/^/  /'
+  mmls practice.img 2&gt;&amp;1 | head -10 | sed 's/^/  /'
+  echo
+  echo &quot;=== fsstat: the file system structure, no mounting ===&quot;
+  fsstat practice.img 2&gt;&amp;1 | head -20 | sed 's/^/  /'
+  echo
+  echo &quot;=== fls: every file, recursively ===&quot;
+  fls -r -p practice.img 2&gt;&amp;1 | head -20 | sed 's/^/  /'
+  echo
+  echo &quot;=== icat: extract one file by inode (no mounting) ===&quot;
+  echo &quot;  fls first, then:  icat practice.img &lt;inode-number&gt; &gt; out.bin&quot;
+  echo &quot;  this is how you read a file from an image WITHOUT ever&quot;
+  echo &quot;  attaching it to your kernel.&quot;
+} 2&gt;&amp;1 | tee 03-sleuthkit.txt
+
+# --- 6. what NOT to do ---
+cat &gt; 04-pitfalls.md &lt;&lt;'EOF'
+# Acquisition and handling pitfalls
+
+| Pitfall | Consequence | Guard |
+|---|---|---|
+| Booting a live machine | memory, processes, and often the malware's behaviour are gone forever | Power off, then acquire |
+| Mounting rw | the kernel may write; the image is no longer faithful | `mount -o ro,loop,noexec` or use icat |
+| Acquiring a mounted filesystem | live data is inconsistent; deleted files may be mid-write | unmount first, or use a live-acquisition tool with a validated write blocker |
+| Not hashing | &quot;the image is what I analysed&quot; is unprovable | `sha256sum` on acquisition, always |
+| Using MD5 | collision attacks are practical; it will not be accepted as evidence | SHA-256 or better |
+| Analysing the original | your tools may modify it | analyse a working copy |
+| No timezone on timestamps | every timeline comparison is wrong | UTC everywhere, stated |
+| Working without notes | you cannot reconstruct your own reasoning | write as you go, not after |
+| Assuming the clock is right | the system's clock may be wrong, or attacker-set | compare against a known-good source (NTP, the DC) |
+| Copying evidence to a laptop that is not encrypted | it becomes the incident | encrypted storage, and a documented deletion date |
+
+## The one that is hardest to undo
+
+```text
+  BOOTING THE MACHINE.
+
+  A defender's first instinct, when they find something suspicious, is
+  to open it. If it is a laptop, that is the end of memory forensics.
+  If it is a domain controller, it is the end of the domain's
+  credential cache in RAM - which, via ad-02, is every user's TGT.
+
+  If you must interact with a live system before imaging it, the
+  minimum is:
+    1. photograph the screen and note the time
+    2. do NOT browse, do NOT open files, do NOT run cleanup tools
+    3. image it now, and record that the system was live and had been
+       observed before acquisition
+
+  The last point is a disclosure in the report. It is far better to
+  disclose it than to imply the image was acquired untouched.
+```
+EOF
+cat 04-pitfalls.md
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>acquire.sh</code> refuses to overwrite an existing image, hashes the<br />
+<em>source</em> and the <em>image</em> separately, deletes the image if they differ, and <code>chmod 0444</code> it. That<br />
+five-line verification is the entire difference between an exhibit and a file.</p>
+<p><strong><code>04-pitfalls.md</code></strong> names the one that's hardest to undo — booting a domain controller destroys<br />
+the domain's credential cache, which via <code>ad-02</code> is every user's TGT — and gives the minimum<br />
+discipline if someone already did it, because disclosing it beats implying the image was<br />
+untouched.</p>
+<p><strong>Record:</strong> <code>02-verification.txt</code> and <code>04-pitfalls.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the six chain-of-custody fields, and what question each exists to answer.</li>
+<li>State the order of volatility and why acquisition follows it.</li>
+<li>What do you lose in a dead acquisition, and what makes it defensible?</li>
+<li>Why is a live acquisition "never perfect", and what is the business decision that justifies it?</li>
+<li>Why is MD5 not acceptable as an evidence hash?</li>
+<li>Why is <code>icat</code> safer than mounting an image?</li>
+<li>Give the four problems with booting a suspect machine.</li>
+<li>What do you do if evidence has already been viewed before imaging?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Evidence Handling</strong> → <strong>Chain of Custody</strong> → <strong>Forensics</strong> → <strong>Incident Response</strong> →<br />
+<strong>Hashing</strong>.<br />
+<code>for-02</code> is what you do once the image is verified.</p>

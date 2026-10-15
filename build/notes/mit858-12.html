@@ -1,0 +1,342 @@
+<h1 id="network-security">Network Security</h1>
+<h2 id="summary">Summary</h2>
+<p>Lecture 12 is the bleak one. The preparation reading is <em>Security Problems in TCP/IP</em> (Bellovin,<br />
+1994), and the lecture's argument is that many of TCP/IP's design choices make secure<br />
+communication impossible without bolting on a layer above.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>IP is <strong>unauthenticated and unauthenticable</strong>: source addresses are claimed, not proven</li>
+<li><strong>TCP's three-way handshake is stateful and predictable</strong>, which is the root of its weaknesses</li>
+<li><strong>Sequence prediction</strong> enables blind injection into an established connection</li>
+<li><strong>Spoofing, smurf, source routing, ICMP redirects</strong> are all structural, not bugs</li>
+<li><strong>The DoS surface is enormous</strong>: no state means no way to distinguish friend from attacker</li>
+<li>TLS and IPsec are bolt-ons; the network below them was never designed for this</li>
+</ul>
+<h2 id="the-structural-problems">The structural problems</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>Why the design caused it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Source spoofing</td>
+<td>IP headers carry no proof of origin</td>
+</tr>
+<tr>
+<td>Blind data injection</td>
+<td>sequence numbers are guessable</td>
+</tr>
+<tr>
+<td>Smurf amplification</td>
+<td>UDP echo servers amplify small requests</td>
+</tr>
+<tr>
+<td>ICMP redirect attacks</td>
+<td>the host trusts routing messages from anyone</td>
+</tr>
+<tr>
+<td>SYN flood</td>
+<td>half-open connections consume server state</td>
+</tr>
+<tr>
+<td>Traffic analysis</td>
+<td>headers and sizes are observable even when encrypted</td>
+</tr>
+</tbody>
+</table>
+<p><strong>None of these are implementation bugs.</strong> They are consequences of a<br />
+performance-oriented design that never considered an active adversary.</p>
+<h2 id="tcp-sequence-numbers-concretely">TCP sequence numbers, concretely</h2>
+<p>A classic blind injection:</p>
+<pre><code class="language-text">1. Attacker learns the current sequence number of a connection (guess + observe)
+2. Attacker sends a forged packet with that sequence number
+3. The receiver accepts it as legitimate
+4. The attacker never sees the reply
+</code></pre>
+<p>Modern kernels randomise ISNs per connection (RFC 6528), which forces an<br />
+attacker to be on-path or to brute-force a 32-bit space. That is a mitigation,<br />
+not a fix.</p>
+<h2 id="what-fixes-what">What fixes what</h2>
+<table>
+<thead>
+<tr>
+<th>Defence</th>
+<th>Addresses</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RFC 6528 ISN randomisation</td>
+<td>blind injection</td>
+</tr>
+<tr>
+<td>TCP MD5 signatures</td>
+<td>blind injection (removed, too costly)</td>
+</tr>
+<tr>
+<td>SYN cookies</td>
+<td>SYN flood state exhaustion</td>
+</tr>
+<tr>
+<td>ingress filtering (BCP 38)</td>
+<td>source spoofing on your network</td>
+</tr>
+<tr>
+<td>egress filtering</td>
+<td>spoofing <em>from</em> your network</td>
+</tr>
+<tr>
+<td>disabling ICMP redirects</td>
+<td>redirect attacks</td>
+</tr>
+<tr>
+<td>rate limiting</td>
+<td>broad DoS</td>
+</tr>
+<tr>
+<td><strong>TLS / IPsec</strong></td>
+<td>confidentiality, integrity, authentication</td>
+</tr>
+<tr>
+<td><strong>WireGuard / Wireguard-style Noise</strong></td>
+<td>modern, simpler, audited design</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The honest conclusion:</strong> the fix for the network layer's flaws is to stop<br />
+relying on the network layer for anything and use end-to-end authenticated<br />
+encryption instead.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Source spoofing</strong></td>
+<td>Forging the IP source address</td>
+</tr>
+<tr>
+<td><strong>Sequence prediction</strong></td>
+<td>Guessing the next TCP sequence number</td>
+</tr>
+<tr>
+<td><strong>Blind injection</strong></td>
+<td>Injecting into a connection without seeing replies</td>
+</tr>
+<tr>
+<td><strong>Smurf amplification</strong></td>
+<td>Small UDP request → large flood</td>
+</tr>
+<tr>
+<td><strong>ICMP redirect</strong></td>
+<td>Message telling a host to route via another</td>
+</tr>
+<tr>
+<td><strong>SYN flood</strong></td>
+<td>Half-open connections exhausting server state</td>
+</tr>
+<tr>
+<td><strong>SYN cookies</strong></td>
+<td>Encode state in the ISN instead of a table</td>
+</tr>
+<tr>
+<td><strong>Ingress filtering</strong></td>
+<td>Dropping packets with impossible sources</td>
+</tr>
+<tr>
+<td><strong>On-path attacker</strong></td>
+<td>Someone who can see and modify your traffic</td>
+</tr>
+<tr>
+<td><strong>Off-path attacker</strong></td>
+<td>Someone who only sees one direction, or neither</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the anti-spoofing controls, on this host ---
+{
+  echo &quot;=== source address validation ===&quot;
+  # what the system considers valid sources for our traffic
+  ip route get 8.8.8.8 | sed 's/^/  /'
+  ip route get 127.0.0.1 | sed 's/^/  /'
+  echo
+  echo &quot;=== ICMP redirects accepted? (should be 0 on a host) ===&quot;
+  cat /proc/sys/net/ipv4/conf/all/accept_redirects 2&gt;/dev/null
+  cat /proc/sys/net/ipv4/conf/all/secure_redirects 2&gt;/dev/null
+  cat /proc/sys/net/ipv4/conf/all/send_redirects 2&gt;/dev/null
+  echo &quot;  (all/accept_redirects 0 = good)&quot;
+  echo
+  echo &quot;=== SYN cookie protection ===&quot;
+  echo &quot;  tcp_syncookies: $(cat /proc/sys/net/ipv4/tcp_syncookies 2&gt;/dev/null)&quot;
+  echo
+  echo &quot;=== rp_filter (reverse path filtering = ingress filter) ===&quot;
+  for f in /proc/sys/net/ipv4/conf/*/rp_filter; do
+    printf &quot;  %-44s %s\n&quot; &quot;$f&quot; &quot;$(cat $f 2&gt;/dev/null)&quot;
+  done
+} 2&gt;&amp;1 | tee 01-network-hardening.txt
+
+# --- ICMP redirect traffic, if any ---
+sudo timeout 10 tcpdump -i any -n &quot;icmp and icmp[0] == 5&quot; 2&gt;/dev/null | head -5
+echo &quot;  (type 5 = redirect)&quot;
+
+# --- is source spoofing possible from here? ---
+# Not attempted: demonstrating it needs a raw socket and an off-path vantage.
+# The RFC 6528 mitigation is what matters:
+python3 - &lt;&lt;'PY'
+import socket
+print(&quot;  RFC 6528 randomises the initial sequence number per connection.&quot;)
+print(&quot;  Without it, an off-path attacker can guess 2^32 ISNs; with it, they must&quot;)
+print(&quot;  be on-path, or observe the handshake.&quot;)
+print()
+print(&quot;  Your kernel applies it automatically:&quot;)
+import subprocess
+out = subprocess.run([&quot;sysctl&quot;,&quot;-a&quot;],capture_output=True,text=True).stdout
+for line in out.splitlines():
+    if any(k in line for k in (&quot;tcp_syncookies&quot;,&quot;rp_filter&quot;,&quot;accept_redirects&quot;,&quot;log_martians&quot;)):
+        print(&quot;   &quot;, line)
+PY
+
+# --- amplification: which services on this host would amplify? ---
+{
+  echo &quot;=== UDP services that can be abused for amplification ===&quot;
+  ss -ulnp | awk 'NR&gt;1{print &quot;  &quot;$5, $7}' | head
+  echo
+  echo &quot;  Any UDP service here is a potential amplification reflector.&quot;
+  echo &quot;  Sending to it from a spoofed source turns a small request into a large flood.&quot;
+} | tee 02-amplification.txt
+
+# --- what the network actually looks like ---
+sudo timeout 10 tcpdump -i any -n 2&gt;/dev/null | awk '{print $5}' | sort | uniq -c | sort -rn | head -8
+echo &quot;  (protocol mix on this host right now)&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> audit this machine's network-layer defences and measure what an on-path attacker<br />
+could observe.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-12 &amp;&amp; cd ~/aegis/labs/mit858-12
+
+# --- 1. the full audit ---
+{
+  echo &quot;=== TCP/IP SECURITY POSTURE ===&quot;
+  echo
+  echo &quot;-- ICMP redirects (an on-path attacker can steer traffic) --&quot;
+  for f in all default; do
+    printf &quot;  accept_redirects  %-10s %s\n&quot; &quot;$f&quot; &quot;$(cat /proc/sys/net/ipv4/conf/$f/accept_redirects 2&gt;/dev/null)&quot;
+    printf &quot;  send_redirects    %-10s %s\n&quot; &quot;$f&quot; &quot;$(cat /proc/sys/net/ipv4/conf/$f/send_redirects 2&gt;/dev/null)&quot;
+    printf &quot;  rp_filter         %-10s %s\n&quot; &quot;$f&quot; &quot;$(cat /proc/sys/net/ipv4/conf/$f/rp_filter 2&gt;/dev/null)&quot;
+  done
+  echo
+  echo &quot;-- SYN flood --&quot;
+  echo &quot;  tcp_syncookies: $(cat /proc/sys/net/ipv4/tcp_syncookies 2&gt;/dev/null)  (1 = enabled)&quot;
+  echo &quot;  tcp_max_syn_backlog: $(cat /proc/sys/net/ipv4/tcp_max_syn_backlog 2&gt;/dev/null)&quot;
+  echo &quot;  tcp_abort_on_overflow: $(cat /proc/sys/net/ipv4/tcp_abort_on_overflow 2&gt;/dev/null)&quot;
+  echo
+  echo &quot;-- martians (packets with impossible addresses, i.e. spoofing attempts) --&quot;
+  echo &quot;  log_martians: $(cat /proc/sys/net/ipv4/conf/all/log_martians 2&gt;/dev/null)&quot;
+  dmesg 2&gt;/dev/null | grep -ci martian | xargs echo &quot;  martian log lines:&quot;
+  echo
+  echo &quot;-- source address validation in effect --&quot;
+  ip route get 1.2.3.4 | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 01-posture.txt
+
+# --- 2. demonstrate the redirect setting is exploitable in principle ---
+cat &gt; 02-redirects.md &lt;&lt;'EOF'
+# Why ICMP redirects matter
+
+An ICMP redirect (type 5) tells a host: &quot;to reach network X, use router Y&quot;.
+A host that accepts them will update its routing table.
+
+An on-path attacker can therefore **reroute a victim's traffic through a
+machine the attacker controls**, without touching the victim's configuration,
+without credentials, and without breaking TLS (the connection still works —
+the attacker just proxies it).
+
+## Defence
+    net.ipv4.conf.all.accept_redirects = 0
+    net.ipv4.conf.all.secure_redirects = 0
+
+Setting it to 0 means the host ignores redirects entirely, which is correct
+for anything except a genuine router.
+
+## Related: source routing
+IP source route options were designed for diagnostics and were usable to
+bypass path ACLs. `net.ipv4.conf.all.accept_source_route = 0` disables it.
+Modern stacks drop these options; check yours rather than assume.
+EOF
+cat 02-redirects.md
+
+# --- 3. what is observable on this network, even with TLS ---
+{
+  echo &quot;=== METADATA an on-path observer sees, without decrypting anything ===&quot;
+  sudo timeout 12 tcpdump -i any -n -q 2&gt;/dev/null | head -200 &gt; /tmp/aegis-snap.txt
+  echo
+  echo &quot;  -- destination ports (which service, therefore which site class) --&quot;
+  awk '{print $3}' /tmp/aegis-snap.txt | cut -d. -f5 | sort | uniq -c | sort -rn | head -6
+  echo
+  echo &quot;  -- packet sizes and timing (traffic analysis works even on ciphertext) --&quot;
+  awk '{print &quot;packet length: &quot; $NF}' /tmp/aegis-snap.txt | sort | uniq -c | sort -rn | head -6
+  echo
+  echo &quot;  Read that again: packet SIZE and TIMING leak content structure.&quot;
+  echo &quot;  This is why TLS is not traffic-analysis resistance.&quot;
+} 2&gt;&amp;1 | tee 03-observable.txt
+
+# --- 4. the amplification question ---
+{
+  echo &quot;=== could this host be used as a reflector? ===&quot;
+  echo &quot;  UDP listeners:&quot;
+  ss -ulnp | tail -n +2 | awk '{print &quot;   &quot;, $5, $7}'
+  echo
+  echo &quot;  For each: send a small spoofed request, and it replies to the spoofed source.&quot;
+  echo &quot;  DNS (53) and NTP (123) are the classic amplifiers.&quot;
+  echo
+  echo &quot;  Mitigations are network-side (ingress filtering / BCP 38) plus&quot;
+  echo &quot;  rate limiting and disabling unnecessary UDP services.&quot;
+} | tee 04-reflector.txt
+
+# --- 5. the design argument, written out ---
+cat &gt; 05-conclusion.md &lt;&lt;'EOF'
+# The lecture's argument
+
+TCP/IP was designed for a cooperative network of a few trusted hosts, with
+performance as the primary goal. Security was not a requirement, and the
+assumptions are now all false:
+
+| Original assumption | Reality |
+|---|---|
+| hosts are cooperative | hosts are hostile |
+| networks are reliable and benign | networks are actively attacked |
+| small, homogeneous networks | the entire internet |
+| performance matters most | confidentiality and integrity matter too |
+| physical access is trusted | it is not |
+
+Bellovin's 1994 paper enumerated these; the mitigations bolted on since
+(SYN cookies, RFC 6528, ingress filtering, TLS) each address one symptom.
+
+**The architectural conclusion is not &quot;patch TCP/IP&quot;.** It is: *do not rely on
+the network layer for security at all*. Use end-to-end authenticated
+encryption (TLS 1.3, WireGuard, SSH), assume the network is hostile, and treat
+any protocol whose security depends on network-layer properties as unsafe.
+EOF
+cat 05-conclusion.md
+</code></pre>
+<p><strong>Step 3 is the uncomfortable one</strong>: you cannot decrypt it, but packet size and timing still leak<br />
+structure. That is why traffic analysis is a real attack and TLS is not a complete answer.</p>
+<p><strong>Record:</strong> <code>01-posture.txt</code> and <code>05-conclusion.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is IP source spoofing a structural problem rather than a bug?</li>
+<li>What does RFC 6528 do, and what attack does it make harder?</li>
+<li>How does an ICMP redirect attack work?</li>
+<li>What are SYN cookies and what do they prevent?</li>
+<li>Why is TLS not a defence against traffic analysis?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Classic TCP/IP Security Problems</strong> → <strong>Firewalls &amp; Filtering</strong> → <strong>IDS / IPS</strong> →<br />
+<strong>Spoofing</strong> → <strong>Egress Filtering</strong> → <strong>IPv6</strong>.</p>

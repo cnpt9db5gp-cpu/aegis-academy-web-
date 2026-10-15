@@ -1,0 +1,288 @@
+<h1 id="exploitation-and-mitigations">Exploitation and Mitigations</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161's exploitation lecture takes the bugs from the previous lecture and asks a precise<br />
+question: given a vulnerability and a set of mitigations, <strong>what can an attacker actually do?</strong><br />
+The answer is a chain, and the chain's shape is determined by the mitigations present.</p>
+<blockquote>
+<p>Companion to <code>ex-01</code>..<code>ex-06</code> and <code>mit858-04</code>. This note is the reasoning<br />
+about chain construction; those are the mechanics.</p>
+</blockquote>
+<h2 id="the-modern-exploit-chain">The modern exploit chain</h2>
+<pre><code class="language-text">  1. FIND         a memory-corruption bug
+  2. LEAK         defeat ASLR / PIE / canary
+  3. CONTROL      choose what the corrupted pointer points at
+  4. EXECUTE      achieve the primitive you need
+  5. ESCALATE     turn it into privilege or data access
+</code></pre>
+<p>Every step after 1 exists because a mitigation blocked the previous shortcut.<br />
+Modern exploits are long because mitigations are layered.</p>
+<h2 id="choosing-the-primitive">Choosing the primitive</h2>
+<table>
+<thead>
+<tr>
+<th>You control</th>
+<th>Primitive</th>
+<th>Achieves</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A return address</td>
+<td>ROP chain</td>
+<td>Arbitrary code execution from existing gadgets</td>
+</tr>
+<tr>
+<td>A function pointer</td>
+<td>Call to a chosen address</td>
+<td>Execution</td>
+</tr>
+<tr>
+<td><code>format string</code></td>
+<td>Arbitrary read, then <code>%n</code> write</td>
+<td>Read/write primitives</td>
+</tr>
+<tr>
+<td>An uninitialised buffer</td>
+<td>Information disclosure</td>
+<td>ASLR bypass</td>
+</tr>
+<tr>
+<td>Heap metadata</td>
+<td>Write-what-where</td>
+<td>Arbitrary write</td>
+</tr>
+</tbody>
+</table>
+<p>The primitive determines the technique. Mitigations do not change what you<br />
+control; they change how you use it.</p>
+<h2 id="mitigations-restated-as-constraints">Mitigations, restated as constraints</h2>
+<table>
+<thead>
+<tr>
+<th>Mitigation</th>
+<th>Constraint it imposes</th>
+<th>Workaround</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Canary</td>
+<td>You cannot write past the canary without corrupting it</td>
+<td>Leak it first</td>
+</tr>
+<tr>
+<td>NX</td>
+<td>Stack/heap are not executable</td>
+<td>ROP, ret2libc, or jump to executable memory</td>
+</tr>
+<tr>
+<td>PIE + ASLR</td>
+<td>Code addresses are unknown</td>
+<td>Leak a code or libc pointer</td>
+</tr>
+<tr>
+<td>Full RELRO</td>
+<td>GOT is read-only</td>
+<td>Function pointers, hooks, FSOP</td>
+</tr>
+<tr>
+<td>Safe functions</td>
+<td>No unbounded copies</td>
+<td>Find a different function</td>
+</tr>
+<tr>
+<td>CET / shadow stack</td>
+<td>Return addresses are checked against a shadow copy</td>
+<td>Need a write to the shadow stack</td>
+</tr>
+</tbody>
+</table>
+<h2 id="why-shadow-stacks-are-interesting">Why shadow stacks are interesting</h2>
+<p>CET adds a <strong>shadow stack</strong>: a separate, hardware-protected copy of the return<br />
+addresses. <code>ret</code> must match it, so a corrupted <code>rsp</code> is caught.</p>
+<p><strong>Consequence:</strong> classic stack smashing stops working even with every other<br />
+mitigation bypassed. The attacker must instead find a way to write to the<br />
+shadow stack — which is where ROP's gadget requirements change and where<br />
+JOP/SROP become relevant.</p>
+<p><strong>This is the current state of the arms race</strong>, and it is why the "just spray<br />
+the stack" era is over.</p>
+<h2 id="what-cs161-expects-you-to-reason-about">What CS161 expects you to reason about</h2>
+<p>Given a binary and an attacker capability, produce:</p>
+<ol>
+<li>The bug class and its location</li>
+<li>What the attacker can corrupt</li>
+<li>Which mitigations must be defeated, and in what order</li>
+<li>The information leak needed</li>
+<li>The primitive that becomes available</li>
+<li>What is still <em>not</em> possible even after that</li>
+</ol>
+<p>Step 6 is the one students skip. There is almost always a step 6.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Exploit chain</strong></td>
+<td>The full sequence from bug to objective</td>
+</tr>
+<tr>
+<td><strong>Primitive</strong></td>
+<td>A capability gained from corruption</td>
+</tr>
+<tr>
+<td><strong>Arbitrary read / write</strong></td>
+<td>Read/write any address</td>
+</tr>
+<tr>
+<td><strong>ROP</strong></td>
+<td>Chain of <code>ret</code>-terminated gadgets</td>
+</tr>
+<tr>
+<td><strong>ret2libc</strong></td>
+<td>Call libc functions, no injected code</td>
+</tr>
+<tr>
+<td><strong>Shadow stack / CET</strong></td>
+<td>Hardware-protected copy of return addresses</td>
+</tr>
+<tr>
+<td><strong>JOP</strong></td>
+<td>Dispatch through a gadget table</td>
+</tr>
+<tr>
+<td><strong>SROP</strong></td>
+<td>Forge a signal frame to control all registers</td>
+</tr>
+<tr>
+<td><strong>ASLR bypass</strong></td>
+<td>Leaking a base address</td>
+</tr>
+<tr>
+<td><strong>Mitigation bypass</strong></td>
+<td>Defeating one specific control</td>
+</tr>
+<tr>
+<td><strong>Exploitability</strong></td>
+<td>Whether a bug is reliably exploitable, given mitigations</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the decision procedure, applied to a binary ---
+cat &gt; triage.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Given a binary and a corruption primitive, what is the chain?
+B=&quot;${1:?usage: ./triage.sh ./binary &lt;primitive&gt;}&quot;
+P=&quot;${2:-return address}&quot;
+echo &quot;=== BUG CLASS AND PRIMITIVE ===&quot;
+printf &quot;  binary   : %s\n&quot; &quot;$B&quot;
+printf &quot;  primitive: %s\n&quot; &quot;$P&quot;
+echo
+echo &quot;=== PROTECTIONS PRESENT (these set the constraints) ===&quot;
+checksec --file=&quot;$B&quot; 2&gt;/dev/null | grep -E &quot;canary|NX|PIE|RELRO|Fortify|Shadow&quot; | sed 's/^/  /'
+echo
+echo &quot;=== CHAIN THIS IMPLIES ===&quot;
+NXC=$(checksec --file=&quot;$B&quot; 2&gt;/dev/null | grep -c &quot;NX disabled&quot;)
+PIEC=$(checksec --file=&quot;$B&quot; 2&gt;/dev/null | grep -c &quot;No PIE&quot;)
+CANC=$(checksec --file=&quot;$B&quot; 2&gt;/dev/null | grep -ci &quot;canary: found&quot;)
+SHADOW=$(checksec --file=&quot;$B&quot; 2&gt;/dev/null | grep -ci &quot;shadow&quot;)
+[ &quot;$CANC&quot; -gt 0 ] &amp;&amp; echo &quot;  1. canary present  -&gt; leak it (over-read or format string)&quot;
+[ &quot;$PIEC&quot; -eq 0 ] &amp;&amp; echo &quot;  2. PIE + ASLR      -&gt; leak a code or libc address&quot;
+[ &quot;$NXC&quot; -eq 0 ] &amp;&amp; echo &quot;  3. NX enabled      -&gt; ROP / ret2libc, no stack shellcode&quot;
+echo &quot;  4. primitive        : $P&quot;
+if [ &quot;$SHADOW&quot; -gt 0 ]; then
+  echo &quot;  5. SHADOW STACK     -&gt; classic ret2libc will abort; need a write to the shadow stack&quot;
+else
+  echo &quot;  5. execute          -&gt; ROP chain into libc&quot;
+fi
+echo &quot;  6. STILL NOT POSSIBLE:&quot;
+echo &quot;       - without a leak, no address is known&quot;
+echo &quot;       - heap primitives are usually a separate leak-then-write chain&quot;
+echo &quot;       - kernel privileges need a separate escalation entirely&quot;
+EOF
+chmod +x triage.sh
+
+cat &gt; target.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+void win(void) { write(1, &quot;win\n&quot;, 4); }
+void vuln(void) { char b[48]; read(0, b, 200); }
+int main(void) { vuln(); return 0; }
+EOF
+gcc -g -O0 -fno-stack-protector -no-pie -z execstack target.c -o target-weak
+gcc -g -O0 -fstack-protector-strong -pie -fPIE target.c -o target-hard
+
+./triage.sh ./target-weak &quot;return address&quot; | tee 01-triage.txt
+echo
+./triage.sh ./target-hard &quot;return address&quot; | tee -a 01-triage.txt
+
+# --- measure what each mitigation actually costs ---
+echo
+echo &quot;=== the performance cost of hardening, measured ===&quot;
+{
+  printf &quot;  %-28s %s\n&quot; &quot;binary&quot; &quot;startup&quot;
+  for b in target-weak target-hard; do
+    t=$( { /usr/bin/time -f &quot;%e&quot; ./$b &lt;/dev/null &gt;/dev/null; } 2&gt;&amp;1 )
+    printf &quot;  %-28s %s s\n&quot; &quot;$b&quot; &quot;$t&quot;
+  done
+  echo
+  echo &quot;  In practice: canaries ~1%, PIE ~0%, RELRO ~0%, shadow stacks 1-5%.&quot;
+  echo &quot;  The cost is low. The reason it is not universal is historical,&quot;
+  echo &quot;  not economic - except for microsecond-critical code paths.&quot;
+}
+
+# --- shadow stack availability on this machine ---
+echo
+echo &quot;=== CET / shadow stack support here ===&quot;
+grep -oE &quot;shadow_stack|ibt|user_shstk&quot; /proc/cpuinfo | sort -u | sed 's/^/  /' || echo &quot;  no CET flags&quot;
+command -v gcc &amp;&amp; gcc -Q --help=common 2&gt;/dev/null | grep -E &quot;cf-protection|mshstk&quot; | head -3 | sed 's/^/  /'
+
+# --- the four steps, each demonstrated ---
+echo
+echo &quot;=== step 2: the leak, in isolation ===&quot;
+cat &gt; leak.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+int main(void) {
+    char b[128];
+    read(0, b, sizeof(b));       /* over-read, no write: no abort */
+    write(1, b, sizeof(b));      /* print whatever follows, including the canary */
+    return 0;
+}
+EOF
+gcc -g -O0 -fstack-protector leak.c -o leak
+python3 - &lt;&lt;'PY' | tee 02-leak.txt
+import subprocess, struct
+r = subprocess.run([&quot;./leak&quot;], input=b&quot;A&quot;*72, capture_output=True, timeout=5)
+out = r.stdout
+print(f&quot;  sent 72 bytes, received {len(out)} bytes back&quot;)
+if len(out) &gt; 72:
+    canary = out[72:80]
+    print(f&quot;  bytes 72-80 (the canary): {canary.hex()}&quot;)
+    print(f&quot;  as a qword            : {struct.unpack('&lt;Q', canary)[0]:#018x}&quot;)
+    print(f&quot;  low byte              : {canary[0]:#04x}  (0x00 == a real canary)&quot;)
+PY
+rm -f leak.c leak
+</code></pre>
+<p><strong>Step 1 is the deliverable</strong>: <code>triage.sh</code> turns a binary plus a primitive into the specific<br />
+chain required, including the step that is <em>still not possible</em>. That script is reusable on any<br />
+assessment.</p>
+<p><strong>Record:</strong> <code>01-triage.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the five steps of a modern exploit chain.</li>
+<li>Which mitigation does a <code>format string</code> bug bypass, and how?</li>
+<li>What does Full RELRO prevent you from overwriting, and what are three alternatives?</li>
+<li>What is a shadow stack, and why does it break classic ret2libc?</li>
+<li>What is a technique you still cannot use <em>after</em> defeating everything?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Exploit Mitigation Audit</strong> → <strong>ROP</strong> → <strong>Info Leak</strong> → <strong>Shadow Stack / CET</strong> →<br />
+<strong>SROP</strong> → <strong>Heap Exploitation</strong>.<br />
+<code>ex-01</code>..<code>ex-06</code> is the hands-on companion.</p>

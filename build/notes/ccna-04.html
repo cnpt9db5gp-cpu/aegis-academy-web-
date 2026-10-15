@@ -1,0 +1,206 @@
+<h1 id="routers-the-default-gateway-and-routing-tables">Routers, the Default Gateway and Routing Tables</h1>
+<h2 id="summary">Summary</h2>
+<p>A router moves packets between different networks using a <strong>longest-prefix match</strong> against its<br />
+routing table. Understanding the lookup, and the fact that routers strip Layer 2 and rebuild it at<br />
+each hop, explains why L2 attacks stay inside a segment and L3 attacks can cross the internet.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li>Default route (0.0.0.0/0) is the fallback when nothing more specific matches</li>
+<li><strong>Longest prefix wins</strong> — this is the entire routing algorithm</li>
+<li>At each hop: L2 frame is removed, TTL decremented, L3 header consulted, new frame built</li>
+<li><strong>TTL</strong> is why traceroute works: increment it until the packet expires</li>
+<li>Default gateway = the router's interface on <em>your</em> subnet</li>
+<li>Routing tables are read from: <code>ip route</code>, <code>route -n</code>, and on the target <code>/proc/net/route</code></li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Router</strong></td>
+<td>Layer 3 forwarder between networks</td>
+</tr>
+<tr>
+<td><strong>Routing table</strong></td>
+<td>Destinations → next hop → interface</td>
+</tr>
+<tr>
+<td><strong>Default route</strong></td>
+<td>0.0.0.0/0, the catch-all</td>
+</tr>
+<tr>
+<td><strong>Longest prefix match</strong></td>
+<td>Most specific matching route wins</td>
+</tr>
+<tr>
+<td><strong>Next hop</strong></td>
+<td>Where the packet goes next</td>
+</tr>
+<tr>
+<td><strong>TTL</strong></td>
+<td>Hop limit, decremented per router</td>
+</tr>
+<tr>
+<td><strong>Gateway</strong></td>
+<td>Default gateway on your subnet</td>
+</tr>
+<tr>
+<td><strong>Metric</strong></td>
+<td>Preference between equal-length routes</td>
+</tr>
+<tr>
+<td><strong>Hop</strong></td>
+<td>One router traversal</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">ip route
+ip route get 8.8.8.8
+ip route get 192.168.56.101
+cat /proc/net/route
+route -n 2&gt;/dev/null || true
+
+# the default gateway and how to reach it
+ip route | awk '/default/{print &quot;  gw:&quot;, $3}'
+ping -c1 &quot;$(ip route | awk '/default/{print $3}')&quot; 2&gt;/dev/null
+
+# traceroute, TTL in action
+which traceroute tracepath
+traceroute -n -m 5 1.1.1.1 2&gt;/dev/null || tracepath -n 1.1.1.1 2&gt;/dev/null
+# hop-by-hop on your own network
+traceroute -n 192.168.56.101 2&gt;/dev/null | head -3
+
+# TTL by hand in python, no root needed
+python3 - &lt;&lt;'PY'
+import socket, struct
+def ttl_probe(dst, ttl):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
+    s.settimeout(1.0)
+    try:
+        s.sendto(b&quot;aegis&quot;, (dst, 33434)); s.recv(1024); return &quot;*&quot;
+    except socket.timeout: return &quot;timeout&quot;
+    except OSError: return &quot;unreachable&quot;
+    finally: s.close()
+print(&quot;  host            TTL=1  TTL=2  TTL=3&quot;)
+print(f&quot;  192.168.56.1    {ttl_probe('192.168.56.1',1)}    {ttl_probe('192.168.56.1',2)}    {ttl_probe('192.168.56.1',3)}&quot;)
+PY
+
+# what routes exist for a target (the question an attacker asks first)
+ip route get 192.168.56.101
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read a real routing table, prove longest-prefix match, and trace a path.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ccna-04 &amp;&amp; cd ~/aegis/labs/ccna-04
+
+# --- 1. the tables ---
+{
+  echo &quot;=== ip route ===&quot;
+  ip route
+  echo
+  echo &quot;=== /proc/net/route (kernel's copy) ===&quot;
+  cat /proc/net/route
+  echo
+  echo &quot;=== IPv6 routes ===&quot;
+  ip -6 route 2&gt;/dev/null | head
+} 2&gt;&amp;1 | tee 01-routes.txt
+
+# --- 2. longest prefix match, demonstrated ---
+python3 - &lt;&lt;'PY' | tee 02-lpm.txt
+import ipaddress
+
+TABLE = [
+    (&quot;0.0.0.0/0&quot;,        &quot;10.0.0.1&quot;),       # default
+    (&quot;192.168.56.0/24&quot;,  &quot;192.168.56.1&quot;),   # specific
+    (&quot;192.168.56.128/25&quot;,&quot;192.168.56.129&quot;), # MORE specific
+    (&quot;192.168.56.64/26&quot;, &quot;192.168.56.65&quot;),
+]
+
+def lookup(dst):
+    a = ipaddress.ip_address(dst)
+    best = None
+    for cidr, nh in TABLE:
+        n = ipaddress.ip_network(cidr)
+        if a in n:
+            if best is None or n.prefixlen &gt; best[0].prefixlen:
+                best = (n, nh)
+    return best
+
+for dst in [&quot;8.8.8.8&quot;, &quot;192.168.56.1&quot;, &quot;192.168.56.200&quot;, &quot;192.168.56.130&quot;, &quot;192.168.56.70&quot;]:
+    r = lookup(dst)
+    print(f&quot;  {dst:&lt;18} -&gt; via {r[1]:&lt;16} (matched {r[0]})&quot;)
+print()
+print(&quot;Note 192.168.56.200 uses the /25, not the /24. Longest prefix wins.&quot;)
+PY
+
+# --- 3. your own path to a destination ---
+{
+  echo &quot;=== route the kernel would use ===&quot;
+  for d in 127.0.0.1 192.168.56.101 8.8.8.8; do
+    echo &quot;  --- $d ---&quot;
+    ip route get $d 2&gt;/dev/null | sed 's/^/    /'
+  done
+} 2&gt;&amp;1 | tee -a 02-lpm.txt
+
+# --- 4. traceroute, and reading its output ---
+echo
+echo &quot;=== traceroute to the gateway (1 hop expected) ===&quot;
+traceroute -n -m 2 &quot;$(ip route | awk '/default/{print $3}')&quot; 2&gt;/dev/null | head -5
+echo
+echo &quot;=== traceroute further out ===&quot;
+traceroute -n -m 6 1.1.1.1 2&gt;/dev/null | head -8 || \
+  echo &quot;  (no outbound route - expected if you are isolated; run against your lab instead)&quot;
+echo
+echo &quot;Read: each line is one router. * means it did not reply (it dropped or filtered ICMP).&quot;
+
+# --- 5. a TTL probe loop, no traceroute needed ---
+python3 - &lt;&lt;'PY' | tee 03-ttl-probe.txt
+import socket
+def probe(dst, ttl):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.8)
+    try:
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
+        s.sendto(b&quot;\x00\x00\x00\x00&quot;, (dst, 33434))
+        s.recv(1024); return &quot;reply&quot;
+    except socket.timeout: return &quot;*&quot;
+    except OSError: return &quot;!&quot;
+    finally: s.close()
+print(&quot;  TTL:  &quot; + &quot;  &quot;.join(f&quot;{t:&gt;4}&quot; for t in range(1, 9)))
+print(&quot;  path: &quot; + &quot;  &quot;.join(f&quot;{probe('192.168.56.1', t):&gt;4}&quot; for t in range(1, 9)))
+print(&quot;  A star means a router decremented TTL to 0 and sent an ICMP time-exceeded back.&quot;)
+PY
+
+# --- 4. why this matters for an assessment ---
+cat &gt; 04-notes.md &lt;&lt;'EOF'
+# Routing observations
+
+- My default gateway: ___
+- My networks: ___
+- Loopback is a /8 on lo, and is never routed
+- Routers rebuild the L2 frame at every hop, so L2 attacks (ARP) cannot cross a router
+- TTL decrements per hop, which is the entire basis of traceroute AND of hop-count fingerprinting
+EOF
+cat 04-notes.md
+</code></pre>
+<p><strong>Step 2 is the concept that causes the most real-world mistakes.</strong> A route list that looks right<br />
+can still send traffic somewhere unexpected if a more specific route exists. Always check with<br />
+<code>ip route get &lt;target&gt;</code>, never by reading the table alone.</p>
+<p><strong>Record:</strong> <code>02-lpm.txt</code> and <code>03-ttl-probe.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is longest-prefix match, and why does it exist?</li>
+<li>Why can an ARP spoof not work across a router?</li>
+<li>What does the kernel do to the TTL at each hop?</li>
+<li>How does a firewall prevent traceroute from showing you the full path?</li>
+<li>Why is <code>ip route get</code> more reliable than reading <code>ip route</code>?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Routing</strong> → <strong>Hop-by-Hop</strong> → <strong>TTL</strong> → <strong>Traceroute</strong> → <strong>NAT</strong> → <strong>Segmentation</strong> →<br />
+<strong>Firewalls &amp; Filtering</strong>.</p>

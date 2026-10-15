@@ -1,0 +1,282 @@
+<h1 id="cryptography-i-introduction-ind-cpa">Cryptography I: Introduction, IND-CPA</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161's crypto block starts where MIT 6.858's does: with a <strong>definition</strong>. Before you can say<br />
+an encryption scheme is secure, you must write down what "secure" means and prove the scheme<br />
+achieves it.</p>
+<blockquote>
+<p>Companion to <code>cry-01</code>..<code>cry-07</code> and <code>mit858-13</code>. This note is the formal<br />
+foundation; those are the practical applications.</p>
+</blockquote>
+<h2 id="semantic-security-ind-cpa">Semantic security (IND-CPA)</h2>
+<p>The definition that replaced "the ciphertext looks random":</p>
+<pre><code class="language-text">An encryption scheme is IND-CPA secure if, for any PPT adversary A:
+
+  1.  A submits two messages m0, m1
+  2.  A receives Enc(k, m_b) for a uniformly random b ∈ {0,1}
+  3.  A outputs b'
+
+  Adv_A = |Pr[b' = b] - 1/2|
+
+  A is broken if Adv_A is non-negligible (&gt; 1/poly(λ) for some polynomial)
+</code></pre>
+<p><strong>The intuition:</strong> an eavesdropper learns <em>nothing</em> about which of two<br />
+messages was encrypted. Not "the plaintext is hard to recover" — nothing at<br />
+all, not even partial information.</p>
+<p><strong>Why it matters:</strong> IND-CPA rules out every cipher that leaks <em>any</em> function<br />
+of the plaintext. ECB fails it visibly. A stream cipher with a reused nonce<br />
+fails it catastrophically. XOR with a fixed pad fails it trivially.</p>
+<h2 id="what-the-definition-rules-out-concretely">What the definition rules out, concretely</h2>
+<table>
+<thead>
+<tr>
+<th>Scheme</th>
+<th>Why it fails IND-CPA</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One-time pad with a random pad</td>
+<td>passes — the only classical scheme that does</td>
+</tr>
+<tr>
+<td>XOR with a fixed key</td>
+<td>identical ciphertexts for identical plaintexts</td>
+</tr>
+<tr>
+<td>ECB mode</td>
+<td>block patterns are visible in the ciphertext</td>
+</tr>
+<tr>
+<td>AES-CBC with a fixed IV</td>
+<td>first block is deterministic</td>
+</tr>
+<tr>
+<td>AES-CTR/GCM with a reused nonce</td>
+<td>keystream reuse reveals the XOR of plaintexts</td>
+</tr>
+<tr>
+<td>"Encrypt with a hash of the password"</td>
+<td>deterministic, so equal plaintexts match</td>
+</tr>
+</tbody>
+</table>
+<h2 id="randomness-the-hidden-requirement">Randomness: the hidden requirement</h2>
+<pre><code class="language-text">IND-CPA needs:
+  - a fresh, uniform, secret nonce for every message
+  - nonce uniqueness across ALL messages under a key
+  - the nonce to be transmitted (it need not be secret)
+</code></pre>
+<p>Nonce reuse is the most common crypto failure in practice, because it is a<br />
+randomness <em>management</em> problem rather than an algorithmic one. It is<br />
+<code>nonce-reuse</code> and <code>asrep-roasting</code> in Tier 5, and it is <code>weak-rng</code> in every CTF.</p>
+<h2 id="hash-functions-the-security-you-are-buying">Hash functions: the security you are buying</h2>
+<p>A hash function for security must have:</p>
+<ul>
+<li><strong>Preimage resistance</strong>: given h(x), finding x is hard</li>
+<li><strong>Second-preimage resistance</strong>: given x, finding y ≠ x with h(y) = h(x) is hard</li>
+<li><strong>Collision resistance</strong>: finding any x ≠ y with h(x) = h(y) is hard</li>
+</ul>
+<p><strong>Collision resistance is strictly stronger than second-preimage resistance</strong>,<br />
+and MD5 and SHA-1 are broken for collisions while remaining second-preimage<br />
+resistant. That is exactly why signature schemes break (they need collisions)<br />
+while password hashes survive (they do not).</p>
+<table>
+<thead>
+<tr>
+<th>Use</th>
+<th>Requirement</th>
+<th>Broken by collisions?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Digital signature</td>
+<td>collision resistance</td>
+<td><strong>yes</strong> — SHA-1/MD5 fail</td>
+</tr>
+<tr>
+<td>Content commitment (git)</td>
+<td>collision resistance</td>
+<td><strong>yes</strong></td>
+</tr>
+<tr>
+<td>Password storage</td>
+<td>preimage resistance + slowness</td>
+<td>no — still fine</td>
+</tr>
+<tr>
+<td>Session/token id</td>
+<td>preimage resistance</td>
+<td>no</td>
+</tr>
+</tbody>
+</table>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>IND-CPA</strong></td>
+<td>Indistinguishability under chosen-plaintext attack</td>
+</tr>
+<tr>
+<td><strong>Semantic security</strong></td>
+<td>Ciphertext reveals no information about the plaintext</td>
+</tr>
+<tr>
+<td><strong>Non-negligible</strong></td>
+<td>Larger than any inverse polynomial in the security parameter</td>
+</tr>
+<tr>
+<td><strong>PPT adversary</strong></td>
+<td>Probabilistic polynomial time</td>
+</tr>
+<tr>
+<td><strong>Nonce</strong></td>
+<td>Unique per message; must be transmitted, need not be secret</td>
+</tr>
+<tr>
+<td><strong>Nonce reuse</strong></td>
+<td>Catastrophic for stream/CTR modes</td>
+</tr>
+<tr>
+<td><strong>Preimage resistance</strong></td>
+<td>Cannot reverse the hash</td>
+</tr>
+<tr>
+<td><strong>Second-preimage</strong></td>
+<td>Cannot find a second input with the same hash</td>
+</tr>
+<tr>
+<td><strong>Collision resistance</strong></td>
+<td>Cannot find any pair with the same hash</td>
+</tr>
+<tr>
+<td><strong>Symmetric / asymmetric</strong></td>
+<td>One shared key / a key pair</td>
+</tr>
+<tr>
+<td><strong>Perfect secrecy</strong></td>
+<td>One-time pad: ciphertext gives zero information, unconditionally</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- IND-CPA, demonstrated: ECB leaks structure ---
+python3 - &lt;&lt;'PY' | tee 01-ecb-leak.txt
+import os, collections
+# Encrypt the same 16-byte block twice under ECB
+key = os.urandom(16)
+def ecb_block(b, k):
+    # stand-in for AES-ECB
+    return bytes(a ^ c for a, c in zip(b, k))
+plain = b&quot;ATTACKATDAWNXX&quot; * 4
+ct = b&quot;&quot;.join(ecb_block(plain[i:i+16], key) for i in range(0, len(plain), 16))
+counts = collections.Counter(ct[i:i+16] for i in range(0, len(ct), 16))
+print(&quot;  distinct 16-byte ciphertext blocks in the input:&quot;,
+      len(set(plain[i:i+16] for i in range(0, len(plain), 16))))
+print(&quot;  distinct 16-byte ciphertext blocks in the output:&quot;, len(counts))
+print()
+print(&quot;  ECB preserves equality of plaintexts. IND-CPA requires that it does not.&quot;)
+for block, n in counts.items():
+    if n &gt; 1:
+        print(f&quot;    block repeated {n}x: {block.hex()}&quot;)
+PY
+cat 01-ecb-leak.txt
+
+# --- nonce reuse is catastrophic ---
+python3 - &lt;&lt;'PY' | tee 02-nonce-reuse.txt
+import os
+k = os.urandom(32)
+c1 = os.urandom(32); c2 = os.urandom(32)
+def ctr(key, nonce, pt): return bytes(a ^ b ^ c for a,b,c in zip(key, nonce, pt))
+m1 = b&quot;transfer 0100 to alice&quot;
+m2 = b&quot;transfer 9900 to mallory&quot;
+# same key, SAME nonce - the bug
+x1 = ctr(k, c1, m1); x2 = ctr(k, c1, m2)
+xored = bytes(a ^ b for a, b in zip(x1, x2))
+m1x = bytes(a ^ b for a, b in zip(m1, m2))
+print(&quot;  m1 XOR m2 :&quot;, m1x.decode(errors='replace'))
+print(&quot;  c1 XOR c2 :&quot;, xored.decode(errors='replace'))
+print()
+print(&quot;  IDENTICAL:&quot;, xored == m1x)
+print()
+print(&quot;  Reusing a nonce under one key gives the attacker the XOR of every&quot;)
+print(&quot;  plaintext pair. Ciphers like this are a one-time pad: recover one&quot;)
+print(&quot;  message and every other message falls.&quot;)
+PY
+cat 02-nonce-reuse.txt
+
+# --- collision vs preimage: which use case cares? ---
+python3 - &lt;&lt;'PY' | tee 03-hash-levels.txt
+import hashlib
+def show(name, data=b&quot;aegis&quot;):
+    for h, lbl in ((hashlib.md5, &quot;md5&quot;), (hashlib.sha1, &quot;sha1&quot;),
+                   (hashlib.sha256, &quot;sha256&quot;)):
+        d = h(data).hexdigest()
+        print(f&quot;  {name:&lt;14} {lbl:&lt;7} {d}&quot;)
+for n in (&quot;aegis&quot;, &quot;aegis &quot;):
+    show(f&quot;input {n!r}&quot;, n.encode())
+print()
+print(&quot;  MD5/SHA-1: COLLISION broken (two different inputs, same hash).&quot;)
+print(&quot;  SHA-256:   collision resistance intact, preimage resistance intact.&quot;)
+print(&quot;  Consequences:&quot;)
+print(&quot;    signatures over MD5/SHA-1 : FORGERY is realistic&quot;)
+print(&quot;    password hashes with MD5  : still 'fine' for preimage, terrible for speed&quot;)
+print(&quot;    git with SHA-1            : two files can share an id -&gt; history rewriting&quot;)
+PY
+cat 03-hash-levels.txt
+
+# --- hash identification, the operational skill ---
+hashid --identify /dev/null 2&gt;/dev/null || echo &quot;  (hashid: pipx install hashid)&quot;
+python3 -c &quot;
+import hashlib
+data = b'aegis-test'
+for name in ('md5','sha1','sha256','sha512'):
+    h = getattr(hashlib, name)(data).hexdigest()
+    print(f'  {name:&lt;7} {h}')&quot;
+echo &quot;  Identify a hash from its format before choosing a cracking mode.&quot;
+
+# --- randomness quality, which everything rests on ---
+python3 - &lt;&lt;'PY' | tee 04-randomness.txt
+import os, secrets, collections
+# 1. a bad RNG (predictable seed)
+import random
+r1 = random.Random(1337)
+print(&quot;  seeded random (predictable):&quot;, [r1.randint(0,100) for _ in range(8)])
+print(&quot;  /dev/urandom               :&quot;, [secrets.randbelow(101) for _ in range(8)])
+print()
+print(&quot;  Nonces, session IDs and keys must come from the OS CSPRNG.&quot;)
+print(&quot;  A seeded Mersenne Twister is fine for shuffling a test fixture and&quot;)
+print(&quot;  catastrophic for generating a nonce.&quot;)
+print()
+# entropy sanity
+b = os.urandom(4096)
+counts = collections.Counter(b)
+import math
+H = -sum((c/4096)*math.log2(c/4096) for c in counts.values())
+print(f&quot;  entropy of 4096 bytes from /dev/urandom: {H:.3f} bits/byte (max 8.0)&quot;)
+PY
+cat 04-randomness.txt
+</code></pre>
+<p><strong>Step 2 is the crypto lesson in four lines</strong>: nonce reuse under one key recovers the XOR of<br />
+every plaintext pair. That single bug explains Kerberoasting, ECB leaks, and a large share of CTF<br />
+challenges.</p>
+<p><strong>Record:</strong> <code>02-nonce-reuse.txt</code> and <code>03-hash-levels.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>State the IND-CPA definition precisely.</li>
+<li>Why does AES-ECB fail IND-CPA, and what does the failure look like on the wire?</li>
+<li>What does nonce reuse leak, and why is it not fixable by using a better cipher?</li>
+<li>Which hash property does a digital signature require, and which does a password hash?</li>
+<li>Why is <code>random.seed(1337)</code> acceptable in a test fixture and unacceptable for a nonce?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Symmetric Encryption</strong> → <strong>Modes of Operation</strong> → <strong>Hash Function</strong> → <strong>Collision Attack</strong> →<br />
+<strong>Entropy &amp; RNGs</strong> → <strong>Nonce</strong>.<br />
+<code>mit858-13</code> covers what secure channels do with all of this.</p>

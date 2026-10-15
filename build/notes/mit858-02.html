@@ -1,0 +1,268 @@
+<h1 id="security-architecture">Security Architecture</h1>
+<h2 id="summary">Summary</h2>
+<p>Lecture 2 covers the structural question: <strong>where do you put the trust boundary, and how do you<br />
+make the trusted part small enough to audit?</strong></p>
+<p>The answer the lecture develops is privilege separation — splitting a large untrusted program<br />
+into a small trusted monitor plus a large unprivileged userland.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Minimize the trusted computing base</strong>: everything that must be correct for security to hold</li>
+<li><strong>Privilege separation</strong>: split into a small privileged monitor and untrusted userland</li>
+<li><strong>Application-level vs OS-level</strong>: Linux namespaces, chroot, VMs are different layers of the<br />
+  same idea</li>
+<li><strong>Security vs reliability</strong>: privileged code must be simple, because it cannot recover</li>
+<li><strong>Sandboxing</strong>: restrict a process without trusting it</li>
+<li><strong>Reference monitors</strong>: the component that mediates every privileged operation</li>
+</ul>
+<h2 id="the-privilege-separation-pattern">The privilege separation pattern</h2>
+<pre><code class="language-text">   ┌──────────────────────────────┐
+   │  unprivileged userland       │  large, complex, crashable
+   │  parser, renderer, network   │  bugs here are survivable
+   └───────────┬──────────────────┘
+               │ narrow IPC (a few messages, validated)
+   ┌───────────┴──────────────────┐
+   │  trusted monitor (privileged)│  small, simple, auditable
+   └──────────────────────────────┘
+</code></pre>
+<p><strong>Why it works:</strong> a bug in the large component costs you the large component,<br />
+not the system. The small component is small enough to read in an afternoon.</p>
+<h2 id="three-layers-of-the-same-idea">Three layers of the same idea</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Boundary strength</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Process</td>
+<td>Unix user/uid, file permissions</td>
+<td>strong, but same kernel</td>
+</tr>
+<tr>
+<td>Container</td>
+<td>namespaces, cgroups, seccomp</td>
+<td>weak: shares the kernel</td>
+</tr>
+<tr>
+<td>VM / enclave</td>
+<td>hypervisor, hardware</td>
+<td>strong: different kernel</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Each step up is stronger and more expensive.</strong> This is <code>isolation-mechanisms</code><br />
+and the VM discussion in <code>os-05</code>.</p>
+<h2 id="the-economics">The economics</h2>
+<ul>
+<li>A small trusted component can be <strong>reviewed</strong> — and reviews find bugs</li>
+<li>A small trusted component has <strong>fewer dependencies</strong></li>
+<li>A small trusted component has <strong>fewer lines</strong>, so fewer opportunities</li>
+<li>The cost: extra IPC, complexity, and performance overhead</li>
+</ul>
+<p><code>Google's site isolation</code> and <code>Chrome's sandbox</code> are the industry version of this.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Trusted computing base (TCB)</strong></td>
+<td>Everything that must be correct</td>
+</tr>
+<tr>
+<td><strong>Privilege separation</strong></td>
+<td>Trusted monitor + untrusted userland</td>
+</tr>
+<tr>
+<td><strong>Reference monitor</strong></td>
+<td>The mediator between subjects and objects</td>
+</tr>
+<tr>
+<td><strong>Sandboxing</strong></td>
+<td>Confining a process's capabilities</td>
+</tr>
+<tr>
+<td><strong>chroot / jail</strong></td>
+<td>Filesystem-level confinement</td>
+</tr>
+<tr>
+<td><strong>seccomp</strong></td>
+<td>Syscall allowlist</td>
+</tr>
+<tr>
+<td><strong>Namespace</strong></td>
+<td>Isolated kernel view</td>
+</tr>
+<tr>
+<td><strong>VM isolation</strong></td>
+<td>Separate kernel entirely</td>
+</tr>
+<tr>
+<td><strong>TCB minimisation</strong></td>
+<td>Reducing what must be trusted</td>
+</tr>
+<tr>
+<td><strong>Interface validation</strong></td>
+<td>Checking every message at the boundary</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- measure your own TCB, roughly ---
+{
+  echo &quot;=== what must be correct for this host to be secure? ===&quot;
+  echo &quot;  kernel            : $(uname -r)&quot;
+  echo &quot;  libc              : $(ldd --version | head -1)&quot;
+  echo &quot;  init system       : $(ps -p 1 -o comm= 2&gt;/dev/null)&quot;
+  echo &quot;  sshd              : $(sshd -V 2&gt;&amp;1 | head -1)&quot;
+  echo &quot;  package manager   : apt&quot;
+} 2&gt;&amp;1 | tee 01-tcb.txt
+
+# --- how big is the kernel you trust? ---
+ls -la /boot/vmlinuz-* 2&gt;/dev/null | awk '{printf &quot;  kernel image: %s bytes\n&quot;, $5}'
+
+# --- what is running as root right now? ---
+ps -eo user,pid,pcpu,comm --sort=user | awk 'NR==1 || $1==&quot;root&quot;' | head -12
+
+# --- privileged helpers that should be small and boring ---
+sudo -l 2&gt;/dev/null || sudo -n -l
+ls -la /usr/bin/sudo /usr/bin/pkexec /usr/lib/dbus-1.0/dbus-daemon 2&gt;/dev/null
+
+# --- sandboxing available on this kernel ---
+cat /proc/sys/kernel/unprivileged_userns_clone 2&gt;/dev/null || echo &quot;  (sysctl absent)&quot;
+sysctl kernel.unprivileged_userns_clone 2&gt;/dev/null
+seccomp --help 2&gt;/dev/null | head -2 || echo &quot;  libseccomp tools not installed&quot;
+
+# --- what namespaces exist for a process ---
+ls -l /proc/self/ns/
+
+# --- demonstrate a real sandbox ---
+unshare -Ur -n -m sh -c 'echo &quot;  inside: uid=$(id -u) netns=$(readlink /proc/self/ns/net)&quot;'
+echo &quot;  ^ user namespace + network namespace + mount namespace, no root required&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> measure your own trusted computing base and run a real sandbox, so the principle<br />
+is concrete.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-02 &amp;&amp; cd ~/aegis/labs/mit858-02
+
+# --- 1. inventory the TCB ---
+{
+  echo &quot;=== TRUSTED COMPUTING BASE INVENTORY ===&quot;
+  echo
+  echo &quot;kernel      : $(uname -r)   ($(ls -la /boot/vmlinuz-* 2&gt;/dev/null | awk 'NR==1{print $5}') bytes)&quot;
+  echo &quot;libc        : $(ldd --version | head -1)&quot;
+  echo &quot;init        : $(ps -p 1 -o comm= 2&gt;/dev/null)&quot;
+  echo &quot;sudo        : $(ls -la /usr/bin/sudo 2&gt;/dev/null | awk '{print $5}') bytes&quot;
+  echo &quot;sshd        : $(sshd -V 2&gt;&amp;1 | head -1)&quot;
+  echo
+  echo &quot;=== ROOT-OWNED PROCESSES (all must be correct) ===&quot;
+  ps -eo user,pid,comm --sort=user | awk '$1==&quot;root&quot;' | head -15
+  echo
+  echo &quot;=== HOW BIG IS THE TRUSTED PART, REALLY ===&quot;
+  printf &quot;  root-owned setuid binaries : %s\n&quot; &quot;$(find / -perm -4000 -type f 2&gt;/dev/null | wc -l)&quot;
+  printf &quot;  root-owned listeners       : %s\n&quot; &quot;$(ss -tulpn 2&gt;/dev/null | grep -c 'users:((\&quot;root\&quot;' || echo 0)&quot;
+} 2&gt;&amp;1 | tee 01-tcb.txt
+
+# --- 2. the size argument, measured ---
+echo
+echo &quot;=== the size argument, with numbers ===&quot;
+{
+  echo &quot;  --- unprivileged code (large, bugs are survivable) ---&quot;
+  printf &quot;    files in /usr/bin        : %s\n&quot; &quot;$(ls /usr/bin | wc -l)&quot;
+  printf &quot;    total size of /usr/lib   : %s\n&quot; &quot;$(du -sh /usr/lib 2&gt;/dev/null | cut -f1)&quot;
+  echo
+  echo &quot;  --- privileged code (small, must be correct) ---&quot;
+  printf &quot;    setuid binaries          : %s\n&quot; &quot;$(find / -perm -4000 -type f 2&gt;/dev/null | wc -l)&quot;
+  find / -perm -4000 -type f 2&gt;/dev/null | head -8 | sed 's/^/      /'
+  printf &quot;    size of the sudo binary  : %s\n&quot; &quot;$(stat -c %s /usr/bin/sudo 2&gt;/dev/null)&quot;
+} 2&gt;&amp;1 | tee 02-size.txt
+
+# --- 3. RUN A SANDBOX, and try to break out of it ---
+echo
+echo &quot;=== unshare: a real privilege separation, no root needed ===&quot;
+unshare -Ur -n -m -p -f --mount-proc sh -c '
+  echo &quot;  inside the namespace:&quot;
+  echo &quot;    uid        : $(id -u) (namespaced - not real root)&quot;
+  echo &quot;    network    : $(ls /sys/class/net 2&gt;/dev/null | tr &quot;\n&quot; &quot; &quot;)&quot;
+  echo &quot;    hostname   : $(hostname 2&gt;/dev/null)&quot;
+  echo &quot;    pid        : $$&quot;
+  echo
+  echo &quot;  trying to reach the network from inside:&quot;
+  timeout 2 getent hosts example.com &gt;/dev/null 2&gt;&amp;1 \
+    &amp;&amp; echo &quot;    DNS worked&quot; || echo &quot;    no network (isolation held)&quot;
+  echo
+  echo &quot;  trying to see the host filesystem:&quot;
+  ls /home/*/Projects 2&gt;/dev/null | head -2 || echo &quot;    host paths are not visible&quot;
+' 2&gt;&amp;1 | tee 03-sandbox.txt
+
+# --- 4. the boundary, drawn explicitly ---
+cat &gt; 04-boundary.md &lt;&lt;'EOF'
+# Where the trust boundary sits, per layer
+
+## Process boundary (cheapest)
+- unix uid/gid, file permissions, capabilities
+- one kernel shared
+- escape requires a kernel bug
+
+## Container boundary
+- namespaces: pid, mnt, net, uts, ipc, user
+- cgroups for resources; seccomp for syscalls
+- overlayfs for the filesystem
+- **same kernel**: a kernel bug is an escape, not a compromise
+
+## VM boundary
+- separate kernel entirely
+- escape requires a hypervisor bug
+- cost: memory, boot time, operational complexity
+
+## Enclave boundary (strongest, smallest)
+- hardware memory encryption and entry-point measurement
+- side channels remain the weakness (6.858 L7, L18)
+
+## Choosing
+- untrusted input, same trust level -&gt; language-level checks
+- untrusted plugin, same user -&gt; seccomp / namespace
+- untrusted tenant, shared kernel -&gt; container (accept the kernel risk)
+- untrusted tenant, hostile kernel -&gt; VM
+- cryptographic isolation -&gt; enclave, if you can live with side channels
+EOF
+cat 04-boundary.md
+
+# --- 5. the TCB you cannot reduce, and what to do about it ---
+cat &gt; 05-what-to-do.md &lt;&lt;'EOF'
+# When you cannot shrink the TCB
+
+1. **Reduce what runs privileged.** Disable services you do not need.
+2. **Make the privileged code boring.** Small, no parsers, no allocations.
+3. **Move complexity to userland.** Every line you move out of the TCB is
+   a line you do not have to trust.
+4. **Validate every interface message.** The boundary is where bugs live.
+5. **Monitor the TCB.** Integrity checking, IMA, code signing.
+6. **Update it.** A large TCB is a large attack surface over time.
+
+The practical version: the day-to-day work of architecture security is
+deleting things, not adding them.
+EOF
+cat 05-what-to-do.md
+</code></pre>
+<p><strong>Step 3 is the live demonstration</strong> — a real sandbox with no root, where DNS fails and host<br />
+paths vanish. That is privilege separation happening, not described.</p>
+<p><strong>Record:</strong> <code>01-tcb.txt</code> and <code>04-boundary.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the trusted computing base?</li>
+<li>Why does privilege separation make crashes survivable?</li>
+<li>Name the two components of a privilege separation architecture.</li>
+<li>Why is a container a weaker boundary than a VM?</li>
+<li>Give two things you can do when you cannot shrink the TCB.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Separation</strong> → <strong>Defence in Depth</strong> → <strong>Namespace Container</strong> → <strong>Sandbox</strong> →<br />
+<strong>Seccomp</strong> → <strong>Enclave</strong>.</p>

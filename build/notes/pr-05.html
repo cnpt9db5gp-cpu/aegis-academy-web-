@@ -1,0 +1,260 @@
+<h1 id="kernel-exploits-and-knowing-when-not-to">Kernel Exploits and Knowing When Not To</h1>
+<h2 id="summary">Summary</h2>
+<p>A kernel exploit is the last resort, not the first. This lecture covers when it is justified, how<br />
+the privilege-escalation decision tree actually works, and how to study Dirty Pipe as the<br />
+canonical modern walkthrough.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Escalation order</strong>: credentials → misconfiguration → SUID/service abuse → PATH/cron →<br />
+  kernel exploit. Most engagements never need step 4.</li>
+<li><strong>Kernel exploit preconditions</strong>: a known local privilege boundary to cross. If you are already<br />
+  root, there is nothing to escalate.</li>
+<li><strong>Finding a kernel bug</strong>: <code>uname -r</code> → identify version → <code>searchsploit linux kernel &lt;version&gt;</code><br />
+  → check for a local privesc PoC</li>
+<li><strong>Dirty Pipe (CVE-2022-0847)</strong>: an arbitrary write to the page cache as root, and the cleanest<br />
+  modern kernel exploit to study</li>
+<li><strong>Modern kernels restrict unprivileged user namespaces</strong>, which breaks many published privesc<br />
+  chains — you must check, not assume</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Kernel exploit</strong></td>
+<td>A bug in the kernel used to gain root</td>
+</tr>
+<tr>
+<td><strong>Local privilege escalation</strong></td>
+<td>Already on the box, becoming root</td>
+</tr>
+<tr>
+<td><strong><code>uname -r</code></strong></td>
+<td>Exact kernel version string</td>
+</tr>
+<tr>
+<td><strong>Dirty Pipe</strong></td>
+<td>CVE-2022-0847, page-cache write as root</td>
+</tr>
+<tr>
+<td><strong>Page cache</strong></td>
+<td>Kernel's file-content cache</td>
+</tr>
+<tr>
+<td><strong>User namespace</strong></td>
+<td>Lets an unprivileged user fake UID 0 in a namespace</td>
+</tr>
+<tr>
+<td><strong>Exploit chain</strong></td>
+<td>Several bugs combined into one escalation</td>
+</tr>
+<tr>
+<td><strong>KASLR</strong></td>
+<td>Kernel address space layout randomisation</td>
+</tr>
+<tr>
+<td><strong>Privesc</strong></td>
+<td>Abbreviation for privilege escalation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the identification step ---
+uname -r
+cat /etc/os-release | grep PRETTY
+dpkg -l | grep -E &quot;linux-image|linux-headers&quot; | awk '{print $2, $3}'
+ls /boot/
+
+# --- is a published exploit available? (offline) ---
+searchsploit linux kernel 6.1
+searchsploit &quot;linux kernel 6.1.0&quot;
+searchsploit --keyword=dirtypipe
+searchsploit -t linux-exploit | head -20
+
+# --- are the preconditions met? ---
+echo &quot;=== unprivileged user namespaces ===&quot;
+cat /proc/sys/kernel/unprivileged_userns_clone 2&gt;/dev/null || echo &quot;  (sysctl absent - modern default)&quot;
+sysctl kernel.unprivileged_userns_clone 2&gt;/dev/null
+echo &quot;  value 1 = allowed (most published privesc chains work)&quot;
+echo &quot;  value 0 = blocked (most chains are dead)&quot;
+unshare -Ur echo &quot;  userns test: WORKS&quot; 2&gt;/dev/null || echo &quot;  userns test: BLOCKED&quot;
+
+echo
+echo &quot;=== can I even test an exploit? ===&quot;
+echo &quot;  kernel exploits need: root in a namespace, a matching kernel, and care.&quot;
+echo &quot;  NEVER test a kernel exploit on a machine you care about.&quot;
+id -u
+
+# --- the Dirty Pipe reference material ---
+echo &quot;=== CVE-2022-0847 ===&quot;
+searchsploit CVE-2022-0847
+echo
+echo &quot;The bug: a data pipe whose PIPE_BUF_FLAG_CAN_MERGE was cleared fails to&quot;
+echo &quot;check that the buffer is still a pipe. A one-byte overwrite into an&quot;
+echo &quot;arbitrary page-cache page = read/write as root. Fixed in 5.10.102, 5.15.41,&quot;
+echo &quot;5.16.9, 6.0.8 and later.&quot;
+
+# --- kernel hardening on this box ---
+{
+  echo &quot;=== kernel self-protection settings ===&quot;
+  for s in kptr_restrict dmesg_restrict yama/ptrace_scope perf_event_paranoid; do
+    printf &quot;  %-28s %s\n&quot; &quot;$s&quot; &quot;$(cat /proc/sys/kernel/${s/\//\/} 2&gt;/dev/null || sysctl -n kernel.${s//\//.} 2&gt;/dev/null)&quot;
+  done
+  echo
+  echo &quot;=== unprivileged bpf / perf (common privesc surface) ===&quot;
+  sysctl kernel.unprivileged_bpf_disabled 2&gt;/dev/null
+  sysctl kernel.perf_event_paranoid 2&gt;/dev/null
+} 2&gt;&amp;1 | head -15 | tee 01-kernel-hardening.txt
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> build the escalation decision tree, apply it to this machine, and study Dirty<br />
+Pipe's mechanism from the source.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/pr-05 &amp;&amp; cd ~/aegis/labs/pr-05
+
+# --- 1. the decision tree, executed against this machine ---
+cat &gt; decide.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Walk the escalation ladder from cheapest to most destructive.
+# Print the FIRST step that succeeds. That is your path.
+set -uo pipefail
+LABEL=&quot;$1&quot;
+
+echo &quot;=== ESCALATION DECISION TREE: $LABEL ===&quot;
+echo
+
+echo &quot;[0] Am I already root?&quot;
+if [ &quot;$(id -u)&quot; -eq 0 ]; then echo &quot;    YES -&gt; nothing to escalate.&quot;; exit 0; fi
+echo &quot;    no (uid=$(id -u))&quot;
+echo
+
+echo &quot;[1] Do I have a usable sudo rule?&quot;
+if sudo -n -l &gt;/dev/null 2&gt;&amp;1; then
+  echo &quot;    YES - passwordless sudo available. Read it:&quot;
+  sudo -n -l | grep -vE &quot;^$&quot; | sed 's/^/      /'
+else
+  echo &quot;    no passwordless sudo (may still have rules needing a password)&quot;
+fi
+echo
+
+echo &quot;[2] Are there readable credentials that log in as someone privileged?&quot;
+c=$(sudo awk -F: 'length($2)&gt;3 {print $1}' /etc/shadow 2&gt;/dev/null | wc -l)
+echo &quot;    accounts with real hashes: $c&quot;
+grep -rilE &quot;(password|passwd|secret)[[:space:]]*[=:]&quot; ~/.bash_history ~/.ssh 2&gt;/dev/null | head -3 | sed 's/^/      /'
+echo
+
+echo &quot;[3] SUID / SGID binaries&quot;
+n=$(find / -perm -4000 -type f 2&gt;/dev/null | wc -l)
+echo &quot;    $n SUID binaries found. Any unowned or unusual ones?&quot;
+comm -23 &lt;(find / -perm -4000 -type f 2&gt;/dev/null | sort) \
+         &lt;(dpkg -S $(find / -perm -4000 -type f 2&gt;/dev/null) 2&gt;/dev/null | cut -d: -f1 | sort -u) | head -3 | sed 's/^/      unowned: /'
+echo
+
+echo &quot;[4] Writable service / cron artefacts&quot;
+echo &quot;    world-writable dirs:&quot;; find / -xdev -perm -o+w -type d 2&gt;/dev/null | grep -vE '^/(proc|sys|dev|run|tmp|var/tmp)' | head -3 | sed 's/^/      /'
+echo &quot;    writable in /etc:&quot;;   find /etc -writable -type f 2&gt;/dev/null | head -3 | sed 's/^/      /'
+echo &quot;    PATH dirs writable by me:&quot;
+IFS=: read -ra P &lt;&lt;&lt; &quot;$PATH&quot;; for d in &quot;${P[@]}&quot;; do [ -d &quot;$d&quot; ] &amp;&amp; [ -w &quot;$d&quot; ] &amp;&amp; echo &quot;      $d&quot;; done
+echo
+
+echo &quot;[5] Kernel exploit - LAST RESORT&quot;
+echo &quot;    kernel: $(uname -r)&quot;
+echo &quot;    userns: $(unshare -Ur true 2&gt;/dev/null &amp;&amp; echo allowed || echo BLOCKED)&quot;
+echo &quot;    candidates (offline):&quot;
+searchsploit &quot;linux kernel $(uname -r | cut -d- -f1)&quot; 2&gt;/dev/null | head -3 | sed 's/^/      /'
+echo
+echo &quot;=== STEP 5 is only justified if 1-4 all failed ===&quot;
+EOF
+chmod +x decide.sh &amp;&amp; ./decide.sh &quot;$(hostname)&quot; | tee 02-decision-tree.txt
+
+# --- 2. the Dirty Pipe mechanism, in your own words, from the primitives ---
+cat &gt; dirtypipe-notes.md &lt;&lt;'EOF'
+# Dirty Pipe (CVE-2022-0847) - mechanism notes
+
+## The bug in three layers
+
+1. **Data pipes copy into an arbitrary page-cache page.** A normal pipe holds up to 16 pages of
+   kernel memory. `splice()` moves those pages to/from a file. When a pipe is full, the kernel
+   sets PIPE_BUF_FLAG_CAN_MERGE on every page but the first.
+
+2. **Write() is supposed to refuse non-first pages.** `write()` must not modify a pipe page
+   without CAN_MERGE, or it would corrupt kernel data. That check exists.
+
+3. **The flag can be cleared, and the check is skipped.** `F_SETPIPE_SZ` clears CAN_MERGE.
+   A page whose flag was cleared is still in a pipe (so `pipe_buffer_operations` still routes
+   writes to it), but `write()` no longer refuses. If you can place a *page-cache page* into a
+   pipe - by splicing from a file you own - you can write one byte anywhere in the page cache.
+
+## Why that equals root
+
+The page cache is where the kernel stores file *contents*. Overwriting the page containing
+`/etc/passwd` changes the file. Overwriting the page containing a setuid binary's contents
+changes that binary. Root achieved, with no memory corruption at all.
+
+## Why it is the perfect teaching example
+
+- The vulnerability class is a missing check on a flag (logic bug, not memory corruption)
+- The path from bug to root is short, well documented, and provable
+- It shows that &quot;kernel exploits&quot; are not all raw pwnage
+- It explains why `unprivileged_userns_clone=0` mitigates many published chains
+
+## Preconditions (check before you try anything)
+
+- Kernel 5.8 to 5.16.11 / 5.10.x &lt; 5.10.102 / 5.15.x &lt; 5.15.41
+- Ability to create a pipe and splice a page-cache page into it (needs a file you can open)
+- Must be UNPRIVILEGED (that is the point)
+- Works with pipes only; sockets and shmem took different paths
+EOF
+cat dirtypipe-notes.md | tee 03-dirtypipe.txt
+
+# --- 3. check whether this machine is even vulnerable (read-only, safe) ---
+{
+  echo &quot;=== is this kernel in the vulnerable range? ===&quot;
+  k=$(uname -r)
+  echo &quot;  running: $k&quot;
+  case &quot;$k&quot; in
+    5.8*|5.9*|5.10*|5.11*|5.12*|5.13*|5.14*|5.15*|5.16*)
+      echo &quot;  range 5.8-5.16 -&gt; MAY be vulnerable; check the patch level&quot; ;;
+    *)  echo &quot;  outside 5.8-5.16 -&gt; not affected by Dirty Pipe&quot; ;;
+  esac
+  echo
+  echo &quot;  Patch levels that fix it: 5.10.102, 5.15.41, 5.16.9, 6.0.8&quot;
+  echo &quot;  Kali is rolling: almost certainly patched.&quot;
+} | tee -a 03-dirtypipe.txt
+
+# --- 4. why a kernel exploit is the LAST step, argued ---
+cat &gt; 04-why-not-first.md &lt;&lt;'EOF'
+Reasons to escalate in this order:
+
+1. **Risk** - a kernel exploit can crash or corrupt the machine you are testing
+2. **Stealth** - SUID abuse and a stolen credential leave far less residue than a kernel attack
+3. **Portability** - your exploit is version-specific; the misconfiguration is not
+4. **Detection** - kernel exploits trip EDR and leave forensic artefacts everywhere
+5. **Reporting** - &quot;this box had passwordless sudo&quot; is a finding the client can fix.
+   &quot;your kernel was old&quot; is a finding they will close in a week and be vulnerable again.
+EOF
+cat 04-why-not-first.md
+
+echo
+echo &quot;=== final: your ordered action list from the decision tree ===&quot;
+sed -n '/^\[/p' 02-decision-tree.txt | sed 's/^/  /'
+</code></pre>
+<p><strong>Step 1 is the deliverable: a decision tree you can run against any Linux target.</strong> In a real<br />
+engagement you will run it and find a credential or a sudo rule at step 1 or 2, and never touch<br />
+step 5.</p>
+<p><strong>Record:</strong> <code>02-decision-tree.txt</code> — which step hits on your own machine, and why.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>List the escalation ladder in order and say why each step is cheaper than the next.</li>
+<li>What kernel versions does Dirty Pipe affect, and what is the mechanism in one sentence?</li>
+<li>Why does <code>unprivileged_userns_clone=0</code> break many published privesc chains?</li>
+<li>Why is a kernel exploit a poor <em>reportable</em> finding compared to a misconfiguration?</li>
+<li>What is the precondition that makes Dirty Pipe work as an unprivileged user?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Kernel Exploitation</strong> → <strong>Dirty Pipe</strong> → <strong>CVE</strong> → <strong>Privilege Escalation (Linux)</strong> →<br />
+<strong>searchsploit</strong> → <strong>Mitigation Audit</strong>.</p>

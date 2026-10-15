@@ -1,0 +1,381 @@
+<h1 id="web-security-model">Web Security Model</h1>
+<h2 id="summary">Summary</h2>
+<p>The web's security model is the oldest and least designed part of the internet: the browser<br />
+trusts the origin, the origin trusts the network, and the user trusts both. Lecture 11's<br />
+preparation reading is <em>The Tangled Web</em>, and the whole lecture is about why that trust is<br />
+structurally misplaced.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>The browser is the security principal.</strong> It is the only component that can be trusted about<br />
+  what the user intended</li>
+<li><strong>Same-origin policy</strong>: a page may not read another origin's data. The core browser control</li>
+<li><strong>Origin</strong> = scheme + host + port. <code>http://x.com</code> and <code>https://x.com</code> are different origins</li>
+<li><strong>CORS</strong> is the mechanism for relaxing SOP, and its misconfigurations are extremely common</li>
+<li><strong>Cookies are ambient authority</strong> — sent automatically, which is what makes CSRF possible</li>
+<li><strong>Mixed content</strong> and the long tail of parsing differentials between browser and server</li>
+<li>The browser cannot protect against a server that is itself malicious</li>
+</ul>
+<h2 id="the-same-origin-policy-precisely">The same-origin policy, precisely</h2>
+<pre><code class="language-text">A document loaded from origin A may:
+  - embed images/scripts/styles from any origin
+  - send requests to any origin (cookies ride along)
+  - READ responses ONLY from its own origin (and origins with CORS permission)
+</code></pre>
+<p>That asymmetry is the whole model. Requests are always possible — which is why CSRF works —<br />
+but reading the reply requires permission, which is why XSS is so damaging.</p>
+<h2 id="the-principal-failures">The principal failures</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Model assumption broken</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>XSS</td>
+<td>Attacker code runs in the origin, so it inherits its authority</td>
+</tr>
+<tr>
+<td>CSRF</td>
+<td>Cookies are ambient; the browser attaches authority the page did not choose</td>
+</tr>
+<tr>
+<td>CORS misconfiguration</td>
+<td>A trusted origin is induced to permit a hostile one</td>
+</tr>
+<tr>
+<td>Clickjacking</td>
+<td>The user cannot tell what they are clicking</td>
+</tr>
+<tr>
+<td>Injection</td>
+<td>The server confuses data with code</td>
+</tr>
+<tr>
+<td>Request smuggling</td>
+<td>Two parsers disagree about message boundaries</td>
+</tr>
+</tbody>
+</table>
+<h2 id="what-the-browser-will-and-will-not-do">What the browser will and will not do</h2>
+<pre><code class="language-text">WILL:
+  - sandbox scripts (CSP sandbox, iframe sandbox)
+  - isolate origins (SOP, storage partitioning)
+  - verify TLS
+  - prompt for install permission
+  - block mixed active content
+
+WILL NOT:
+  - stop a malicious server from reading its own data
+  - stop an injection bug in the server
+  - stop the user from being socially engineered
+  - fix a confused server-side implementation
+</code></pre>
+<p>That last list is where most of Tier 4 lives.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Same-origin policy</strong></td>
+<td>Cross-origin reads are denied by default</td>
+</tr>
+<tr>
+<td><strong>Origin</strong></td>
+<td>Scheme + host + port triple</td>
+</tr>
+<tr>
+<td><strong>CORS</strong></td>
+<td>Cross-Origin Resource Sharing; relaxes SOP</td>
+</tr>
+<tr>
+<td><strong>CSRF</strong></td>
+<td>Forging an authenticated request using the victim's cookies</td>
+</tr>
+<tr>
+<td><strong>XSS</strong></td>
+<td>Running attacker script inside a trusted origin</td>
+</tr>
+<tr>
+<td><strong>Ambient authority</strong></td>
+<td>Authority the browser attaches automatically</td>
+</tr>
+<tr>
+<td><strong>CSP</strong></td>
+<td>Content Security Policy; restricts script sources</td>
+</tr>
+<tr>
+<td><strong>Sandboxing</strong></td>
+<td><code>sandbox</code> attribute on iframes; restricts capability</td>
+</tr>
+<tr>
+<td><strong>Mixed content</strong></td>
+<td>HTTPS page loading HTTP subresources</td>
+</tr>
+<tr>
+<td><strong>Idempotent verb</strong></td>
+<td>Safe to retry: GET, HEAD, PUT, DELETE</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- observe the origin rule directly ---
+python3 - &lt;&lt;'PY'
+from urllib.parse import urlparse
+def origin(u):
+    p = urlparse(u)
+    return (p.scheme, p.hostname, p.port or (443 if p.scheme==&quot;https&quot; else 80))
+pairs = [
+  (&quot;https://a.com/x&quot;, &quot;https://a.com/y&quot;),
+  (&quot;https://a.com/x&quot;, &quot;http://a.com/y&quot;),        # scheme differs
+  (&quot;https://a.com/x&quot;, &quot;https://www.a.com/y&quot;),    # host differs
+  (&quot;https://a.com/x&quot;, &quot;https://a.com:8443/y&quot;),   # port differs
+  (&quot;https://a.com:443/x&quot;, &quot;https://a.com/y&quot;),   # default port, same
+]
+for a, b in pairs:
+    print(f&quot;  {a:&lt;26} {b:&lt;26} {'SAME ORIGIN' if origin(a)==origin(b) else 'CROSS ORIGIN'}&quot;)
+PY
+
+# --- CORS headers, when you have a target ---
+curl -sI -H &quot;Origin: https://evil.example&quot; http://127.0.0.1:8080/ 2&gt;/dev/null | grep -i &quot;access-control&quot;
+echo &quot;  (no ACAO header = the browser blocks the read)&quot;
+
+# --- cookie flags in your own browser ---
+python3 - &lt;&lt;'PY'
+import sqlite3, glob, os
+dbs = glob.glob(os.path.expanduser(&quot;~/.mozilla/firefox/*/cookies.sqlite&quot;)) + \
+      glob.glob(os.path.expanduser(&quot;~/.config/google-chrome/*/Cookies&quot;))
+for db in dbs:
+    print(f&quot;  {db}&quot;)
+    try:
+        c = sqlite3.connect(f&quot;file:{db}?mode=ro&quot;, uri=True)
+        rows = c.execute(&quot;SELECT name, host, isSecure, isHttpOnly FROM cookies LIMIT 8&quot;).fetchall()
+        for n, h, s, h2 in rows:
+            flags = (&quot;secure &quot; if s else &quot;INSECURE &quot;) + (&quot;httponly&quot; if h2 else &quot;NO-HTTPONLY&quot;)
+            print(f&quot;    {n[:34]:&lt;36} {h[:26]:&lt;28} {flags}&quot;)
+    except Exception as e:
+        print(f&quot;    (locked or unreadable: {e})&quot;)
+PY
+
+# --- security headers on your own services ---
+for port in 80 8080 3000 8000; do
+  h=$(curl -sI --max-time 2 http://127.0.0.1:$port/ 2&gt;/dev/null)
+  [ -z &quot;$h&quot; ] &amp;&amp; continue
+  echo &quot;  --- :$port ---&quot;
+  echo &quot;$h&quot; | grep -iE &quot;content-security-policy|x-frame-options|strict-transport|set-cookie|x-content-type&quot; | sed 's/^/    /'
+done
+
+# --- what a browser will actually load from another origin ---
+cat &gt; 04-test.html &lt;&lt;'HTML'
+&lt;!doctype html&gt;&lt;meta charset=utf-8&gt;
+&lt;title&gt;AEGIS SOP test&lt;/title&gt;
+&lt;h1&gt;Same-origin policy test&lt;/h1&gt;
+&lt;p&gt;Open this from a file:// URL, then try the fetches. Same-origin reads succeed;
+cross-origin reads fail unless CORS permits them.&lt;/p&gt;
+&lt;script&gt;
+async function t(url, label) {
+  try {
+    const r = await fetch(url, {credentials: &quot;include&quot;});
+    document.write(`&lt;p&gt;${label}: READABLE (status ${r.status})&lt;/p&gt;`);
+  } catch (e) {
+    document.write(`&lt;p&gt;${label}: BLOCKED by the browser&lt;/p&gt;`);
+  }
+}
+t(location.origin + &quot;/&quot;, &quot;same origin&quot;);
+t(&quot;http://127.0.0.1:8080/&quot;, &quot;cross origin&quot;);
+&lt;/script&gt;
+HTML
+echo &quot;  wrote 04-test.html - open it in your browser&quot;
+
+# --- mixed content rules ---
+echo &quot;  HTTPS page loading HTTP script/iframe = blocked as active mixed content&quot;
+echo &quot;  HTTPS page loading HTTP image         = allowed (passive), still leaks the request&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> prove the same-origin policy and CORS behaviour, then audit your own machine's<br />
+cookie and header posture.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-11 &amp;&amp; cd ~/aegis/labs/mit858-11
+
+# --- 1. a target that can demonstrate CORS properly ---
+cat &gt; server.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;A tiny server with deliberately different CORS policies, for the exercise.&quot;&quot;&quot;
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import sys
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        origin = self.headers.get(&quot;Origin&quot;, &quot;&quot;)
+        # three policies: none, permissive origin, reflected origin
+        if self.path.startswith(&quot;/none&quot;):
+            pass
+        elif self.path.startswith(&quot;/allow-evil&quot;):
+            self.send_header(&quot;Access-Control-Allow-Origin&quot;, &quot;https://evil.example&quot;)
+        elif self.path.startswith(&quot;/reflect&quot;):
+            self.send_header(&quot;Access-Control-Allow-Origin&quot;, origin or &quot;*&quot;)
+        self.send_response(200)
+        self.send_header(&quot;Content-Type&quot;, &quot;text/html&quot;)
+        self.send_header(&quot;Set-Cookie&quot;, &quot;sess=demo; HttpOnly; SameSite=Lax&quot;)
+        self.end_headers()
+        self.wfile.write(b&quot;&lt;h1&gt;aegis cors lab&lt;/h1&gt;&lt;p&gt;secret-ish data here&lt;/p&gt;&quot;)
+HTTPServer((&quot;127.0.0.1&quot;, 8099), H).serve_forever()
+PY
+python3 server.py &amp; SRV=$!
+sleep 1
+
+# --- 2. what the server actually sends ---
+{
+  echo &quot;=== response headers per path ===&quot;
+  for p in none allow-evil reflect; do
+    echo &quot;  --- /$p ---&quot;
+    curl -sI -H &quot;Origin: https://evil.example&quot; &quot;http://127.0.0.1:8099/$p&quot; | sed 's/^/    /'
+  done
+} 2&gt;&amp;1 | tee 01-cors.txt
+
+# --- 3. the same thing, evaluated as the browser would ---
+cat &gt; cors.html &lt;&lt;'HTML'
+&lt;!doctype html&gt;&lt;meta charset=utf-8&gt;
+&lt;title&gt;AEGIS CORS exercise&lt;/title&gt;
+&lt;h1&gt;CORS exercise&lt;/h1&gt;
+&lt;p&gt;For each path, the browser decides whether the page can read the response.
+A failure means the browser blocked it - the request still went out.&lt;/p&gt;
+&lt;script&gt;
+const paths = [&quot;none&quot;, &quot;allow-evil&quot;, &quot;reflect&quot;];
+(async () =&gt; {
+  for (const p of paths) {
+    try {
+      const r = await fetch(`http://127.0.0.1:8099/${p}`, {credentials: &quot;include&quot;});
+      const t = await r.text();
+      document.write(`&lt;p&gt;&lt;b&gt;/${p}&lt;/b&gt;: READABLE (${r.status}) - ${t.slice(0,40)}&lt;/p&gt;`);
+    } catch (e) {
+      document.write(`&lt;p&gt;&lt;b&gt;/${p}&lt;/b&gt;: BLOCKED by the same-origin policy&lt;/p&gt;`);
+    }
+  }
+  document.write(&quot;&lt;p&gt;Note: blocked still means the request was SENT. That is CSRF.&lt;/p&gt;&quot;);
+})();
+&lt;/script&gt;
+HTML
+echo &quot;  wrote cors.html - open it in Firefox:&quot;
+echo &quot;    firefox cors.html   (from this directory)&quot;
+echo
+echo &quot;  Predicted result:&quot;
+echo &quot;    /none        -&gt; BLOCKED   (no Access-Control-Allow-Origin)&quot;
+echo &quot;    /allow-evil  -&gt; READABLE  (ACAO matches this page's origin? check it)&quot;
+echo &quot;    /reflect     -&gt; READABLE  (ACAO echoes whatever origin asked)&quot;
+
+# --- 4. the reflected-origin failure, spelled out ---
+cat &gt; 03-cors-analysis.md &lt;&lt;'EOF'
+# Reading a CORS configuration
+
+## Safe patterns
+- No `Access-Control-Allow-Origin` -&gt; browser blocks cross-origin reads. Correct.
+- A fixed allowlist, and only for origins you own.
+- `Access-Control-Allow-Credentials: true` **with** an exact allowlist. Never with `*`.
+
+## Unsafe patterns
+1. **Reflecting the Origin header while allowing credentials**
+   ```python
+   self.send_header(&quot;Access-Control-Allow-Origin&quot;, origin)
+   self.send_header(&quot;Access-Control-Allow-Credentials&quot;, &quot;true&quot;)
+   ```
+   This is equivalent to `Access-Control-Allow-Origin: *` with credentials
+   enabled. Every site on the internet can now read your authenticated
+   responses and ride your cookies. This is one of the most common real
+   findings in bug bounty, and it is exactly `/reflect` above.
+
+2. **Allowing `null` origin**
+   Sandboxed iframes, `data:` URLs and some file:// contexts all send the
+   origin `null`. Allowing it means any of those can read your responses.
+
+3. **Overly broad allowlist**
+   `*.example.com` in a naive string match accepts
+   `evil-example.com`. Parse the origin properly; do not use `startswith`.
+
+4. **Credentialed requests without a preflight check**
+   `Access-Control-Allow-Headers: *` combined with credentials.
+
+## The preflight
+For anything beyond a simple GET/POST, the browser sends an `OPTIONS`
+preflight first. The server must answer with `Allow-Methods`,
+`Allow-Headers` and `Allow-Origin`. Misconfigured preflights are how CORS
+bypasses work.
+
+## The interaction with cookies
+`SameSite` and CORS solve *different* problems:
+- `SameSite` limits which sites may send your cookie (CSRF defence)
+- CORS limits which sites may read the response (data disclosure defence)
+
+Neither stops the request itself from being sent. That gap is why CSRF still
+needs a token.
+EOF
+cat 03-cors-analysis.md
+
+kill $SRV 2&gt;/dev/null
+
+# --- 5. audit what you already have ---
+{
+  echo &quot;=== your own service headers ===&quot;
+  for port in 80 8080 3000 8000 5000; do
+    h=$(curl -sI --max-time 2 &quot;http://127.0.0.1:$port/&quot; 2&gt;/dev/null) || continue
+    [ -z &quot;$h&quot; ] &amp;&amp; continue
+    echo &quot;  --- :$port ---&quot;
+    echo &quot;$h&quot; | grep -iE &quot;access-control|content-security|x-frame|strict-transport|set-cookie|x-content-type&quot; | sed 's/^/    /' || echo &quot;    (no security headers)&quot;
+  done
+} 2&gt;&amp;1 | tee 04-my-headers.txt
+
+# --- 6. the model, written out ---
+cat &gt; 05-model.md &lt;&lt;'EOF'
+# The web security model, in one page
+
+## Trust assumptions
+1. The browser correctly identifies the origin of what it is displaying.
+2. The origin is the security principal: anything running in it is trusted.
+3. The network is hostile, so everything is encrypted in transit.
+4. The user can tell where they are.
+
+## Where each assumption fails
+1. **Parsing differentials** - browser and server disagree about the URL
+   (smuggling, open redirects)
+2. **XSS** - assumption 2 fails; attacker code now runs as the origin
+3. **No TLS on legacy** - assumption 3 fails
+4. **Homograph domains, missing HTTPS indicators** - assumption 4 fails
+
+## The controls that fall out of the model
+- SOP + CORS: keep assumption 2 meaningful by limiting cross-origin reads
+- CSRF tokens + SameSite: stop ambient authority from being usable
+- CSP: limit what script can run even after XSS
+- frame-ancestors / X-Frame-Options: stop clickjacking
+- HSTS: stop downgrade
+- Subresource Integrity: stop a compromised CDN from changing your script
+
+## What is NOT in the model
+Injection, access control, deserialisation, business logic, and the entire
+server's own bugs. The browser is not a defence against a server-side flaw.
+That is why OWASP's top category is not &quot;browser problems&quot;.
+EOF
+cat 05-model.md
+echo
+echo &quot;Open cors.html and record which paths were readable.&quot;
+</code></pre>
+<p><strong>Step 3 is the experiment</strong>: open <code>cors.html</code> and watch the browser enforce the policy. The<br />
+<code>/reflect</code> case is the single most common real-world CORS finding.</p>
+<p><strong>Record:</strong> <code>03-cors-analysis.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What three components make up an origin?</li>
+<li>Why does the same-origin policy not stop CSRF?</li>
+<li>What is ambient authority, and which attacks depend on it?</li>
+<li>Why is reflecting the Origin header with credentials allowed a serious bug?</li>
+<li>Name four things the browser will not protect you from.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Browser Model</strong> → <strong>Same-Origin Policy</strong> → <strong>CORS</strong> → <strong>CSRF</strong> → <strong>XSS</strong> →<br />
+<strong>OWASP Top 10</strong>.<br />
+The precondition reading is <em>The Tangled Web</em>.</p>

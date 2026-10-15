@@ -1,0 +1,281 @@
+<h1 id="reconnaissance-and-attack-surface-mapping">Reconnaissance and Attack Surface Mapping</h1>
+<h2 id="summary">Summary</h2>
+<p>Capstone stage one. Everything passive first, then active, then the map — and the map is the<br />
+deliverable, not the reconnaissance itself.</p>
+<p>The framing: <strong>recon ends when you can name the attack surface and<br />
+say, for each part of it, how a person reaches it.</strong> Everything before<br />
+that is gathering.</p>
+<h2 id="the-order-and-why-it-is-that-order">The order, and why it is that order</h2>
+<pre><code class="language-text">  1. PASSIVE / OSINT (osi-01..osi-03)
+     zero footprint. Certificate transparency, DNS, public code,
+     documents. Establishes the estate before anyone logs anything.
+
+  2. THE GROUND TRUTH (ad-03)
+     the anonymous LDAP surface. If anonymous bind is open, a
+     meaningful part of recon needs no credentials at all.
+     Run this BEFORE the credentialed recon: it tells you what the
+     credentialed recon is even for.
+
+  3. ACTIVE DISCOVERY (tcm-03)
+     host discovery, then ports, then versions, then scripts.
+     One host at a time, low rate, with the scope guard on every call.
+
+  4. ENUMERATION, PER SERVICE
+     what is this thing, and what does it expose beyond its port.
+
+  5. THE MAP
+     every asset, every service, every identity, every edge between
+     them - and for each, HOW SOMEONE REACHES IT.
+
+  WHY THIS ORDER:
+    - it means the loud part is as late and as narrow as possible
+    - it means you know what to look for before you look
+    - and stage 2 tells you whether stages 3 and 4 need credentials
+      at all, which changes how loud they have to be
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/cap-02 &amp;&amp; cd ~/aegis/labs/cap-02
+mkdir -p recon/{passive,ldap,scan,enum} map
+export SCOPE_GUARD=../cap-01/02-scope-guard.py
+
+cat &gt; 01-passive.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Stage 1. PASSIVE. Zero packets to the target's services.
+# Only loopback services on the lab host are touched, and only to
+# record what is already there.
+T=&quot;recon/passive&quot;
+
+echo &quot;=== 1. the estate as this host already knows it ===&quot;
+{
+  echo &quot;observed: $(date -u +%Y-%m-%dT%H:%M:%SZ)&quot;
+  echo &quot;host: $(hostname)&quot;
+  echo
+  echo &quot;--- my own addresses (the ground truth you sit on) ---&quot;
+  ip -br a
+  echo
+  echo &quot;--- my own DNS config ---&quot;
+  cat /etc/resolv.conf | grep -v &quot;^#&quot; | grep .
+  echo
+  echo &quot;--- what I can reach on loopback ---&quot;
+  ss -tulpn state listening 2&gt;/dev/null | awk 'NR&gt;1{print &quot;  &quot;$1, $5, $7}'
+  echo
+  echo &quot;--- the routes that exist ---&quot;
+  ip route
+  echo
+  echo &quot;NOTE the default route. That is the host's REAL lan. It is&quot;
+  echo &quot;out of scope (cap-01's 192.168.1.0/24 entry). Nothing in this&quot;
+  echo &quot;engagement may traverse it.&quot;
+} | tee &quot;$T/host.txt&quot;
+
+echo
+echo &quot;=== 2. the lab AD, anonymously (stage 2) ===&quot;
+DC=&quot;192.168.56.10&quot;
+if command -v ldapsearch &gt;/dev/null; then
+  NC=$(ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base defaultNamingContext 2&gt;/dev/null \
+       | grep -m1 &quot;^defaultNamingContext:&quot; | awk '{print $2}')
+  if [ -n &quot;$NC&quot; ]; then
+    {
+      echo &quot;observed: $(date -u +%Y-%m-%dT%H:%M:%SZ)&quot;
+      echo &quot;naming context: $NC&quot;
+      echo
+      echo &quot;--- THE FINDING: anonymous bind is open ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;&quot; -s base \
+        namingContexts supportedLDAPVersion dnsHostName \
+        forestFunctionalityLevel domainFunctionalityLevel 2&gt;/dev/null \
+        | grep -E &quot;^[a-zA-Z]+:&quot; | sed 's/^/  /'
+      echo
+      echo &quot;--- enabled users (no credentials used) ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;$NC&quot; \
+        &quot;(&amp;(objectCategory=person)(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=512))&quot; \
+        sAMAccountName 2&gt;/dev/null | grep &quot;^sAMAccountName:&quot; | sed 's/^/  /'
+      echo
+      echo &quot;--- computers ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;$NC&quot; &quot;(objectCategory=computer)&quot; \
+        dNSHostName operatingSystem 2&gt;/dev/null | grep -E &quot;^[a-zA-Z]+:&quot; | sed 's/^/  /'
+      echo
+      echo &quot;--- accounts with SPNs (the Kerberoasting list) ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;$NC&quot; \
+        &quot;(&amp;(objectCategory=person)(objectClass=user)(servicePrincipalName=*))&quot; \
+        sAMAccountName servicePrincipalName msDS-SupportedEncryptionTypes 2&gt;/dev/null \
+        | grep -E &quot;^(sAM|service|msDS)&quot; | sed 's/^/  /'
+      echo
+      echo &quot;--- ACCOUNTS WITH PREAUTH DISABLED (AS-REP roastable, FREE) ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;$NC&quot; \
+        &quot;(userAccountControl:1.2.840.113556.1.4.803:=1048576)&quot; \
+        sAMAccountName 2&gt;/dev/null | grep &quot;^sAMAccountName:&quot; | sed 's/^/  /'
+      echo &quot;  ^ found with NO credentials. Each one is a finding.&quot;
+      echo
+      echo &quot;--- delegation attributes ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;$NC&quot; &quot;(msDS-AllowedToDelegateTo=*)&quot; \
+        sAMAccountName msDS-AllowedToDelegateTo 2&gt;/dev/null \
+        | grep -E &quot;^(sAM|msDS)&quot; | sed 's/^/  /'
+      echo
+      echo &quot;--- group memberships, fully transitive ---&quot;
+      ldapsearch -x -H &quot;ldap://$DC&quot; -b &quot;$NC&quot; &quot;(objectCategory=group)&quot; \
+        sAMAccountName member 2&gt;/dev/null \
+        | grep -E &quot;^(sAM|member):&quot; | sed 's/^/  /'
+    } | tee &quot;$T/ldap-anonymous.txt&quot;
+  else
+    echo &quot;  anonymous bind refused, or no DC at $DC. Record which.&quot;
+  fi
+else
+  echo &quot;  ldapsearch not installed: sudo apt install ldap-utils&quot;
+fi
+EOF
+chmod +x 01-passive.sh
+./01-passive.sh 2&gt;&amp;1 | head -50 | tee 02-passive.txt
+</code></pre>
+<h2 id="the-map">The map</h2>
+<pre><code class="language-bash">cat &gt; 03-map.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;The attack surface map.
+
+The deliverable of recon is not the recon output. It is this: every
+asset, every service, every identity, and for each - HOW SOMEONE
+REACHES IT. Anything without a reachability path is inventory.
+&quot;&quot;&quot;
+import json, sys, pathlib
+
+def build(ad_hosts, external_range, internal_range, users, spns,
+          preauth_off, delegation, groups, services):
+    assets = []
+    for ip, name, role, ranges in ad_hosts:
+        assets.append(dict(ip=ip, name=name, role=role, ranges=ranges,
+                           reachable_from=([&quot;anywhere in the lab&quot;]
+                                           if external_range in ranges
+                                           else [&quot;via a pivot only&quot;]),
+                           type=&quot;AD asset&quot;))
+    for ip, ports, notes in services:
+        assets.append(dict(ip=ip, type=&quot;service&quot;, ports=ports, notes=notes))
+
+    lines, cur = [], None
+    def sec(t):
+        nonlocal cur
+        lines.append((&quot;H&quot;, t)); cur = []
+
+    sec(&quot;HOSTS&quot;)
+    for a in assets:
+        if a[&quot;type&quot;] != &quot;AD asset&quot;: continue
+        lines.append((&quot;L&quot;, f&quot;{a['ip']:&lt;16} {a['name']:&lt;8} {a['role']}&quot;))
+        lines.append((&quot;L&quot;, f&quot;{'':&lt;16} reachable: {', '.join(a['reachable_from'])}&quot;))
+
+    lines.append((&quot;H&quot;, &quot;IDENTITIES&quot;))
+    for u in users:
+        gs = groups.get(u, [])
+        lines.append((&quot;L&quot;, f&quot;{u:&lt;16} {', '.join(gs) if gs else 'no group membership'}&quot;))
+
+    lines.append((&quot;H&quot;, &quot;THE THREE ATTACK SURFACES (each with its reachability)&quot;))
+    surfaces = []
+    if spns:
+        surfaces.append((&quot;SPN / Kerberoasting&quot;,
+            &quot;any authenticated user (or anonymous, for preauth-off accounts)&quot;,
+            &quot;, &quot;.join(spns), &quot;ad-04&quot;))
+    if preauth_off:
+        surfaces.append((&quot;Preauth disabled / AS-REP roasting&quot;,
+            &quot;ANYONE WHO CAN REACH PORT 88 - no credentials&quot;,
+            &quot;, &quot;.join(preauth_off), &quot;ad-04&quot;))
+    if delegation:
+        surfaces.append((&quot;Unconstrained delegation&quot;,
+            &quot;any user who logs in to the delegated host&quot;,
+            &quot;, &quot;.join(delegation), &quot;ad-02&quot;))
+    for s in services:
+        for port, note in s[1]:
+            if port in (445, 139, 88, 389, 5985, 3389, 8080):
+                surfaces.append((f&quot;{note} on port {port}&quot;,
+                    &quot;internal network&quot; if s[0].startswith(&quot;192.168.56&quot;) else &quot;internal only&quot;,
+                    s[0], &quot;ad-06&quot;))
+    for name, reach, targets, ref in surfaces:
+        lines.append((&quot;L&quot;, f&quot;{name}&quot;))
+        lines.append((&quot;L&quot;, f&quot;    reachable by : {reach}&quot;))
+        lines.append((&quot;L&quot;, f&quot;    applies to    : {targets}&quot;))
+        lines.append((&quot;L&quot;, f&quot;    technique     : {ref}&quot;))
+
+    lines.append((&quot;H&quot;, &quot;THE PATHS, AND WHICH IS SHORTEST&quot;))
+    paths = [
+      [&quot;anonymous LDAP&quot;, &quot;enumerate svc-legacy (preauth off)&quot;, &quot;AS-REP roast&quot;,
+       &quot;recover svc-legacy's password&quot;, &quot;log in as svc-legacy&quot;],
+      [&quot;anonymous LDAP&quot;, &quot;enumerate SPNs&quot;, &quot;Kerberoast svc-backup (RC4)&quot;,
+       &quot;recover svc-backup's password&quot;, &quot;it is in Backup Operators&quot;,
+       &quot;escalate to Domain Admin&quot;],
+      [&quot;authenticated as alice&quot;, &quot;alice is in helpdesk&quot;,
+       &quot;GenericAll on IT Support&quot;, &quot;add alice to IT Support&quot;,
+       &quot;GenericWrite on svc-web&quot;, &quot;set an SPN, roast it&quot;,
+       &quot;svc-web is in a privileged group&quot;],
+      [&quot;access to WEB01&quot;, &quot;WEB01 has unconstrained delegation&quot;,
+       &quot;wait for a user to log in&quot;, &quot;capture their forwarded TGT&quot;,
+       &quot;use the TGT as that user&quot;],
+    ]
+    for p in paths:
+        lines.append((&quot;L&quot;, &quot;&quot;))
+        lines.append((&quot;L&quot;, &quot;PATH (&quot; + str(len(p)) + &quot; hops):&quot;))
+        for i, step in enumerate(p, 1):
+            lines.append((&quot;L&quot;, f&quot;    {i}. {step}&quot;))
+
+    w = 62
+    print(f&quot;  {'ATTACK SURFACE MAP':&lt;{w}}&quot;)
+    print(&quot;  &quot; + &quot;=&quot;*w)
+    for kind, text in lines:
+        print(f&quot;  {text}&quot; if kind == &quot;L&quot; else f&quot;\n  {text}\n  &quot; + &quot;-&quot;*w)
+    return {&quot;assets&quot;: assets,
+            &quot;identities&quot;: users, &quot;spns&quot;: spns,
+            &quot;preauth_disabled&quot;: preauth_off, &quot;delegation&quot;: delegation,
+            &quot;generated&quot;: &quot;recon&quot;}
+
+if __name__ == &quot;__main__&quot;:
+    build(
+      ad_hosts=[(&quot;192.168.56.10&quot;, &quot;DC01&quot;, &quot;domain controller&quot;, [&quot;192.168.56.0/24&quot;,&quot;10.10.10.0/24&quot;]),
+                (&quot;192.168.56.11&quot;, &quot;DC02&quot;, &quot;domain controller&quot;, [&quot;192.168.56.0/24&quot;,&quot;10.10.10.0/24&quot;]),
+                (&quot;192.168.56.20&quot;, &quot;WKS01&quot;, &quot;unprivileged workstation&quot;, [&quot;192.168.56.0/24&quot;]),
+                (&quot;192.168.56.21&quot;, &quot;WKS02&quot;, &quot;privileged workstation&quot;, [&quot;192.168.56.0/24&quot;]),
+                (&quot;10.10.10.20&quot;, &quot;SRV01&quot;, &quot;app + file server&quot;, [&quot;10.10.10.0/24&quot;])],
+      external_range=&quot;192.168.56.0/24&quot;, internal_range=&quot;10.10.10.0/24&quot;,
+      users=[&quot;alice&quot;,&quot;bob&quot;,&quot;erin&quot;,&quot;svc-backup&quot;,&quot;svc-legacy&quot;,&quot;svc-web&quot;,&quot;svc-iis&quot;],
+      spns=[&quot;svc-backup (HOST/dc01, RC4)&quot;,&quot;svc-web (HTTP/web01, RC4)&quot;,&quot;svc-iis (HTTP/web02, AES)&quot;],
+      preauth_off=[&quot;svc-legacy&quot;],
+      delegation=[&quot;WEB01 (msDS-AllowedToDelegateTo = ALL)&quot;],
+      groups={&quot;alice&quot;:[&quot;helpdesk&quot;],&quot;bob&quot;:[&quot;helpdesk&quot;],&quot;erin&quot;:[&quot;IT Support&quot;],
+              &quot;svc-backup&quot;:[&quot;Backup Operators&quot;],&quot;svc-web&quot;:[&quot;Helpdesk Operators&quot;],
+              &quot;svc-iis&quot;:[&quot;IIS_IUSRS&quot;]},
+      services=[(&quot;192.168.56.10&quot;,[(88,&quot;Kerberos&quot;),(389,&quot;LDAP&quot;),(445,&quot;SMB&quot;),
+                                   (5985,&quot;WinRM&quot;),(3389,&quot;RDP&quot;)],&quot;Domain controller&quot;),
+                (&quot;10.10.10.20&quot;,[(445,&quot;SMB&quot;),(1433,&quot;MSSQL&quot;),(80,&quot;HTTP&quot;)],&quot;App + file&quot;)])
+PY
+python3 03-map.py 2&gt;&amp;1 | tee 04-map.txt
+</code></pre>
+<h2 id="stop-conditions-for-this-stage">Stop conditions for this stage</h2>
+<pre><code class="language-text">  STOP IMMEDIATELY IF:
+
+  - a scan would touch an address outside 192.168.56.0/24 or
+    10.10.10.0/24. The guard enforces this, but read what it prints.
+
+  - you find an asset that is not in the plan. An unplanned host
+    means either the plan was wrong or something is not what you
+    think it is. Find out which BEFORE scanning it.
+
+  - you find data that looks like it should not be there. Real
+    personal data in a lab means the lab is connected to something
+    real. Stop and check.
+
+  - the volume of traffic is producing an operational effect on the
+    lab. Back off the rate. A lab host is usually a laptop.
+
+  DO NOT STOP FOR:
+  - a finding you did not expect. Write it down, keep going.
+  - a service that is more exposed than the plan assumed. That is
+    the exercise working.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the five recon stages in order and give the reason for that order.</li>
+<li>Why does the anonymous LDAP check come before credentialed recon?</li>
+<li>What is the deliverable of recon, and what is not?</li>
+<li>For each of the three attack surfaces (SPN, preauth-off, delegation), state who can<br />
+   reach it.</li>
+<li>Why does an unplanned asset mean "stop", rather than "scan it too"?</li>
+<li>Why is finding something unexpected <em>not</em> a stop condition?</li>
+<li>What does the map's "reachable by" column prevent?</li>
+<li>Give two stop conditions and two non-stop conditions.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Reconnaissance</strong> → <strong>Attack Surface</strong> → <strong>Passive Recon</strong> → <strong>Active Recon</strong> →<br />
+<strong>Active Directory</strong>.<br />
+<code>cap-03</code> exploits what this map found.</p>

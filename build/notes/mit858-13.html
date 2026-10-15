@@ -1,0 +1,322 @@
+<h1 id="secure-channels">Secure Channels</h1>
+<h2 id="summary">Summary</h2>
+<p>Lecture 13 asks: how do two parties that share no secret establish one? The answer is a protocol<br />
+run over a network you already know is hostile — which is why secure channel protocols are so<br />
+subtle, and why every one of them has been broken at least once.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Key agreement</strong> (Diffie-Hellman) establishes a shared secret without transmitting it</li>
+<li><strong>Authentication</strong> is the hard part: DH alone is vulnerable to a man in the middle</li>
+<li><strong>Signatures</strong> and <strong>certificates</strong> bind an identity to a key</li>
+<li><strong>Forward secrecy</strong>: compromise of the long-term key must not decrypt old traffic</li>
+<li><strong>Ephemeral DH</strong>: a fresh key pair per session, which is what buys forward secrecy</li>
+<li><strong>The transcript matters</strong>: everything exchanged is authenticated, including the handshake itself</li>
+<li>The lecture's preparation reading is the SSL 3.0 analysis (Joux), which is why TLS 1.3 removed<br />
+  the old constructions entirely</li>
+</ul>
+<h2 id="the-problem-stated-precisely">The problem, stated precisely</h2>
+<pre><code class="language-text">1. Alice and Bob want a shared secret, over a network Eve controls
+2. A naive key exchange lets Eve insert herself in the middle
+3. So every exchange needs authentication, and the authentication itself
+   needs keys - which is circular
+</code></pre>
+<p>TLS breaks the circle with <strong>certificates</strong>: a certificate authority vouches that<br />
+this public key belongs to this name. Bob verifies the chain rather than<br />
+trusting Alice's claim.</p>
+<h2 id="why-ephemeral-keys">Why ephemeral keys</h2>
+<pre><code class="language-text">static DH:
+  session key = g^(ab), derived from ONE long-lived pair
+  -&gt; if Alice's private key leaks in 2026, ALL past traffic decrypts
+
+ephemeral DH:
+  fresh a', b' per session
+  session key = g^(a'b')
+  -&gt; the long-term key only authenticated the handshake;
+     it cannot decrypt recorded traffic  (forward secrecy)
+</code></pre>
+<p><strong>Forward secrecy is the property to demand from anything carrying long-lived<br />
+confidential data.</strong> TLS 1.3 and WireGuard both provide it by default. A<br />
+static-RSA key exchange does not — that was the flaw in TLS 1.2's common<br />
+configuration.</p>
+<h2 id="what-must-be-authenticated">What must be authenticated</h2>
+<p>Not just the session key. The <strong>entire transcript</strong>: client hello, server<br />
+hello, certificates, the negotiated parameters, the finished messages. If any<br />
+field is unauthenticated, Eve can alter it.</p>
+<p>The SSL 3.0 flaws were exactly this: fields in the handshake were not covered<br />
+by the integrity check, letting an attacker downgrade the cipher.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Key agreement</strong></td>
+<td>Agreeing a shared secret over a hostile channel</td>
+</tr>
+<tr>
+<td><strong>Diffie-Hellman</strong></td>
+<td>Exponential key agreement</td>
+</tr>
+<tr>
+<td><strong>Man in the middle</strong></td>
+<td>Eve inserts herself between the parties</td>
+</tr>
+<tr>
+<td><strong>Authentication</strong></td>
+<td>Proving a party is who it claims to be</td>
+</tr>
+<tr>
+<td><strong>Digital signature</strong></td>
+<td>Private key signs, public key verifies</td>
+</tr>
+<tr>
+<td><strong>Certificate</strong></td>
+<td>A CA's signature binding a key to an identity</td>
+</tr>
+<tr>
+<td><strong>Forward secrecy</strong></td>
+<td>Long-term compromise does not reveal past traffic</td>
+</tr>
+<tr>
+<td><strong>Ephemeral key</strong></td>
+<td>Key used for one session, then discarded</td>
+</tr>
+<tr>
+<td><strong>Transcript</strong></td>
+<td>The full ordered list of exchanged messages</td>
+</tr>
+<tr>
+<td><strong>Downgrade attack</strong></td>
+<td>Forcing both parties onto weaker parameters</td>
+</tr>
+<tr>
+<td><strong>Truncation attack</strong></td>
+<td>Hiding messages by dropping from the transcript</td>
+</tr>
+<tr>
+<td><strong>Nonce</strong></td>
+<td>Unique per message; prevents replay</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what TLS looks like on the wire ---
+openssl s_client -connect example.com:443 -servername example.com &lt;/dev/null 2&gt;&amp;1 \
+  | grep -E &quot;Protocol|Cipher|Server Temp Key|Peer sign|Verification&quot; | head -8
+
+# --- the negotiated parameters ---
+echo | openssl s_client -connect example.com:443 2&gt;/dev/null \
+  | grep -E &quot;^New|Server Temp Key|Signature Algorithm&quot; | head -6
+
+# --- what is the certificate saying? ---
+echo | openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+  | openssl x509 -noout -subject -issuer -dates 2&gt;/dev/null
+
+# --- cipher suite inventory: what will your client accept? ---
+openssl ciphers -v 'TLS_AES_256_GCM_SHA384' 2&gt;/dev/null | head -3
+openssl ciphers -s -v 'ALL:eNULL' 2&gt;/dev/null | tr ':' '\n' | grep -ciE &quot;NULL|EXPORT|RC4|DES|MD5&quot;
+
+# --- forward secrecy in practice: does the server negotiate an ephemeral key? ---
+echo | openssl s_client -connect example.com:443 2&gt;/dev/null | grep -c &quot;Server Temp Key&quot;
+echo &quot;  &gt; 0 = ephemeral DH, so forward secrecy is available&quot;
+
+# --- HSTS, and what it prevents ---
+curl -sI --max-time 5 https://example.com/ 2&gt;/dev/null | grep -i &quot;strict-transport&quot;
+
+# --- pin it down yourself ---
+echo &quot;=== what a certificate is ===&quot;
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/aegis.key -out /tmp/aegis.crt \
+  -days 3 -nodes -subj &quot;/CN=aegis-lab&quot; 2&gt;/dev/null
+openssl x509 -in /tmp/aegis.crt -noout -text | grep -E &quot;Subject:|Issuer:|Not Before|Not After|Public-Key&quot; | head -6
+rm -f /tmp/aegis.key /tmp/aegis.crt
+echo &quot;  self-signed = you are both the CA and the leaf. That is fine for a lab.&quot;
+echo &quot;  Real trust requires a CA that browsers already trust.&quot;
+
+# --- a self-signed server, to see a handshake from both sides ---
+python3 - &lt;&lt;'PY'
+import ssl, socket, threading, subprocess, tempfile, os
+print(&quot;  generating a self-signed cert...&quot;)
+subprocess.run(&quot;&quot;&quot;openssl req -x509 -newkey rsa:2048 -keyout /tmp/lab.key -out /tmp/lab.crt \
+  -days 1 -nodes -subj '/CN=localhost' 2&gt;/dev/null&quot;&quot;&quot;, shell=True)
+
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(&quot;/tmp/lab.crt&quot;, &quot;/tmp/lab.key&quot;)
+print(f&quot;  minimum version we will accept: {ssl.TLSVersion.TLSv1_2}&quot;)
+
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind((&quot;127.0.0.1&quot;, 8443)); srv.listen(1)
+def serve():
+    try:
+        c, _ = srv.accept()
+        with ctx.wrap_socket(c, server_side=True) as s:
+            s.sendall(b&quot;hello over TLS\n&quot;)
+    except Exception as e:
+        print(&quot;  server:&quot;, type(e).__name__)
+threading.Thread(target=serve, daemon=True).start()
+
+cctx = ssl.create_default_context()
+cctx.check_hostname = False
+cctx.verify_mode = ssl.CERT_NONE
+with socket.create_connection((&quot;127.0.0.1&quot;, 8443), timeout=3) as raw:
+    with cctx.wrap_socket(raw, server_hostname=&quot;localhost&quot;) as s:
+        print(f&quot;  negotiated: {s.version()}  cipher: {s.cipher()[0]}&quot;)
+        print(f&quot;  peer cert subject: {dict(x[0] for x in s.getpeercert().get('subject',[]))}&quot;)
+        print(f&quot;  received  : {s.recv(64)!r}&quot;)
+os.remove(&quot;/tmp/lab.crt&quot;); os.remove(&quot;/tmp/lab.key&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> inspect real TLS parameters, and watch a handshake negotiate in Python.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/mit858-13 &amp;&amp; cd ~/aegis/labs/mit858-13
+
+# --- 1. what a real handshake looks like ---
+{
+  echo &quot;=== TLS handshake, from the client side ===&quot;
+  echo | timeout 12 openssl s_client -connect example.com:443 -servername example.com 2&gt;&amp;1 \
+    | grep -E &quot;^(New|Protocol|Cipher|Server Temp Key|Secure Renegotiation|Compression)&quot; | head -10
+} 2&gt;&amp;1 | tee 01-handshake.txt
+
+# --- 2. the certificate, decoded ---
+{
+  echo &quot;=== certificate chain ===&quot;
+  echo | timeout 12 openssl s_client -connect example.com:443 -servername example.com 2&gt;&amp;1 \
+    | grep -E &quot;^ *[0-9] s:|^ *i:&quot; | head -10
+  echo
+  echo &quot;=== leaf certificate fields ===&quot;
+  echo | timeout 12 openssl s_client -connect example.com:443 -servername example.com 2&gt;/dev/null \
+    | openssl x509 -noout -subject -issuer -dates -ext subjectAltName 2&gt;/dev/null
+  echo
+  echo &quot;=== why it verified ===&quot;
+  echo | timeout 12 openssl s_client -connect example.com:443 2&gt;&amp;1 | grep -iE &quot;verify return code&quot; | head -2
+} 2&gt;&amp;1 | tee 02-cert.txt
+
+# --- 3. is forward secrecy available? ---
+{
+  echo &quot;=== ephemeral key check ===&quot;
+  echo | timeout 12 openssl s_client -connect example.com:443 2&gt;&amp;1 | grep -i &quot;Server Temp Key&quot;
+  echo &quot;  If a 'Server Temp Key' appears, the server used ephemeral DH:&quot;
+  echo &quot;  forward secrecy holds, and a later key compromise does not decrypt this.&quot;
+  echo
+  echo &quot;=== what happens without it (static RSA, pre-TLS1.3) ===&quot;
+  echo &quot;  In TLS 1.2 with an RSA key exchange, the premaster secret is encrypted&quot;
+  echo &quot;  under the server's long-term PUBLIC key. Recovering one recorded&quot;
+  echo &quot;  session is just a factoring exercise. That is why TLS 1.3 removed it.&quot;
+} 2&gt;&amp;1 | tee 03-forward-secrecy.txt
+
+# --- 4. cipher suite hygiene ---
+{
+  echo &quot;=== what a modern client should offer ===&quot;
+  echo &quot;  TLS 1.3: AES-256-GCM, ChaCha20-Poly1305, AES-128-GCM only.&quot;
+  echo
+  echo &quot;=== what must never be enabled ===&quot;
+  for bad in NULL EXPORT RC4 DES MD5 anon; do
+    printf &quot;  %-8s ciphers offered: %s\n&quot; &quot;$bad&quot; \
+      &quot;$(openssl ciphers -v &quot;ALL:!$bad&quot; 2&gt;/dev/null | tr ':' '\n' | grep -ciE &quot;$bad&quot; 2&gt;/dev/null || echo 0)&quot;
+  done
+  echo
+  echo &quot;  Any cipher with NULL (no encryption), EXPORT (breakable), RC4/DES&quot;
+  echo &quot;  (weak), or MD5 (collision-broken) in the offered list is a finding.&quot;
+  echo
+  echo &quot;=== server preference matters more than client preference ===&quot;
+  echo &quot;  openssl ciphers -s -v 'TLSv1.3' | head -4&quot;
+} 2&gt;&amp;1 | tee 04-ciphers.txt
+
+# --- 5. a real handshake in Python, on loopback ---
+cat &gt; handshake.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Create a TLS server and client on loopback and print what was negotiated.&quot;&quot;&quot;
+import ssl, socket, threading, subprocess, os, tempfile
+
+d = tempfile.mkdtemp()
+crt, key = f&quot;{d}/c.crt&quot;, f&quot;{d}/c.key&quot;
+subprocess.run([&quot;openssl&quot;,&quot;req&quot;,&quot;-x509&quot;,&quot;-newkey&quot;,&quot;rsa:2048&quot;,&quot;-keyout&quot;,key,
+                &quot;-out&quot;,crt,&quot;-days&quot;,&quot;1&quot;,&quot;-nodes&quot;,&quot;-subj&quot;,&quot;/CN=localhost&quot;],
+               capture_output=True)
+
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind((&quot;127.0.0.1&quot;, 8444)); srv.listen(1)
+
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(crt, key)
+print(f&quot;  server minimum TLS version : {ctx.minimum_version}&quot;)
+
+def serve():
+    try:
+        c,_ = srv.accept()
+        with ctx.wrap_socket(c, server_side=True) as s:
+            s.sendall(b&quot;hello over TLS\n&quot;)
+    except Exception as e:
+        print(&quot;  server error:&quot;, type(e).__name__, e)
+
+threading.Thread(target=serve, daemon=True).start()
+
+cctx = ssl.create_default_context()
+cctx.check_hostname = False
+cctx.verify_mode = ssl.CERT_NONE
+with socket.create_connection((&quot;127.0.0.1&quot;,8444), timeout=5) as raw:
+    with cctx.wrap_socket(raw, server_hostname=&quot;localhost&quot;) as s:
+        print(f&quot;  negotiated version         : {s.version()}&quot;)
+        print(f&quot;  negotiated cipher          : {s.cipher()[0]}&quot;)
+        print(f&quot;  peer certificate present  : {s.getpeercert(binary_form=True) is not None}&quot;)
+        print(f&quot;  server side temp key       : {s.server_hostname}&quot;)
+        print(f&quot;  payload received           : {s.recv(64)!r}&quot;)
+
+srv.close()
+for f in (crt,key): os.remove(f)
+os.rmdir(d)
+PY
+chmod +x handshake.py
+python3 handshake.py | tee 05-python-tls.txt
+
+# --- 6. the attack surface, written out ---
+cat &gt; 06-threats.md &lt;&lt;'EOF'
+# What a secure channel must get right
+
+## Attacks the protocol must defeat
+1. **Passive eavesdropper** -&gt; confidentiality (encryption)
+2. **Active MITM** -&gt; authentication, and the transcript must be covered
+3. **Replay** -&gt; nonces and sequence numbers
+4. **Downgrade** -&gt; the negotiation must be authenticated *after* it completes
+5. **Truncation** -&gt; the finished MAC covers every message
+6. **Key compromise later** -&gt; forward secrecy (ephemeral keys)
+7. **Compromised CA** -&gt; the client must actually verify the chain
+8. **Traffic analysis** -&gt; padding, size leaks (TLS does not fully solve this)
+
+## The SSL 3.0 lesson (the lecture's preparation reading)
+- The handshake had fields not covered by the finished MAC
+- An attacker could alter the cipher suite to a weaker one
+- This is why TLS 1.3 removed the old constructions entirely rather than
+  patching them
+
+## TLS 1.3's simplifications
+- removed static RSA and static DH (forward secrecy is mandatory)
+- removed CBC modes (padding oracle class of attacks)
+- removed compression (CRIME)
+- zero-RTT early data reintroduced replay risk, so it is for idempotent
+  requests only
+- fewer cipher suites, less negotiation, fewer places for bugs
+
+## The takeaway
+Security protocols fail at the edges of the specification, not in the core
+math. Every field that is exchanged but not authenticated is a hole.
+EOF
+cat 06-threats.md
+</code></pre>
+<p><strong>Step 5 is the payoff</strong>: a full TLS handshake on loopback, in 30 lines of Python, printing the<br />
+negotiated version, cipher and certificate — the abstract protocol made concrete.</p>
+<p><strong>Record:</strong> <code>03-forward-secrecy.txt</code> and <code>06-threats.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does Diffie-Hellman alone not prevent a man in the middle?</li>
+<li>What is forward secrecy, and what single change provides it?</li>
+<li>Why is the transcript authenticated, not just the session key?</li>
+<li>What did SSL 3.0 get wrong, and what did TLS 1.3 do about it?</li>
+<li>Name two attacks TLS 1.3 removed constructions for.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Key Exchange</strong> → <strong>Asymmetric Encryption</strong> → <strong>Digital Signature</strong> → <strong>TLS Handshake</strong> →<br />
+<strong>Certificate</strong> → <strong>Man-in-the-Middle</strong>.</p>

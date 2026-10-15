@@ -1,0 +1,255 @@
+<h1 id="passive-infrastructure-discovery-and-subdomain-enumeration">Passive Infrastructure Discovery and Subdomain Enumeration</h1>
+<h2 id="summary">Summary</h2>
+<p>One technique does most of the work in passive reconnaissance: <strong>certificate transparency.</strong> It<br />
+returns a complete, non-intrusive inventory of every hostname an organisation has ever had a<br />
+certificate for, including the ones they have since forgotten.</p>
+<p>The framing: <strong>the goal is not the subdomain list. It is the host that<br />
+still exists and nobody owns.</strong> Enumeration is the mechanism.</p>
+<blockquote>
+<p>Companion to <code>tcm-02</code> (the operational workflow) and <code>osi-01</code> (the<br />
+method). This note is the technique, in depth.</p>
+</blockquote>
+<h2 id="ct-logs-and-why-they-are-the-highest-yield">CT logs, and why they are the highest yield</h2>
+<pre><code class="language-text">  WHAT IT IS
+    Before 2017, a CA could issue a certificate for a name without
+    anyone being told. Certificate Transparency logs fixed that: every
+    issuance is published to append-only logs that anyone can query.
+
+  WHY IT IS A FINDING IN ITSELF
+    A name you issued a certificate for is a name you wanted reachable
+    OR a name someone tricked you into issuing for. Both are relevant,
+    and the second one is how many takeovers happen: a subdomain
+    points at a dead CNAME, the certificate is still valid, and
+    someone claims the SaaS tenant.
+
+  THE COST: ZERO. No packet reaches the target. No log entry. No
+  rate limit. You are querying Google's public log index, not the
+  target's web server.
+
+  THE LIMITATIONS, honestly
+    - it only covers names that had HTTPS. HTTP-only names are absent
+    - it does not give you IPs. You resolve the names separately.
+    - the log is the CA's record, so a mis-issued certificate for
+      someone else's name appears too. Filter by the apex domain.
+    - a wildcard cert (CN=*.example.com) appears as the literal
+      string, not as every possible subdomain. That is a limitation
+      of the source, not a bug.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/osi-02 &amp;&amp; cd ~/aegis/labs/osi-02
+mkdir -p raw findings
+
+# --- 1. the CT enumeration ---
+cat &gt; 01-ct.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# Certificate Transparency enumeration. PASSIVE: no packets reach the
+# target's web services. This is querying a public log index.
+DOMAIN=&quot;${1:?usage: ./01-ct.sh &lt;domain&gt;}&quot;
+mkdir -p raw
+Q=$(python3 -c &quot;import base64,sys;print(base64.b64encode(sys.argv[1].encode()).decode())&quot; &quot;$DOMAIN&quot;)
+echo &quot;=== CT LOGS for $DOMAIN ===&quot;
+curl -s --max-time 25 &quot;https://crt.sh/?q=${Q}&amp;output=json&quot; -o &quot;raw/crt-$DOMAIN.json&quot; 2&gt;/dev/null
+python3 - &quot;raw/crt-$DOMAIN.json&quot; &quot;$DOMAIN&quot; &lt;&lt;'PY'
+import json, sys, collections
+path, domain = sys.argv[1], sys.argv[2].lower()
+try: rows = json.load(open(path))
+except Exception as e:
+    sys.exit(f&quot;  (crt.sh unreachable or returned non-JSON: {e})&quot;)
+names, dates = set(), []
+for r in rows:
+    for n in (r.get(&quot;name_value&quot;) or &quot;&quot;).split(&quot;\n&quot;):
+        n = n.strip().lower().lstrip(&quot;*.&quot;)
+        if not n or &quot;.&quot; not in n: continue
+        if not (n == domain or n.endswith(&quot;.&quot; + domain)): continue   # apex filter
+        names.add(n)
+    if r.get(&quot;not_before&quot;): dates.append(r[&quot;not_before&quot;][:10])
+print(f&quot;\n  {len(rows)} certificate records&quot;)
+print(f&quot;  {len(names)} distinct hostnames under {domain}\n&quot;)
+for n in sorted(names): print(&quot;   &quot;, n)
+print(f&quot;\n  earliest issuance in the log: {min(dates) if dates else 'n/a'}&quot;)
+print(f&quot;  latest issuance in the log  : {max(dates) if dates else 'n/a'}&quot;)
+# wildcards, which are a limitation worth stating
+wc = [r.get(&quot;name_value&quot;) for r in rows if &quot;*&quot; in (r.get(&quot;name_value&quot;) or &quot;&quot;)]
+if wc: print(f&quot;\n  {len(wc)} records are WILDCARD certificates.&quot;)
+print(&quot;    ^ a wildcard cert does not enumerate subdomains. Anything&quot;)
+print(&quot;      you find for those must come from another source.&quot;)
+PY
+EOF
+chmod +x 01-ct.sh
+
+# --- 2. the passive sources beyond CT ---
+cat &gt; 02-sources.md &lt;&lt;'MD'
+# Passive sources beyond CT
+
+```text
+  CERTIFICATE TRANSPARENCY
+    crt.sh           the free index, JSON output, the workhorse
+    RapidDNS         subdomain database, CT-derived
+    bufferover.run  DNS + certificates
+    Cert Spotter     Censys's CT interface
+    ^ these are queries against THEIR indexes. Not the target.
+
+  HISTORICAL DNS (passive, from third-party resolvers)
+    SecurityTrails  free tier
+    ViewDNS.info    free
+    a.gtld / Google passive DNS for some TLDs
+    hackertarget hostsearch
+    ^ THIS IS THE HIGHEST-VALUE CATEGORY after CT, because it gives
+      you IPs for names that no longer resolve publicly. A retired
+      host on a range the org still owns is the finding.
+
+  PASSIVE BANNER DATABASES
+    Shodan, Censys, FOFA
+    ^ gives you open ports on their index without you sending a
+      packet. Note: the data is OLD. A port open in Shodan's index
+      six months ago proves the port was open then.
+
+  PUBLIC CODE
+    github.com/search?q=&quot;&lt;domain&gt;&quot;
+    grep.app          searches public code without an account
+    ^ a config, an .env, a Terraform file, or a log with an
+      internal hostname is the single highest-value find in OSINT.
+
+  ARCHIVES
+    Wayback Machine  the URL history, including retired endpoints
+    urlscan.io       public scan history, including screenshots
+    ^ urlscan has public scan data for domains that nobody scans
+      today. Someone scanned it before you did; read their result.
+
+  DNS BRUTE FORCE (semi-passive)
+    a wordlist against the authoritative server. This DOES send
+    queries to the target's nameservers, so it is not passive and it
+    is in ROE scope.
+MD
+</code></pre>
+<pre><code class="language-bash"># the ones that take one command
+echo &quot;=== Wayback: retired URLs ===&quot;
+curl -s &quot;http://archive.org/wayback/available?url=$DOMAIN&quot; | python3 -m json.tool
+curl -s &quot;http://web.archive.org/cdx/search/cdx?url=*.${DOMAIN}/*&amp;output=json&amp;fl=original,timestamp,statuscode&amp;collapse=urlkey&amp;limit=200&quot; \
+  | python3 -c &quot;
+import sys, json
+rows = json.load(sys.stdin)
+print(f'  {len(rows)-1} archived URLs')
+seen = {}
+for o, t, s in rows[1:]:
+    seen.setdefault(s, []).append(o)
+for s, urls in sorted(seen.items()):
+    print(f'    status {s}: {len(urls)} URLs')
+    for u in urls[:5]: print(f'      {u}')
+&quot;
+echo
+echo &quot;=== urlscan.io: what OTHER people scanned ===&quot;
+curl -s &quot;https://urlscan.io/api/v1/search/?q=domain:${DOMAIN}&amp;size=100&quot; | python3 -c &quot;
+import sys, json
+d = json.load(sys.stdin)
+print(f'  {d.get(\&quot;total\&quot;, 0)} public scans')
+for r in d.get('results', [])[:15]:
+    t = r['page'] if isinstance(r.get('page'), dict) else {}
+    print(f\&quot;    {r.get('task',{}).get('time','')[:10]}  {t.get('url','?')}\&quot;)
+    print(f\&quot;      ip={r.get('page',{}).get('ip','?')}  server={r.get('page',{}).get('server','?')}\&quot;)
+&quot;
+echo
+echo &quot;=== grep.app: public code, no account needed ===&quot;
+curl -s &quot;https://grep.app/api/search?q=${DOMAIN}&quot; | python3 -c &quot;
+import sys, json
+d = json.load(sys.stdin)
+hits = d.get('facets',{}).get('count', 0)
+print(f'  {hits} occurrences in public code')
+for h in d.get('hits',{}).get('hits', [])[:10]:
+    print(f\&quot;    {h.get('repo',{}).get('raw')}  {h.get('path',{}).get('raw')}\&quot;)
+&quot;
+</code></pre>
+<h2 id="from-a-name-list-to-a-target-list">From a name list to a target list</h2>
+<pre><code class="language-python">cat &gt; 03-resolve.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Turn a name list into a target list, and RANK it.
+
+The point of this script is the ranking. A list of 200 hostnames
+resolving is not intelligence. Four of them resolving, unowned, to a
+range the organisation still holds, IS intelligence.
+&quot;&quot;&quot;
+import socket, sys, json, collections
+from datetime import datetime, timezone
+
+def resolve(host, timeout=3):
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        return sorted({i[4][0] for i in infos})
+    except Exception:
+        return []
+
+def main(names_file, out_file):
+    names = [n.strip() for n in open(names_file) if n.strip()]
+    results = {}
+    for n in names:
+        results[n] = resolve(n)
+
+    # group by IP, because several names on one IP is a finding
+    by_ip = collections.defaultdict(list)
+    for n, ips in results.items():
+        for ip in ips: by_ip[ip].append(n)
+
+    now = datetime.now(timezone.utc).isoformat()
+    ranked = []
+    for ip, hosts in by_ip.items():
+        score, reasons = 0, []
+        if len(hosts) &gt; 1:
+            score += 3
+            reasons.append(f&quot;{len(hosts)} names on one IP ({', '.join(hosts[:4])})&quot;)
+        for h in hosts:
+            if h.startswith((&quot;admin&quot;,&quot;vpn&quot;,&quot;remote&quot;,&quot;gateway&quot;,&quot;portal&quot;,
+                            &quot;legacy&quot;,&quot;old&quot;,&quot;test&quot;,&quot;staging&quot;,&quot;dev&quot;,&quot;backup&quot;,
+                            &quot;intranet&quot;,&quot;owa&quot;,&quot;exchange&quot;,&quot;sql&quot;,&quot;db&quot;,&quot;jenkins&quot;,
+                            &quot;gitlab&quot;,&quot;jira&quot;,&quot;monitor&quot;,&quot;grafana&quot;,&quot;kibana&quot;)):
+                score += 2
+                reasons.append(f&quot;high-value name: {h}&quot;)
+                break
+        if ip.startswith((&quot;127.&quot;,&quot;0.&quot;)):
+            score -= 5; reasons.append(&quot;loopback (a dangling CNAME)&quot;)
+        ranked.append((score, ip, hosts, reasons))
+    ranked.sort(reverse=True)
+
+    print(f&quot;  {len(names)} names, {len(results)} resolved, &quot;
+          f&quot;{len(by_ip)} distinct addresses\n&quot;)
+    print(f&quot;  {'SCORE':&lt;6} {'ADDRESS':&lt;17} NAMES&quot;)
+    print(&quot;  &quot; + &quot;-&quot;*78)
+    for score, ip, hosts, reasons in ranked[:25]:
+        print(f&quot;  {score:&lt;6} {ip:&lt;17} {', '.join(hosts[:3])}&quot;
+              f&quot;{' ...' if len(hosts)&gt;3 else ''}&quot;)
+        for r in reasons[:2]: print(f&quot;         - {r}&quot;)
+
+    json.dump({&quot;observed_at&quot;: now, &quot;by_ip&quot;:
+               {ip: hosts for _, ip, hosts, _ in ranked}},
+              open(out_file, &quot;w&quot;), indent=2)
+    print(f&quot;\n  written: {out_file}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    if len(sys.argv) &lt; 3:
+        print(__doc__); print(&quot;usage: 03-resolve.py names.txt out.json&quot;)
+        sys.exit(0)
+    main(sys.argv[1], sys.argv[2])
+PY
+echo &quot;written: 03-resolve.py&quot;
+</code></pre>
+<p><strong>Step 3 is the deliverable</strong>: <code>03-resolve.py</code> turns a name list into a <em>ranked</em> target list.<br />
+Four hostnames on one IP, or a name like <code>legacy</code> or <code>jenkins</code>, scores higher than fifty lone<br />
+subdomains — because 200 resolved hostnames is not intelligence, while four that resolve to a<br />
+range the organisation still owns is.</p>
+<p><strong><code>01-ct.sh</code></strong> enforces the discipline: it filters by apex domain (because CT logs include<br />
+certificates mis-issued for <em>other</em> people's names in yours), and it explicitly states the<br />
+limitation that a wildcard certificate does <strong>not</strong> enumerate subdomains.</p>
+<p><strong>Record:</strong> <code>01-ct.sh</code> and <code>03-resolve.py</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is certificate transparency the highest-yield passive source?</li>
+<li>Why is it still passive — what is actually being queried?</li>
+<li>Give three limitations of CT, including the wildcard case.</li>
+<li>Why is historical DNS the second-highest-value category?</li>
+<li>Why is data from a passive banner database a weaker finding than a live scan?</li>
+<li>What does several hostnames resolving to one IP tell you?</li>
+<li>Name five high-value subdomain prefixes and why they matter.</li>
+<li>Which sources in this note are <em>not</em> passive, and what does that change?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Passive Recon</strong> → <strong>Subdomain Enumeration</strong> → <strong>Reconnaissance</strong> →<br />
+<strong>Attack Surface</strong> → <strong>OSINT</strong>.<br />
+<code>tcm-03</code> is where the passive list becomes an active scan.</p>

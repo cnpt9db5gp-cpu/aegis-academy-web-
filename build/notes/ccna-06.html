@@ -1,0 +1,236 @@
+<h1 id="tcp-udp-and-the-three-way-handshake">TCP, UDP and the Three-Way Handshake</h1>
+<h2 id="summary">Summary</h2>
+<p>Transport layer: ports, connection state, reliability. This lecture is where scanning becomes<br />
+predictable, because nmap's scan types and every network service's behaviour are direct<br />
+consequences of how TCP establishes, uses, and tears down a connection.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Three-way handshake</strong>: SYN → SYN/ACK → ACK. This is why state exists and why SYN scanning works</li>
+<li><strong>Four-way FIN</strong> teardown, <strong>RST</strong> for immediate abort</li>
+<li><strong>Half-open</strong>: a SYN scan never completes the handshake, so the server logs little</li>
+<li><strong>Sequence numbers</strong>: 32-bit, per-direction. The basis of TCP sequence prediction attacks</li>
+<li><strong>UDP has no handshake</strong> — no state, no guarantee. Scanning UDP is slow and unreliable</li>
+<li><strong>Ports</strong>: 0-1023 well-known, 1024-49151 registered, 49152-65535 ephemeral</li>
+<li>Time-wait exists to make sequence numbers unique</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SYN</strong></td>
+<td>Synchronise — start a connection</td>
+</tr>
+<tr>
+<td><strong>ACK</strong></td>
+<td>Acknowledge</td>
+</tr>
+<tr>
+<td><strong>FIN</strong></td>
+<td>Finish — orderly close</td>
+</tr>
+<tr>
+<td><strong>RST</strong></td>
+<td>Reset — abortive close</td>
+</tr>
+<tr>
+<td><strong>Three-way handshake</strong></td>
+<td>SYN, SYN/ACK, ACK</td>
+</tr>
+<tr>
+<td><strong>Half-open</strong></td>
+<td>SYN sent, handshake never completed</td>
+</tr>
+<tr>
+<td><strong>Sequence number</strong></td>
+<td>Per-byte position counter</td>
+</tr>
+<tr>
+<td><strong>Time-wait</strong></td>
+<td>2MSL delay after close, to avoid old packets</td>
+</tr>
+<tr>
+<td><strong>Ephemeral port</strong></td>
+<td>Client-side temporary port</td>
+</tr>
+<tr>
+<td><strong>MTU</strong></td>
+<td>Largest payload a link will carry</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the state machine on this machine ---
+# --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+ss -tan | head -15
+ss -tan state time-wait | wc -l
+ss -tan state established | head -5
+ss -s
+
+# --- the ephemeral port range (why scans find thousands of ports &quot;open&quot; on loopback) ---
+cat /proc/sys/net/ipv4/ip_local_port_range
+ss -tan | awk '{print $4}' | grep -oE '[0-9]+$' | sort -n | uniq -c | sort -rn | head -5
+
+# --- three-way handshake, captured ---
+echo &quot;  terminal 1: sudo tcpdump -i lo -n 'tcp port 9001' &quot;
+echo &quot;  terminal 2: (nc -l -p 9001 &amp;) ; sleep 1; echo hi | nc 127.0.0.1 9001&quot;
+
+sudo timeout 15 tcpdump -i lo -n -c 20 &quot;tcp port 9001&quot; 2&gt;/dev/null | tee 01-handshake.txt &amp;
+NC1=$!; sleep 1
+(nc -l -p 9001 &gt; /dev/null 2&gt;&amp;1 &amp;) ; sleep 1
+echo &quot;hello&quot; | timeout 3 nc 127.0.0.1 9001 2&gt;/dev/null
+sleep 4; wait $NC1 2&gt;/dev/null
+cat 01-handshake.txt
+echo &quot;Read: SYN &gt; SYN,ACK &gt; ACK, then PSH/ACK data, then FIN/FIN-ACK.&quot;
+
+# --- why a SYN scan is quieter than a connect scan ---
+echo &quot;=== nmap TCP states observed by the kernel ===&quot;
+grep -E &quot;^ *SYN&quot; /proc/net/snmp 2&gt;/dev/null | head -2
+ss -tan | awk '{print $1}' | sort | uniq -c | sort -rn | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> capture a full handshake and read every field, then map it to nmap scan types.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/ccna-06 &amp;&amp; cd ~/aegis/labs/ccna-06
+
+# --- 1. capture and decode a complete conversation ---
+sudo timeout 20 tcpdump -i lo -n -c 40 &quot;tcp port 9002&quot; -w 01-handshake.pcap 2&gt;/dev/null &amp;
+TC=$!
+sleep 1
+(nc -l -p 9002 &gt;/dev/null 2&gt;&amp;1 &amp;)
+sleep 1
+echo &quot;hello from the client&quot; | timeout 3 nc 127.0.0.1 9002 2&gt;/dev/null
+sleep 5
+wait $TC 2&gt;/dev/null
+
+# --- 2. read it back, with the states made explicit ---
+{
+  echo &quot;=== the conversation, flag by flag ===&quot;
+  sudo tcpdump -i lo -n -r 01-handshake.pcap 2&gt;/dev/null | head -20
+  echo
+  echo &quot;=== annotations ===&quot;
+  cat &lt;&lt;'EOF'
+  1. SYN           client wants to connect, sends its initial sequence number (ISN)
+  2. SYN,ACK       server agrees, replies with its own ISN, ACKs yours
+  3. ACK           client acknowledges; connection is now ESTABLISHED
+  4. PSH,ACK       actual payload, pushed immediately
+  5. FIN,ACK       orderly close from one side
+  6. FIN,ACK       the other side closes too
+  7. ACK           final acknowledgement; both sides enter TIME_WAIT
+EOF
+} | tee 02-annotated.txt
+
+# --- 3. the state machine, as this host sees it ---
+{
+  echo &quot;=== connection states right now ===&quot;
+  ss -tan | awk 'NR&gt;1{print $1}' | sort | uniq -c | sort -rn
+  echo
+  echo &quot;=== TCP counters from /proc/net/snmp ===&quot;
+  grep -A1 &quot;^Tcp:&quot; /proc/net/snmp | head -2 | tail -1 | tr ' ' '\n' | \
+    grep -iE &quot;attempt|estab|listen|retrans&quot; | head -8
+} 2&gt;&amp;1 | tee 03-states.txt
+
+# --- 4. the same thing, but with SYN only (half-open) ---
+python3 - &lt;&lt;'PY' | tee 04-synonly.txt
+import socket, struct, time
+
+def syn_only(host, port):
+    &quot;&quot;&quot;Open a raw socket and send only a SYN. Never complete the handshake.&quot;&quot;&quot;
+    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+    s.setsockopt(socket.IPPROTO_TCP, socket.IP_TTL, 64)
+    seq = 1000
+    src_port = 40000
+    flags = 0x02                        # SYN
+    pseudo = socket.inet_aton(host) + socket.inet_aton(&quot;127.0.0.1&quot;)
+    pseudo += struct.pack(&quot;&gt;H&quot;, src_port) + struct.pack(&quot;&gt;H&quot;, port) + struct.pack(&quot;&gt;I&quot;, seq)
+    pseudo += b&quot;\x00&quot; * 8 + struct.pack(&quot;!BBH&quot;, (5 &lt;&lt; 4), flags, 65535)
+    check = sum(struct.unpack(&quot;!%dH&quot; % (len(pseudo)//2), pseudo))
+    check = (check &gt;&gt; 16) + (check &amp; 0xFFFF); check += check &gt;&gt; 16
+    check = ~check &amp; 0xFFFF
+    tcp = struct.pack(&quot;!HHIIBBHHH&quot;, src_port, port, seq, 0, (5&lt;&lt;4), flags, 65535, check, 0)
+    s.sendto(struct.pack(&quot;!BBHHHBBH&quot;, 0x45, 0, 40+20, 0, 64, 6, 64, 0) +
+             socket.inet_aton(&quot;127.0.0.1&quot;) + socket.inet_aton(host) + tcp,
+             (host, port))
+    s.close()
+    return &quot;SYN sent, handshake NOT completed&quot;
+
+print(&quot;  &quot;, syn_only(&quot;127.0.0.1&quot;, 9002))
+print(&quot;  A SYN scan leaves the server with a half-open connection and far less logging.&quot;)
+print(&quot;  A connect scan (-sT) completes the handshake and is fully logged.&quot;)
+PY
+
+# --- 5. why loopback shows thousands of ports (matters for reading scans) ---
+{
+  echo &quot;=== loopback open ports, top 10 ===&quot;
+  nmap -sT -p- --min-rate 2000 127.0.0.1 2&gt;/dev/null | grep open | head -10
+  echo
+  echo &quot;count: $(nmap -sT -p- --min-rate 5000 127.0.0.1 2&gt;/dev/null | grep -c open)&quot;
+  echo
+  echo &quot;Most of those are ephemeral client sockets, not listening services.&quot;
+  echo &quot;A scanner that ignores this misreads its own machine.&quot;
+} 2&gt;&amp;1 | tee 05-loopback-ports.txt
+
+# --- 6. UDP has no handshake ---
+python3 - &lt;&lt;'PY' | tee 06-udp.txt
+import socket
+for port in (53, 123, 161, 500, 1900):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1.0)
+    try:
+        s.sendto(b&quot;\x00&quot;, (&quot;127.0.0.1&quot;, port))
+        data, addr = s.recvfrom(1024)
+        print(f&quot;  {port:&lt;6} replied {len(data)} bytes -&gt; OPEN or filtered-but-responding&quot;)
+    except socket.timeout:
+        print(f&quot;  {port:&lt;6} no reply -&gt; CLOSED or FILTERED (indistinguishable)&quot;)
+    except OSError as e:
+        print(f&quot;  {port:&lt;6} {type(e).__name__}&quot;)
+    finally: s.close()
+print()
+print(&quot;This ambiguity is why nmap reports UDP ports as 'open|filtered'.&quot;)
+PY
+</code></pre>
+<p><strong>Step 1 is the deliverable.</strong> Read <code>02-annotated.txt</code> and make sure you can identify each of the<br />
+seven packets from memory. Every network tool you use emits exactly these.</p>
+<p><strong>Record:</strong> <code>01-handshake.pcap</code> and <code>02-annotated.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>List the three packets of the handshake and the state after each.</li>
+<li>Why is a SYN scan quieter than a connect scan?</li>
+<li>Why does UDP give <code>open|filtered</code> rather than a clean open/closed?</li>
+<li>Why does TIME_WAIT exist, and what would break without it?</li>
+<li>Why does <code>nmap -p- 127.0.0.1</code> report hundreds of open ports?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>TCP Three-Way Handshake</strong> → <strong>TCP State</strong> → <strong>Port Scanning</strong> → <strong>SYN Scan</strong> → <strong>Socket</strong> →<br />
+<strong>UDP</strong>.</p>

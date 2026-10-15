@@ -1,0 +1,157 @@
+<h1 id="network-models-osi-and-tcpip-stacks">Network Models, OSI and TCP/IP Stacks</h1>
+<h2 id="summary">Summary</h2>
+<p>The theoretical layer stack, with the Neso-style emphasis on what each layer is responsible for<br />
+and why the layering exists at all.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Layering</strong> gives independent evolution: change Wi-Fi without rewriting TCP</li>
+<li>Each layer provides a <strong>service</strong> to the one above and <strong>uses</strong> the one below</li>
+<li><strong>Peer-to-peer communication</strong> between layers on different hosts is an illusion — the bytes<br />
+  always traverse the whole stack on both sides</li>
+<li>Encapsulation on send, decapsulation on receive</li>
+<li><strong>No layer may skip or reorder</strong> — that constraint is why HTTP cannot sit directly on Ethernet<br />
+  even when it theoretically could</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Layer / layer 7</strong></td>
+<td>A level of abstraction in the protocol stack</td>
+</tr>
+<tr>
+<td><strong>Service primitive</strong></td>
+<td>The operation a layer offers upward</td>
+</tr>
+<tr>
+<td><strong>Peer protocol</strong></td>
+<td>The same layer talking across the network</td>
+</tr>
+<tr>
+<td><strong>Encapsulation / decapsulation</strong></td>
+<td>Adding / removing headers</td>
+</tr>
+<tr>
+<td><strong>PDU</strong></td>
+<td>Protocol data unit at that layer</td>
+</tr>
+<tr>
+<td><strong>Multiplexing</strong></td>
+<td>Several higher-layer flows sharing one lower-layer flow</td>
+</tr>
+<tr>
+<td><strong>Service data unit</strong></td>
+<td>The data a service passes up</td>
+</tr>
+<tr>
+<td><strong>Peer-to-peer</strong></td>
+<td>Logical communication between equal layers on different hosts</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- see the stack in the kernel ---
+cat /proc/net/dev
+ss --all --summary 2&gt;/dev/null | head
+lsmod | head -8
+
+# --- one packet, every layer, as tshark sees it ---
+command -v tshark
+sudo timeout 10 tshark -i lo -c 1 -V 2&gt;/dev/null | head -45
+
+# --- what each layer is responsible for, observed ---
+sudo timeout 8 tcpdump -i lo -n -q &quot;icmp&quot; 2&gt;/dev/null | head -3     # layer 3
+sudo timeout 8 tcpdump -i lo -n &quot;arp&quot; 2&gt;/dev/null | head -3          # layer 2
+sudo timeout 8 tcpdump -i lo -n &quot;udp port 53&quot; 2&gt;/dev/null | head -3  # layer 4 + 7
+
+# --- encapsulation sizes ---
+python3 - &lt;&lt;'PY'
+LAYERS = [(&quot;Application data&quot;, None), (&quot;TCP&quot;, 20), (&quot;UDP&quot;, 8), (&quot;IP&quot;, 20), (&quot;Ethernet&quot;, 14)]
+for name, hdr in LAYERS:
+    print(f&quot;  {name:&lt;18} {'+' + str(hdr) + ' bytes' if hdr else '(the payload)'}&quot;)
+PY
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> annotate one real packet across all layers, and be able to identify each header<br />
+from bytes alone.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-n-1 &amp;&amp; cd ~/aegis/labs/neso-n-1
+
+# --- 1. capture one DNS query and walk it ---
+sudo timeout 12 tcpdump -i lo -n -X &quot;udp port 53&quot; -c 2 2&gt;/dev/null | tee 01-packet.txt
+
+# --- 2. the same packet, dissected by the tool ---
+if command -v tshark &gt;/dev/null; then
+  sudo timeout 12 tshark -i lo -c 1 -O dns -V &quot;udp port 53&quot; 2&gt;/dev/null \
+    | grep -E &quot;^Frame|^Ethernet|^Internet|^User Datagram|^Domain&quot; | head -20 | tee 02-dissect.txt
+fi
+
+# --- 3. draw the encapsulation yourself ---
+cat &gt; 03-layers.md &lt;&lt;'EOF'
+# Walking a DNS query down the stack
+
+```
+[ Ethernet header 14 ][ IP header 20 ][ UDP header 8 ][ DNS message ]
+ dst MAC  src MAC  type    src IP  dst IP  ttl proto    sport dport len  query
+ 6        6        2       4       4       1  1         2     2     2    ...
+```
+
+Read a hex dump in this order:
+1. bytes 0-5   destination MAC
+2. bytes 6-11  source MAC
+3. bytes 12-13 ethertype (0x0800 = IPv4, 0x0806 = ARP, 0x8100 = 802.1Q)
+4. bytes 14-33 IP header
+5. bytes 34-41 UDP header (or 34-53 for TCP)
+6. everything after is the application payload
+
+On the return path the process is identical, in reverse.
+EOF
+cat 03-layers.md
+
+# --- 4. verify your reading by asking the tool ---
+{
+  echo &quot;=== confirm each header from the kernel's perspective ===&quot;
+  echo &quot;-- layer 2: ARP entries (who resolved whom) --&quot;
+  ip neigh show | head -5
+  echo
+  echo &quot;-- layer 3: routes (who is reachable how) --&quot;
+  ip route | head -5
+  echo
+  echo &quot;-- layer 4: sockets (which local ports are in use) --&quot;
+  ss -tulpn | head -8
+  echo
+  echo &quot;-- layer 7: open a layer 4 conversation and watch it resolve --&quot;
+  timeout 5 getent hosts github.com
+} 2&gt;&amp;1 | tee 04-layers.txt
+
+# --- 5. why layering matters, practically ---
+cat &gt; 05-why.md &lt;&lt;'EOF'
+# Why the layering matters to you
+
+1. **Troubleshooting has order.** You fix layers bottom-up. A DNS failure may be an L2 problem.
+2. **Attack attribution has order.** &quot;It was an ARP attack&quot; and &quot;it was a DNS attack&quot; are
+   claims about different layers and require different evidence.
+3. **Tool choice follows the layer.** arp-scan (L2), nmap -sn (L3), nmap -sT (L4), nikto (L7).
+   Using the wrong layer's tool is the most common beginner waste.
+4. **Encapsulation is how you read a packet.** It is also how you forge one.
+EOF
+cat 05-why.md
+</code></pre>
+<p><strong>Step 2 is the payoff</strong> — seeing the tool's own dissection lines up against your manual reading<br />
+of the hex dump.</p>
+<p><strong>Record:</strong> <code>01-packet.txt</code> and <code>03-layers.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What service does each layer provide to the layer above it?</li>
+<li>What is the PDU called at layers 2, 3 and 4?</li>
+<li>Why can two layers on different hosts talk "peer to peer" when the bytes never skip a layer?</li>
+<li>Give one tool that operates at Layer 2 and one at Layer 7.</li>
+<li>Why must you troubleshoot bottom-up?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>OSI Model</strong> → <strong>TCP/IP Model</strong> → <strong>Encapsulation</strong> → <strong>Ethernet Frame</strong> → <strong>Protocol Analysis</strong>.</p>

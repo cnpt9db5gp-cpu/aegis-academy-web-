@@ -1,0 +1,342 @@
+<h1 id="sockets-talking-to-ports-directly">Sockets: Talking to Ports Directly</h1>
+<h2 id="summary">Summary</h2>
+<p>A socket is the kernel object a network connection maps to. Controlling it in Python gives you<br />
+total authority over what you send and receive — which is what reconnaissance, protocol analysis,<br />
+and understanding <em>why tools behave the way they do</em> all require.</p>
+<p>This is the Tier 0 lecture that connects everything you have learned to actual network<br />
+interaction, and the conceptual gateway to Tier 2.</p>
+<h2 id="the-lifecycle">The lifecycle</h2>
+<pre><code>socket() -&gt; connect()  /  bind()+listen()+accept() -&gt; send()/recv() -&gt; close()
+   |              |                                   |
+ create      establish the link                   move the bytes
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Client</th>
+<th>Server</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>create</td>
+<td><code>socket()</code></td>
+<td><code>socket()</code></td>
+</tr>
+<tr>
+<td>address</td>
+<td><code>connect(host, port)</code></td>
+<td><code>bind((host,0))</code> then <code>listen(backlog)</code></td>
+</tr>
+<tr>
+<td>accept</td>
+<td>—</td>
+<td><code>accept()</code> returns a <strong>new</strong> socket</td>
+</tr>
+<tr>
+<td>exchange</td>
+<td><code>send</code>/<code>recv</code></td>
+<td><code>send</code>/<code>recv</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>accept()</code> returning a new socket</strong> is the detail that trips people up: the listening socket<br />
+stays open for the next client; you work on the accepted one.</p>
+<h2 id="reading-a-banner">Reading a banner</h2>
+<pre><code class="language-python">import socket
+
+def grab(host, port, timeout=2.0, limit=256):
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            return sock.recv(limit).decode(&quot;utf8&quot;, &quot;replace&quot;).strip()
+    except ConnectionRefusedError:
+        return None      # closed
+    except socket.timeout:
+        return &quot;&quot;        # open but silent
+    except OSError:
+        return None
+</code></pre>
+<p><code>with</code> closes the socket automatically, even on exception — same guarantee as files.</p>
+<h2 id="writing-an-http-request-yourself">Writing an HTTP request yourself</h2>
+<pre><code class="language-python">def http_get(host, path=&quot;/&quot;, port=80):
+    request = (
+        f&quot;GET {path} HTTP/1.1\r\n&quot;
+        f&quot;Host: {host}\r\n&quot;
+        f&quot;User-Agent: aegis/1.0\r\n&quot;
+        f&quot;Connection: close\r\n&quot;
+        f&quot;\r\n&quot;
+    )
+    with socket.create_connection((host, port), timeout=3) as sock:
+        sock.sendall(request.encode())
+        chunks = []
+        while True:
+            data = sock.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+    return b&quot;&quot;.join(chunks).decode(&quot;utf8&quot;, &quot;replace&quot;)
+</code></pre>
+<p><strong>Why not just use <code>curl</code> or <code>requests</code>?</strong></p>
+<ol>
+<li>You learn what a client actually sends — headers, CRLF, the terminating blank line.</li>
+<li>You can send <strong>malformed</strong> requests on purpose, which is how request smuggling and header<br />
+   injection are tested.</li>
+<li>No dependency and no abstraction hiding what happens.</li>
+</ol>
+<h2 id="udp-a-different-model">UDP: a different model</h2>
+<p>No handshake, no connection, no guarantee of delivery.</p>
+<pre><code class="language-python">def udp_probe(host, port, payload=b&quot;aegis-probe&quot;, timeout=1.0):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(payload, (host, port))
+        return sock.recvfrom(2048)
+    except socket.timeout:
+        return None, None     # ambiguous: closed, filtered, or slow
+    finally:
+        sock.close()
+</code></pre>
+<p><strong>"No response" is inherently ambiguous for UDP.</strong> That is why <code>-sU</code> results are full of<br />
+<code>open|filtered</code> and UDP scanning is slow and unreliable.</p>
+<h2 id="raw-sockets-and-why-they-need-root">Raw sockets and why they need root</h2>
+<pre><code class="language-python">s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)                        # kernel builds headers
+r = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)       # you build them
+</code></pre>
+<p>Raw sockets let you craft packets no ordinary library will emit: malformed headers, spoofed<br />
+sources, unusual flag combinations. They are why offensive tooling generally requires root — and<br />
+also why unprivileged users can still do most enumeration.</p>
+<h2 id="timeouts-always">Timeouts, always</h2>
+<pre><code class="language-python">sock.settimeout(2.0)      # do this
+sock.settimeout(None)     # blocks forever - almost never what you want
+</code></pre>
+<p><strong>A scanner without timeouts hangs on the first filtered port.</strong> This is the single most common<br />
+bug in beginner network tooling.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Socket</strong></td>
+<td>The kernel object a network endpoint maps to</td>
+</tr>
+<tr>
+<td><strong>IP:port pair</strong></td>
+<td>What a socket is identified by</td>
+</tr>
+<tr>
+<td><strong>Bind</strong></td>
+<td>Attach a socket to a specific address and port</td>
+</tr>
+<tr>
+<td><strong>Listen / backlog</strong></td>
+<td>Mark a bound socket as accepting connections</td>
+</tr>
+<tr>
+<td><strong>Accept</strong></td>
+<td>Return a <em>new</em> connected socket for one client</td>
+</tr>
+<tr>
+<td><strong>send vs sendall</strong></td>
+<td><code>sendall</code> guarantees all bytes are written</td>
+</tr>
+<tr>
+<td><strong>recv</strong></td>
+<td>Read up to N bytes — <strong>may return fewer</strong></td>
+</tr>
+<tr>
+<td><strong>Timeout</strong></td>
+<td>Mandatory; without it, blocked reads hang</td>
+</tr>
+<tr>
+<td><strong>Banner</strong></td>
+<td>The greeting a service sends on connect</td>
+</tr>
+<tr>
+<td><strong>Raw socket</strong></td>
+<td>Kernel does not build headers; needs root</td>
+</tr>
+<tr>
+<td><strong>File descriptor</strong></td>
+<td>The integer identifying an open socket</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">python3 -c 'import socket; help(socket.create_connection)' | head -20
+
+# --- what services greet you on your own machine? ---
+python3 - &lt;&lt;'PY'
+import socket
+for port in (21,22,23,25,53,80,110,143,443,3306,5432,8080,8443):
+    try:
+        with socket.create_connection((&quot;127.0.0.1&quot;, port), timeout=0.5) as s:
+            s.settimeout(0.5)
+            try:    banner = s.recv(128).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()[:50]
+            except socket.timeout: banner = &quot;(no banner)&quot;
+            print(f&quot;  {port:&lt;6} open    {banner}&quot;)
+    except ConnectionRefusedError: pass
+    except socket.timeout: print(f&quot;  {port:&lt;6} filtered&quot;)
+    except OSError as e: print(f&quot;  {port:&lt;6} {type(e).__name__}&quot;)
+PY
+
+# --- the same thing with netcat in one line ---
+for p in 22 80 8080; do echo | timeout 2 nc -v 127.0.0.1 $p 2&gt;&amp;1 | head -1; done
+
+# --- inspect a socket the way the kernel sees it ---
+ss -tulpn
+ls -l /proc/self/fd/ | head
+head -3 /proc/net/tcp
+
+# --- DNS resolution is itself a protocol ---
+python3 -c 'import socket; print(socket.gethostbyname(&quot;localhost&quot;))'
+python3 -c 'import socket; print(socket.getaddrinfo(&quot;localhost&quot;,22,type=socket.SOCK_STREAM))'
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> write a socket-level scanner, send a hand-crafted HTTP request, and see the exact<br />
+bytes on the wire.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/py-06 &amp;&amp; cd ~/aegis/labs/py-06
+
+cat &gt; sockscan.py &lt;&lt;'PY'
+import socket, sys, time, re
+
+CONNECT_TIMEOUT = 2.0
+RECV_TIMEOUT    = 1.5
+
+def is_lab_address(host):
+    try:
+        p = socket.inet_aton(host)
+        return (p[0] == 127 or p[0] == 10 or
+                (p[0] == 172 and 16 &lt;= p[1] &lt;= 31) or
+                (p[0] == 192 and p[1] == 168))
+    except OSError:
+        return False
+
+def probe(host, port):
+    # state: open | closed | filtered | dnsfail | error
+    try:
+        sock = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+    except ConnectionRefusedError: return &quot;closed&quot;, &quot;&quot;
+    except socket.timeout:        return &quot;filtered&quot;, &quot;&quot;
+    except socket.gaierror:       return &quot;dnsfail&quot;, &quot;&quot;
+    except OSError as e:          return &quot;error&quot;, type(e).__name__
+    try:
+        sock.settimeout(RECV_TIMEOUT)
+        try:    banner = sock.recv(256).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()
+        except socket.timeout:      banner = &quot;&quot;
+        except ConnectionResetError: banner = &quot;&lt;reset&gt;&quot;
+        return &quot;open&quot;, banner
+    finally:
+        sock.close()
+
+def identify(banner):
+    for pattern, name in [(r&quot;^SSH-&quot;, &quot;ssh&quot;), (r&quot;^220[- ].*FTP&quot;, &quot;ftp&quot;),
+                          (r&quot;^220[- ].*SMTP&quot;, &quot;smtp&quot;), (r&quot;^HTTP/\d&quot;, &quot;http&quot;),
+                          (r&quot;^\* &quot;, &quot;telnet&quot;), (r&quot;^RFB \d&quot;, &quot;vnc&quot;),
+                          (r&quot;^\x05\xff&quot;, &quot;smb&quot;), (r&quot;^220 MiNT&quot;, &quot;mysql&quot;)]:
+        if re.search(pattern, banner):
+            return name
+    return &quot;&quot;
+
+def main(argv):
+    if len(argv) &lt; 2:
+        print(f&quot;usage: {argv[0]} &lt;host&gt; [port ...]&quot;, file=sys.stderr); return 2
+    host = argv[1]
+    if not is_lab_address(host):
+        print(f&quot;REFUSING {host}: outside loopback/RFC1918 scope.&quot;, file=sys.stderr)
+        return 3
+    ports = [int(a) for a in argv[2:]] or [21,22,23,25,80,443,3306,8080]
+    started = time.time()
+    print(f&quot;{'PORT':&lt;7}{'STATE':&lt;10}{'SERVICE':&lt;10}BANNER&quot;)
+    print(&quot;-&quot; * 70)
+    tally = {}
+    for port in ports:
+        state, banner = probe(host, port)
+        tally[state] = tally.get(state, 0) + 1
+        print(f&quot;{port:&lt;7}{state:&lt;10}{identify(banner) if state=='open' else '':&lt;10}{banner[:44]}&quot;)
+    print(&quot;-&quot; * 70)
+    print(f&quot;{tally} in {time.time()-started:.2f}s&quot;)
+    return 0
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main(sys.argv))
+PY
+chmod +x sockscan.py
+
+python3 sockscan.py 127.0.0.1 | tee 01-sockscan.txt
+python3 sockscan.py 8.8.8.8 ; echo &quot;exit: $? (expect 3)&quot;
+
+# your lab range, if built:
+python3 sockscan.py 192.168.56.101 21 22 23 80 139 445 3306 8080 2&gt;/dev/null | tee -a 01-sockscan.txt
+
+# --- WRITE AN HTTP REQUEST BY HAND ---
+python3 - &lt;&lt;'PY' | tee 02-raw-http.txt
+import socket
+host, port = &quot;127.0.0.1&quot;, 8080
+req = (&quot;GET / HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n&quot;
+       &quot;User-Agent: aegis/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n&quot;)
+print(&quot;=== bytes we send (note CRLF and the terminating blank line) ===&quot;)
+print(req.replace(&quot;\r\n&quot;, &quot;\\r\\n\n&quot;))
+print(&quot;=== hexdump ===&quot;)
+print(req.encode().hex())
+try:
+    with socket.create_connection((host, port), timeout=3) as s:
+        s.sendall(req.encode())
+        data = b&quot;&quot;
+        while chunk := s.recv(4096): data += chunk
+    print(&quot;=== response ===&quot;); print(data.decode(&quot;utf8&quot;,&quot;replace&quot;)[:800])
+except OSError as e:
+    print(f&quot;no service on {host}:{port} ({type(e).__name__}) - start DVWA/Juice Shop first&quot;)
+PY
+
+# --- WATCH IT ON THE WIRE (the whole point) ---
+# terminal 1:  sudo tcpdump -i lo -A -s0 'tcp port 8080'
+# terminal 2:  re-run the snippet above
+
+# --- SMTP banner, another protocol ---
+python3 - &lt;&lt;'PY'
+import socket
+try:
+    with socket.create_connection((&quot;127.0.0.1&quot;, 25), timeout=2) as s:
+        s.settimeout(2)
+        print(&quot;SMTP says:&quot;, s.recv(256).decode(&quot;utf8&quot;,&quot;replace&quot;).strip())
+        s.sendall(b&quot;EHLO aegis.local\r\n&quot;)
+        print(&quot;it said  :&quot;, s.recv(512).decode(&quot;utf8&quot;,&quot;replace&quot;).strip()[:200])
+except OSError as e:
+    print(f&quot;no SMTP on loopback ({type(e).__name__}) - the code path is what matters&quot;)
+PY
+
+# --- why timeouts matter ---
+python3 - &lt;&lt;'PY'
+import socket, time
+t = time.time()
+try: socket.create_connection((&quot;192.0.2.1&quot;, 9), timeout=2)
+except OSError as e: print(f&quot;with timeout: gave up after {time.time()-t:.1f}s ({type(e).__name__})&quot;)
+print(&quot;without a timeout this call hangs indefinitely - uncomment to experience it&quot;)
+PY
+
+# --- cross-check with netcat ---
+for p in 22 80 8080; do echo | timeout 2 nc -v 127.0.0.1 $p 2&gt;&amp;1 | head -1; done
+</code></pre>
+<p><strong>Step 5 is the lesson.</strong> Write the request in Python, capture it in tcpdump, and you have seen<br />
+the exact bytes a client puts on the wire. That is the moment HTTP stops being magic and becomes<br />
+a protocol you control — the foundation of all of Tier 4.</p>
+<p><strong>Record:</strong> <code>sockscan.py</code>. You wrote a service identifier from scratch; compare its output to<br />
+nmap's on the same host.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Difference between the listening socket and the socket returned by <code>accept()</code>?</li>
+<li>Why must you call <code>settimeout()</code> on a scanning socket?</li>
+<li>Why can a UDP probe never distinguish "closed" from "filtered"?</li>
+<li>Why send an HTTP request by hand rather than using <code>requests</code>?</li>
+<li>Why do raw sockets need root, and what can they do that ordinary sockets cannot?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Sockets</strong> → <strong>Port</strong> → <strong>Banner Grabbing</strong> → <strong>HTTP Request</strong> → <strong>Service Fingerprinting</strong>.<br />
+You are now ready for Tier 1 (systems) and Tier 2 (networking).</p>

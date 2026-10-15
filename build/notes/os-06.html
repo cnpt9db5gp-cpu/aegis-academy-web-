@@ -1,0 +1,280 @@
+<h1 id="virtual-memory-and-page-tables">Virtual Memory and Page Tables</h1>
+<h2 id="summary">Summary</h2>
+<p>Virtual memory serves three purposes at once: give each process a private, contiguous address<br />
+space; let physical RAM be used more efficiently than a naive allocation would allow; and provide<br />
+the hardware mechanism for memory protection.</p>
+<p>This lecture explains paging, page tables, the TLB, and — from a security angle — exactly how<br />
+memory protection is enforced, and how virtual memory became the substrate for exploit mitigations.</p>
+<h2 id="why-virtual-memory">Why virtual memory</h2>
+<ul>
+<li><strong>Isolation:</strong> process A cannot touch process B's pages</li>
+<li><strong>Abstraction:</strong> programs see a linear address space regardless of physical layout</li>
+<li><strong>Efficiency:</strong> swap, demand paging, copy-on-write</li>
+<li><strong>Protection:</strong> NX (no execute), user/supervisor bit per page</li>
+</ul>
+<h2 id="the-translation-path">The translation path</h2>
+<pre><code class="language-text">virtual address
+   ↓ split: [ page number | offset ]
+   ↓
+Page Directory (top-level index)
+   ↓
+Page Table (second-level index)
+   ↓  ──► physical frame number
+physical memory
+</code></pre>
+<p>Every access is a hardware operation, cached by the <strong>TLB</strong> (translation lookaside buffer).</p>
+<p><strong>In xv6 this is deliberately simple:</strong> two-level paging where each page is walked in software.<br />
+Reading <code>walk.c</code> is the fastest way to understand it.</p>
+<h2 id="page-table-entries">Page table entries</h2>
+<p>Each entry carries more than a physical address:</p>
+<table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>Meaning</th>
+<th>Security relevance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Present</td>
+<td>Page is mapped</td>
+<td>Prevent "access unmapped memory" exploits</td>
+</tr>
+<tr>
+<td>Write</td>
+<td>Page is writable</td>
+<td>W^X: a page cannot be both writable and executable</td>
+</tr>
+<tr>
+<td>User</td>
+<td>Accessible from user space</td>
+<td>Kernel pages are supervisor-only</td>
+</tr>
+<tr>
+<td>Accessed / Dirty</td>
+<td>Bookkeeping for eviction</td>
+<td>—</td>
+</tr>
+<tr>
+<td>NX</td>
+<td>Not executable</td>
+<td>Blocks shellcode on the stack</td>
+</tr>
+</tbody>
+</table>
+<p><strong>W^X and NX are the same idea</strong>: a page should be either writable or executable, never both. That<br />
+single policy is what forces exploitation to use ROP or ret2libc instead of injected shellcode.</p>
+<h2 id="address-space-layout-linux-typical">Address space layout (Linux, typical)</h2>
+<pre><code class="language-text">0x000000000000  NULL (never mapped)
+0x000000400000  binary, libraries
+0x00007f...      mmap region: shared libs, thread stacks
+0x00007fff...    stack        ← grows DOWN
+0x7fffffffe000  PIE binary base (randomised)
+0xffffffffff600000  vsyscall page (fixed - a known address to abuse)
+</code></pre>
+<p>Note the two fixed regions. <strong>Anything at a known address is a permanent attacker target</strong> — you<br />
+do not need an information leak against a hardcoded address.</p>
+<h2 id="tlb">TLB</h2>
+<p>A hardware cache of recent translations. It makes paging fast, and it is also a <strong>side channel</strong>:<br />
+flushing entries and timing re-fills leaks which addresses were used. That is the basis of<br />
+cache-timing attacks and some CPU timing attacks.</p>
+<h2 id="security-implications-concretely">Security implications, concretely</h2>
+<ol>
+<li><strong>NX blocks shellcode on the stack</strong> → forces ROP/ret2libc</li>
+<li><strong>ASLR randomises the base</strong> → forces an information leak first</li>
+<li><strong>Canaries block stack smashing</strong> → forces a leak before overwriting the return address</li>
+<li><strong>All three together</strong> → a modern exploit is: leak → leak → chain ROP → win</li>
+</ol>
+<p><strong>The exploit chain is a direct consequence of the mitigations.</strong> Every lecture in Tier 3 is a<br />
+study of one link in that chain.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Virtual address</strong></td>
+<td>What the program sees</td>
+</tr>
+<tr>
+<td><strong>Physical address</strong></td>
+<td>Where the frame actually lives in RAM</td>
+</tr>
+<tr>
+<td><strong>Page</strong></td>
+<td>Fixed-size block (usually 4 KiB)</td>
+</tr>
+<tr>
+<td><strong>Page table</strong></td>
+<td>Mapping from virtual pages to physical frames</td>
+</tr>
+<tr>
+<td><strong>MMU</strong></td>
+<td>Hardware performing the translation</td>
+</tr>
+<tr>
+<td><strong>TLB</strong></td>
+<td>Cache of recent translations</td>
+</tr>
+<tr>
+<td><strong>Present bit</strong></td>
+<td>Whether a page is mapped</td>
+</tr>
+<tr>
+<td><strong>NX / no-execute</strong></td>
+<td>Page cannot be executed</td>
+</tr>
+<tr>
+<td><strong>W^X</strong></td>
+<td>Writable and executable are mutually exclusive</td>
+</tr>
+<tr>
+<td><strong>Demand paging</strong></td>
+<td>Map pages only when touched</td>
+</tr>
+<tr>
+<td><strong>Copy-on-write</strong></td>
+<td><code>fork</code> shares pages until either writes</td>
+</tr>
+<tr>
+<td><strong>ASLR</strong></td>
+<td>Randomises base addresses per run</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># read your own address space
+cat /proc/self/maps
+cat /proc/self/maps | wc -l
+pmap -x $$ | head -20
+pmap -x $$ | tail -3
+
+# which libraries are mapped
+grep -E '\.so' /proc/self/maps | awk '{print $6}' | sort -u
+
+# NX status of this shell and of a binary
+readelf -l /bin/bash | grep -E 'GNU_STACK|GNU_RELRO'
+readelf -lW /bin/bash | grep GNU_STACK
+
+# confirm a stack is not executable
+python3 -c &quot;
+import ctypes
+libc = ctypes.CDLL('libc.so.6')
+buf = ctypes.create_string_buffer(64)
+addr = ctypes.addressof(buf)
+print('stack page is non-executable:', not (libc.mprotect(buf, 64, 7) == 0))
+&quot; 2&gt;&amp;1 | tail -2
+
+# ASLR: is this system randomised?
+cat /proc/sys/kernel/randomize_va_space     # 2 = full ASLR
+sudo sysctl kernel.randomize_va_space        # requires sudo
+
+# page faults and RSS
+vmstat 1 3 | head -20
+grep -E &quot;VmPeak|VmSize|VmRSS|VmStk&quot; /proc/self/status
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> read a real address space, confirm NX, and observe ASLR changing between runs.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/os-06 &amp;&amp; cd ~/aegis/labs/os-06
+
+# --- 1. your address space ---
+{
+  echo &quot;=== VMA layout ===&quot;
+  head -25 /proc/self/maps
+  echo
+  echo &quot;=== total VMAs ===&quot;
+  wc -l &lt; /proc/self/maps
+  echo
+  echo &quot;=== the stack (grows down, at the top of the map) ===&quot;
+  grep -E '\[stack\]' /proc/self/maps
+  echo
+  echo &quot;=== memory summary ===&quot;
+  grep -E &quot;VmPeak|VmSize|VmRSS|VmStk|VmExe|VmLib&quot; /proc/self/status
+} &gt; 01-maps.txt
+cat 01-maps.txt
+
+# --- 2. NX: the stack is not executable ---
+readelf -lW /bin/bash | grep GNU_STACK
+python3 -c &quot;
+import ctypes
+libc = ctypes.CDLL('libc.so.6')
+b = ctypes.create_string_buffer(64)
+print('mprotect(RWX) on a stack page -&gt;', libc.mprotect(b, 64, 7))
+print('result: -1 means the kernel refused. NX is enforced in hardware.')
+&quot; 2&gt;&amp;1 | tail -3 | tee -a 01-maps.txt
+
+# --- 3. ASLR: compare addresses across runs ---
+{
+  echo &quot;=== ASLR across 6 runs (PIE base and stack) ===&quot;
+  for i in $(seq 1 6); do
+    python3 -c &quot;
+import re
+m = [l.split() for l in open('/proc/self/maps') if '[stack]' in l]
+for e in open('/proc/self/maps'):
+    f = e.split()
+    if len(f) &gt; 5 and f[5].endswith('.so') and 'libc' in f[5]:
+        print('  libc  base:', f[0].split('-')[0]); break
+print('  stack  base:', m[0][0].split('-')[0] if m else '?')
+&quot;
+  done
+} | tee 02-aslr.txt
+echo
+echo &quot;Different every run = ASLR working. Predicting one of these needs an info leak.&quot;
+
+# --- 4. page faults in action ---
+vmstat 1 3 2&gt;/dev/null | head -12 | tee 03-vmstat.txt
+echo &quot;Note 'f' (faults) climbing while a process allocates: demand paging is real.&quot;
+
+# --- 5. W^X on a binary ---
+{
+  echo &quot;=== GNU_STACK: RW, not E ===&quot;
+  readelf -lW /bin/ls | grep -E 'GNU_STACK|GNU_RELRO'
+  echo
+  echo &quot;=== compare: a binary built with -z execstack ===&quot;
+  printf 'int main(){return 0;}\n' &gt; /tmp/x.c
+  gcc -z execstack -o /tmp/x-exec /tmp/x.c 2&gt;/dev/null
+  gcc -z noexecstack -o /tmp/x-noexec /tmp/x.c 2&gt;/dev/null
+  readelf -lW /tmp/x-exec  | grep GNU_STACK
+  readelf -lW /tmp/x-noexec| grep GNU_STACK
+  echo &quot;RWE = writable AND executable stack. NX off.&quot;
+  rm -f /tmp/x.c /tmp/x-exec /tmp/x-noexec
+} 2&gt;&amp;1 | tee 04-wx.txt
+
+# --- 6. copy-on-write, observed ---
+{
+  echo &quot;=== a big fork should not double RSS immediately ===&quot;
+  python3 -c &quot;
+import os, resource
+buf = bytearray(200*1024*1024)   # 200 MB touched
+def rss(): return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss//1024
+print('  parent RSS before fork:', rss(), 'MB')
+pid = os.fork()
+if pid == 0:
+    print('  child RSS right after fork:', rss(), 'MB  &lt;- pages are shared')
+    os._exit(0)
+os.waitpid(pid, 0)
+print('  parent RSS after child exit:', rss(), 'MB')
+&quot;
+} | tee 05-cow.txt
+</code></pre>
+<p><strong>Step 3 is the number that matters for exploitation.</strong> Every run gives a different base. That is<br />
+why <code>ex-04</code> starts with an information leak, and why "just spray the stack with shellcode and hope"<br />
+died with NX.</p>
+<p><strong>Record:</strong> <code>02-aslr.txt</code>. Run it again tomorrow and compare — the point is that nothing is<br />
+predictable.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What three purposes does virtual memory serve simultaneously?</li>
+<li>What is the TLB, and why is it a side-channel target?</li>
+<li>What does the NX bit do, and why does it force ROP instead of shellcode?</li>
+<li>Name two regions that sit at fixed addresses and are therefore prime targets.</li>
+<li>How does copy-on-write make <code>fork</code> cheap, and what is the risk if a child writes?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Virtual Memory &amp; ASLR</strong> → <strong>NX / DEP</strong> → <strong>PIE</strong> → <strong>Information Leak</strong> → <strong>ROP</strong>.<br />
+Also <strong>Page Fault</strong> → <strong>TEE (sgx)</strong> → <strong>Side Channel</strong>.</p>

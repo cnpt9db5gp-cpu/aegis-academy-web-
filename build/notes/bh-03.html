@@ -1,0 +1,334 @@
+<h1 id="from-shortest-path-to-execution-plan">From Shortest Path to Execution Plan</h1>
+<h2 id="summary">Summary</h2>
+<p>The graph gives you a path. The engagement needs a plan: which edge you take first, what it<br />
+costs, what it logs, and how you stop. This note is the translation step, and it is the one that<br />
+separates a graph tool run from an actual engagement.</p>
+<p>The framing that makes it work: <strong>a path is a sequence of edge types, and<br />
+each edge type has a cost, an artifact, and a log signature.</strong> A plan is<br />
+the sequence with those three things attached.</p>
+<h2 id="what-an-edge-costs">What an edge costs</h2>
+<pre><code class="language-text">  EDGE                     WHAT IT COSTS YOU         WHAT IT LEAVES
+  ---------------------------------------------------------------------------
+  MEMBER OF                nothing - it is a fact     nothing
+  HasSession + relay       an SMB connection to the   4624 (a new source
+                           host, and a writable       session), 5145
+                           listener (if SMB relay)    (relayed connection)
+  AdminTo + hash read      a credential on the       4624 type 3, 4648
+                           host (SeDebug / SeImpersonate)
+  GenericAll on a group    one LDAP write             5136 on the group
+  GenericWrite + WriteSPN  one LDAP write, then       5136 on the account,
+                           the roast (offline, free)  4769 (ticket request)
+  WriteDACL on an object   one LDAP write             5136 on the object
+  DCSync                   a replication request      4662 + 4663 + 5136 +
+                                                     a full-domain event
+  Delegation (unc.)       capture a forwarded TGT    4768/4769 from the host
+                           from a host you already    (normal-looking)
+                           access to
+  GPO write                wait for gpupdate (or      5136 on the GPO,
+                           force it) then SYSTEM      5145 scheduled task
+
+  THE PATTERN: the cheap edges are read-only (free, nothing logged
+  beyond enumeration). The expensive edges are writes (5136) or
+  authentications (4624). The most expensive is DCSync, because it is a
+  domain-wide event that every monitoring system alerts on.
+</code></pre>
+<h2 id="turning-a-path-into-a-plan">Turning a path into a plan</h2>
+<pre><code class="language-text">  THE PLAN FORMAT, for one path:
+
+  Step 1. Edge: MEMBER OF &quot;Helpdesk&quot;
+           Cost:    zero. It is already true.
+           Action:  none.
+           Evidence: 'Alice is a member of Helpdesk' (from the graph).
+
+  Step 2. Edge: GENERICALL on &quot;IT Support&quot;
+           Cost:    one LDAP write. No credential beyond alice's.
+           Action:  add alice to &quot;IT Support&quot; via LDAP.
+           Logged:  5136 on the IT Support group.
+           Reversible: yes - remove her again.
+
+  Step 3. Edge: GENERICWRITE on &quot;SVC-DEPLOY&quot;
+           Cost:    one LDAP write (set an SPN on SVC-DEPLOY).
+           Action:  set an SPN, then request a service ticket, then
+                    crack it offline (cry-d4's method).
+           Logged:  5136 on SVC-DEPLOY.
+           Note:    this makes the account roastable. If it was not
+                    before, you have changed the environment. Record it
+                    and restore it.
+
+  Step 4. Edge: MEMBER OF &quot;Domain Admins&quot;
+           Cost:    the ticket crack is offline. Minutes to hours.
+           Action:  use the recovered credential as SVC-DEPLOY.
+           Logged:  nothing on the DC (the ticket is already issued).
+           STOP:    the engagement objective is met.
+
+  Total network actions: 2 writes. Total artifacts to clean up: 2.
+  Total log events the client's monitoring will see: 2 x 5136.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/bh-03 &amp;&amp; cd ~/aegis/labs/bh-03
+
+# --- 1. the planner ---
+cat &gt; plan.py &lt;&lt;'PY'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Turn a BloodHound path into an execution plan.
+
+The graph says WHERE. This says HOW, in what order, at what cost,
+with what artifact, and when to stop.
+&quot;&quot;&quot;
+
+EDGE_PLAN = {
+ &quot;MEMBER OF&quot;:            dict(cost=&quot;zero&quot;, action=&quot;none - it is already true&quot;,
+                              logs=&quot;none&quot;, artifact=&quot;none&quot;),
+ &quot;HAS SESSION&quot;:          dict(cost=&quot;an SMB connection to the host&quot;,
+                              action=&quot;relay or read the session's credential&quot;,
+                              logs=&quot;4624, 5145&quot;, artifact=&quot;a relayed session&quot;),
+ &quot;ADMINTO&quot;:              dict(cost=&quot;a privileged credential on the host&quot;,
+                              action=&quot;dump the host, read the hash&quot;,
+                              logs=&quot;4624 type 3&quot;, artifact=&quot;a credential&quot;),
+ &quot;GENERICALL&quot;:           dict(cost=&quot;one LDAP write&quot;,
+                              action=&quot;add yourself to the object&quot;,
+                              logs=&quot;5136&quot;, artifact=&quot;a group membership change&quot;),
+ &quot;GENERICWRITE&quot;:         dict(cost=&quot;one LDAP write&quot;,
+                              action=&quot;set an attribute (SPN, script path)&quot;,
+                              logs=&quot;5136&quot;, artifact=&quot;an attribute change&quot;),
+ &quot;WRITEDACL&quot;:            dict(cost=&quot;one LDAP write&quot;,
+                              action=&quot;grant yourself GenericAll, then act&quot;,
+                              logs=&quot;5136&quot;, artifact=&quot;an ACL change&quot;),
+ &quot;WRITESPN&quot;:             dict(cost=&quot;one LDAP write, then an offline crack&quot;,
+                              action=&quot;add an SPN, request a ticket, crack it&quot;,
+                              logs=&quot;5136, 4769&quot;, artifact=&quot;a new SPN&quot;),
+ &quot;READGMSAPASSWORD&quot;:     dict(cost=&quot;one read&quot;,
+                              action=&quot;read the managed password&quot;,
+                              logs=&quot;4660&quot;, artifact=&quot;a credential in evidence&quot;),
+ &quot;DCSYNC&quot;:               dict(cost=&quot;a domain-wide replication request&quot;,
+                              action=&quot;replicate the directory&quot;,
+                              logs=&quot;4662, 4663, 5136, AND a full-domain event&quot;,
+                              artifact=&quot;every hash in the domain&quot;),
+ &quot;ALLOWEDTODELEGATE&quot;:    dict(cost=&quot;a credential on the delegating host&quot;,
+                              action=&quot;request a ticket as any user&quot;,
+                              logs=&quot;4768, 4769&quot;, artifact=&quot;a captured TGT&quot;),
+ &quot;GENERICALL (GPO)&quot;:     dict(cost=&quot;one write + one gpupdate cycle&quot;,
+                              action=&quot;add a scheduled task, force the refresh&quot;,
+                              logs=&quot;5136, 5145&quot;, artifact=&quot;a SYSTEM task on &quot;
+                                                            &quot;every host in the OU&quot;),
+}
+
+def plan(path, objective=&quot;DOMAIN ADMIN&quot;):
+    print(&quot;=&quot; * 72)
+    print(f&quot;EXECUTION PLAN -&gt; {objective}&quot;)
+    print(&quot;=&quot; * 72)
+    total_cost = 0
+    artifacts = []
+    for i, (kind, node) in enumerate(path, 1):
+        info = EDGE_PLAN.get(kind, EDGE_PLAN.get(kind.upper(), dict(
+            cost=&quot;unknown&quot;, action=&quot;-&quot;, logs=&quot;-&quot;, artifact=&quot;-&quot;)))
+        print(f&quot;\nSTEP {i}: {kind}&quot;)
+        print(f&quot;  node:     {node}&quot;)
+        print(f&quot;  cost:     {info['cost']}&quot;)
+        print(f&quot;  action:   {info['action']}&quot;)
+        print(f&quot;  logged:   {info['logs']}&quot;)
+        print(f&quot;  artifact: {info['artifact']}&quot;)
+        if info[&quot;artifact&quot;] != &quot;none&quot;:
+            artifacts.append(info[&quot;artifact&quot;])
+        total_cost += 1 if info[&quot;cost&quot;] != &quot;zero&quot; else 0
+    print(&quot;\n&quot; + &quot;-&quot; * 72)
+    print(f&quot;TOTAL: {len(path)} edges, {total_cost} requiring an action&quot;)
+    print(f&quot;ARTIFACTS TO CLEAN UP: {len(artifacts)}&quot;)
+    for a in artifacts: print(f&quot;  - {a}&quot;)
+    print(&quot;\nSTOP CONDITION:&quot;)
+    print(&quot;  The engagement objective is met. Do not continue past&quot;)
+    print(&quot;  the last edge 'because the next one is interesting'.&quot;)
+    print(&quot;\nREPORTING:&quot;)
+    print(&quot;  The path IS the finding. Report it edge by edge with the&quot;)
+    print(&quot;  two specific remediation actions per edge - not 'review ACLs'.&quot;)
+
+path = [(&quot;MEMBER OF&quot;, &quot;HELPDESK@LAB.INTERNAL&quot;),
+        (&quot;GENERICALL&quot;, &quot;IT SUPPORT@LAB.INTERNAL&quot;),
+        (&quot;GENERICWRITE&quot;, &quot;SVC-DEPLOY@LAB.INTERNAL&quot;),
+        (&quot;MEMBER OF&quot;, &quot;DOMAIN ADMINS@LAB.INTERNAL&quot;)]
+plan(path)
+
+print(&quot;\n\nTHE OTHER PATH, AND WHY IT IS NOT THE ONE TO WALK FIRST:\n&quot;)
+path2 = [(&quot;MEMBER OF&quot;, &quot;HELPDESK@LAB.INTERNAL&quot;),
+         (&quot;READGMSAPASSWORD&quot;, &quot;GMSA-FILES@LAB.INTERNAL&quot;),
+         (&quot;DCSYNC&quot;, &quot;LAB.INTERNAL&quot;)]
+plan(path2, &quot;DCSYNC (via gMSA)&quot;)
+print()
+print(&quot;  ^ this path is 3 hops, all READS. Zero writes, so ZERO 5136&quot;)
+print(&quot;    events. The client's monitoring sees a normal session and&quot;)
+print(&quot;    nothing else. Compare with path 1, which writes twice and&quot;)
+print(&quot;    leaves two artifacts to clean up.&quot;)
+print()
+print(&quot;  USE THE READ-ONLY PATH FIRST. Escalate along the graph only&quot;)
+print(&quot;  if the read-only path is not available.&quot;)
+PY
+python3 plan.py 2&gt;&amp;1 | tee 01-plan.txt
+
+# --- 2. the write-path discipline ---
+cat &gt; 02-write-discipline.md &lt;&lt;'EOF'
+# Doing writes in a live environment
+
+```text
+  A &quot;write&quot; is any change to the directory: group membership, an SPN,
+  an ACL, a GPO. Each one is:
+    - logged (5136)
+    - visible to the client's monitoring
+    - a change to their environment you must undo
+
+  THE RULES
+  1. PREFER THE READ-ONLY PATH. If a read gets you to the objective,
+     use it. It leaves nothing, logs nothing, and cannot be mistaken
+     for an incident.
+  2. IF YOU MUST WRITE, THE WRITE IS THE FINDING. Do it once, record
+     it, screenshot it, undo it. Not twice to &quot;confirm&quot;.
+  3. NOTIFY BEFORE A DCSYNC. A replication request for the whole
+     directory is a domain-wide event. Most SIEMs alert on it. If you
+     are going to do it, tell the client first, and confirm the
+     &quot;findings&quot; they are about to investigate are yours.
+  4. NEVER WRITE A GPO WITHOUT EXPLICIT PERMISSION. A GPO write with a
+     scheduled task is SYSTEM on every host in the OU. If the OU
+     contains a DC, it is a domain compromise, and an SOC watching
+     for that will page. Confirm the ROE permits it, in writing,
+     before you do it - not after.
+  5. DO NOT ROAST AN ACCOUNT THAT WAS NOT ROASTABLE. Adding an SPN to
+     make something crackable CHANGES THE ENVIRONMENT. It is a
+     legitimate demonstration of WriteSPN, but it is a change. Record
+     it, revert it, and say you did it.
+  6. CLEAN UP IMMEDIATELY, NOT AT THE END. If you add alice to a
+     group, remove her from it before you do anything else. An
+     escalation path you created and forgot is an escalation path
+     somebody will use.
+```
+
+## The diary entry for a write
+
+```text
+  16:22  WRITE: added LAB\alice to &quot;IT Support&quot; via LDAP.
+         Purpose: demonstrate the GENERICALL edge in the BH path.
+         Evidence: screenshot, LDAP response.
+         16:24  REVERTED: removed LAB\alice from &quot;IT Support&quot;.
+         Verified: group membership back to baseline.
+         Client contact: not notified (single group membership, no
+         alerting expected; would have notified for DCSync).
+```
+
+## What to do when you have to notify
+
+```text
+  &quot;I am about to run a DCSync request against DC01. It will produce
+   4662/4663 events with the replication GUIDs and a spike in
+   replication traffic. It is the step that confirms the finding, and
+   it is the step that will definitely alert. Confirm you are happy
+   for me to proceed, and I will send you the log line numbers
+   immediately afterwards so your SOC can close the ticket.&quot;
+
+  Then send the ticket numbers. This single habit - telling the
+  client what logs you are about to generate, and telling them which
+  to close - is most of what separates a professional engagement from
+  an incident.
+```
+
+## The verification step that people skip
+
+```text
+  AFTER EVERY WRITE, VERIFY THE ENVIRONMENT IS BACK TO BASELINE.
+
+    - the group membership is what it was
+    - the SPN is gone
+    - the ACL is what it was
+    - no scheduled task remains
+    - no new computer or user account exists
+
+  If you cannot demonstrate that, you have left a change in a
+  production directory and you should tell the client now rather than
+  at the end of the engagement.
+```
+EOF
+cat 02-write-discipline.md
+
+# --- 3. the overlay, restated as a finding ---
+cat &gt; 03-report.md &lt;&lt;'EOF'
+## F-xx · Three-hop path from a standard user to domain administrator
+
+Risk
+  Any authenticated user in the &quot;Helpdesk&quot; group (147 accounts) can
+  reach Domain Administrator in three steps, using no exploit and no
+  privileged tooling:
+    1. Add themselves to the &quot;IT Support&quot; group (the group has
+       GenericAll granted to Helpdesk)
+    2. Write a service principal name to the &quot;svc-deploy&quot; service
+       account (IT Support has GenericWrite on it)
+    3. Request a service ticket for svc-deploy and recover its
+       password offline (the account supports RC4 encryption)
+
+  svc-deploy is a member of Domain Admins. From a standard helpdesk
+  account, this is domain administrator.
+
+Prerequisites
+  Membership of Helpdesk. Every account in Helpdesk was created for
+  non-administrative account support. No user interaction, no exploit,
+  no elevated tooling beyond a standard wordlist.
+
+Evidence
+  The graph path (from a bloodhound-python ACL collection, timestamp
+  2026-10-14 09:20 and re-verified 16:40, unchanged):
+
+    ALICE@LAB.INTERNAL
+      MEMBER OF       HELPDESK@LAB.INTERNAL
+      GENERICALL      IT SUPPORT@LAB.INTERNAL
+      GENERICWRITE    SVC-DEPLOY@LAB.INTERNAL
+      MEMBER OF       DOMAIN ADMINS@LAB.INTERNAL
+
+  We demonstrated steps 1 and 2 (adding a test account to IT Support,
+  and writing an SPN to a test service account), and did NOT crack the
+  resulting ticket or use the recovered credential, to avoid
+  unnecessary exposure of the account's password. The path is
+  established by the graph and the two write steps.
+
+  Steps 1 and 2 were reverted at 16:24 and verified. See the
+  engagement diary.
+
+Business impact
+  147 accounts - every helpdesk user - have a one-to-three hop path to
+  domain administrator. The Helpdesk group exists so that
+  non-administrators can help users; it was never intended to include
+  the ability to administer the domain.
+
+Remediation
+  1. Change &quot;IT Support&quot; from GenericAll (Full Control) to Read only
+     for the Helpdesk group                            [Domain Admins, Immediate]
+     Identify why Full Control was granted and to whom; the ACL was
+     last modified 2019-03-14 (from the ACL's own metadata).
+  2. Remove svc-deploy from Domain Admins. A deployment service account
+     should be able to deploy to servers, not administer the domain.
+                                                        [Domain Admins, Immediate]
+     Expected deployment rights: write to the deploy share, service
+     start/stop on the target services. Nothing else.
+  3. Set msDS-SupportedEncryptionTypes to AES-only on all service
+     accounts, so a written SPN is not immediately roastable
+                                                       [Domain Admins, Immediate]
+  4. Remove GenericWrite on SVC-DEPLOY from IT Support  [Domain Admins, Immediate]
+     No group needs GenericWrite on a service account.
+  5. Audit for other GenericAll/GenericWrite grants on user and
+     computer objects                                  [Security, 1 sprint]
+     Query: edge_acl WHERE target IN (SELECT objectid FROM users)
+
+Re-test
+  Included at +30 days: re-collect the graph and confirm the path no
+  longer exists from any Helpdesk principal.
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why is MEMBER OF "already true" while the other edges cost an action?</li>
+<li>What does each edge type leave behind, in the client's logs?</li>
+<li>Why is DCSync the most expensive edge, and what do you do about it?</li>
+<li>Why should you prefer the read-only path to DCSync over the write path to domain admin?</li>
+<li>Why is roasting an account that was not previously roastable a change you must revert?</li>
+<li>What is the diary entry for a write, and what are its required fields?</li>
+<li>Why notify before DCSync, and what do you send afterwards?</li>
+<li>What must you verify after every write?</li>
+<li>Why is "review your ACLs" an inadequate recommendation, and what makes the alternative adequate?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>BloodHound</strong> → <strong>Active Directory Trust Paths</strong> → <strong>Privilege Escalation (Windows)</strong> →<br />
+<strong>DCSync</strong> → <strong>Reporting</strong>.<br />
+This closes the BloodHound course. Next: <code>imp-01</code>..<code>imp-04</code>, the Impacket suite.</p>

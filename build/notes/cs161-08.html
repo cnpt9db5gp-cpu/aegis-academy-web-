@@ -1,0 +1,330 @@
+<h1 id="denial-of-service">Denial of Service</h1>
+<h2 id="summary">Summary</h2>
+<p>CS161 closes the technical blocks with DoS, and the lecture's argument is that DoS is not a<br />
+separate vulnerability class — it is <strong>the exploitation technique applied to availability</strong>, and<br />
+it has a distinct defence structure because availability cannot be protected<br />
+cryptographically.</p>
+<blockquote>
+<p>Companion to <code>ccnad-01</code>/<code>ccnad-03</code> and <code>mit858-12</code>. Those teach the<br />
+protocol-level detail; this note is about threat modelling and defence.</p>
+</blockquote>
+<h2 id="why-dos-is-different">Why DoS is different</h2>
+<pre><code class="language-text">confidentiality  -&gt; protected by cryptography
+integrity       -&gt; protected by cryptography
+availability    -&gt; NOT protected by cryptography
+</code></pre>
+<p>There is no way to prove a message was delivered, or that a service was<br />
+available at a moment in time, from cryptography alone. DoS therefore depends<br />
+entirely on <strong>resource management</strong>, and its defences are economic rather<br />
+than technical.</p>
+<h2 id="the-taxonomy">The taxonomy</h2>
+<table>
+<thead>
+<tr>
+<th>Vector</th>
+<th>Mechanism</th>
+<th>Amplification</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Volumetric</strong></td>
+<td>Fill bandwidth</td>
+<td>Huge (bots, reflection)</td>
+</tr>
+<tr>
+<td><strong>Protocol exhaustion</strong></td>
+<td>One request consumes many resources</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td><strong>Application</strong></td>
+<td>Expensive computation per request</td>
+<td>Depends</td>
+</tr>
+<tr>
+<td><strong>Algorithmic</strong></td>
+<td>Input triggers worst-case behaviour</td>
+<td>Extreme, low bandwidth</td>
+</tr>
+<tr>
+<td><strong>Single-packet</strong></td>
+<td>UDP fragmentation, state exhaustion</td>
+<td>Extreme</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The interesting ones are the last two.</strong> A volumetric attack is expensive<br />
+for the attacker and easy to filter. An algorithmic attack costs one packet.</p>
+<h2 id="algorithmic-complexity-attacks">Algorithmic complexity attacks</h2>
+<pre><code class="language-text">  Hash table:   insert N keys, each hash() result forced to 0  -&gt; O(N^2)
+  Regex:        input matching a backtracking pattern          -&gt; exponential
+  Parsers:      deeply nested XML/JSON, huge base64, zip bombs -&gt; memory/CPU
+  Sorting:      comparison sorts with adversarial input       -&gt; O(n log n) -&gt; worse
+</code></pre>
+<p>Requirements: usually <strong>authenticated</strong>. That is why DoS testing belongs in<br />
+scope explicitly and almost never is by default.</p>
+<h2 id="amplification">Amplification</h2>
+<pre><code class="language-text">  attacker sends  a 60-byte UDP DNS query with a spoofed source
+  resolver       replies with a 3 KB answer
+  amplification  ~50x, from a bandwidth-light attacker
+</code></pre>
+<p>Classic amplifiers: DNS, NTP, memcached, chargen, CLDAP, and anything that<br />
+replies more than it receives. This is why BCP 38 ingress filtering is a<br />
+routing requirement rather than a nicety.</p>
+<h2 id="the-defence-in-depth-stack">The defence-in-depth stack</h2>
+<pre><code class="language-text">  1. edge          - rate limit, geo/ASN filters, scrubbing
+  2. network       - BCP 38, drop invalid sources, QoS for critical traffic
+  3. transport     - SYN cookies, SYNPROXY, connection limits
+  4. host          - resource limits (cgroups), watchdog, restart on fail
+  5. application   - request cost limits, timeouts, complexity limits
+  6. design        - queue, cache, shed load deliberately, degrade gracefully
+</code></pre>
+<p>Note that layers 1-3 filter and 4-6 <em>budget</em>. You need both: filtering is<br />
+finite, budgeting is what keeps you alive when it is exhausted.</p>
+<h2 id="being-a-good-citizen">Being a good citizen</h2>
+<pre><code class="language-text">  get authorisation in writing, naming the vector and the rate
+  know the provider's acceptable use policy and your contact
+  start slow; escalate only with the target's agreement
+  do not test reflection against third-party infrastructure
+  use Cloudflare or equivalent for YOUR site rather than being a test subject
+</code></pre>
+<p>Most providers consider unauthorised DoS testing a serious offence, and most<br />
+attackers are caught by their own infected hosts rather than by attribution.</p>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Denial of service</strong></td>
+<td>Making a resource unavailable</td>
+</tr>
+<tr>
+<td><strong>Volumetric</strong></td>
+<td>Exhausting bandwidth</td>
+</tr>
+<tr>
+<td><strong>Amplification</strong></td>
+<td>Small request, large reply</td>
+</tr>
+<tr>
+<td><strong>Reflection</strong></td>
+<td>Spoofed-source reply to the victim</td>
+</tr>
+<tr>
+<td><strong>BCP 38 / ingress filtering</strong></td>
+<td>Dropping spoofed sources</td>
+</tr>
+<tr>
+<td><strong>SYN cookies</strong></td>
+<td>Encode state in the ISN, no table needed</td>
+</tr>
+<tr>
+<td><strong>SYNPROXY</strong></td>
+<td>Proxy the handshake, validate before the server</td>
+</tr>
+<tr>
+<td><strong>Scrubbing</strong></td>
+<td>Third-party DDoS mitigation</td>
+</tr>
+<tr>
+<td><strong>Load shedding</strong></td>
+<td>Deliberately refusing work to stay alive</td>
+</tr>
+<tr>
+<td><strong>Zip bomb</strong></td>
+<td>Small archive, enormous expansion</td>
+</tr>
+<tr>
+<td><strong>ReDoS</strong></td>
+<td>Catastrophic regex backtracking</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- what resource limits does this host already have? ---
+{
+  echo &quot;=== SYN flood protection ===&quot;
+  echo &quot;  tcp_syncookies              : $(cat /proc/sys/net/ipv4/tcp_syncookies 2&gt;/dev/null)&quot;
+  echo &quot;  tcp_max_syn_backlog         : $(cat /proc/sys/net/ipv4/tcp_max_syn_backlog 2&gt;/dev/null)&quot;
+  echo &quot;  tcp_abort_on_overflow       : $(cat /proc/sys/net/ipv4/tcp_abort_on_overflow 2&gt;/dev/null)&quot;
+  echo &quot;  tcp_synack_retries          : $(cat /proc/sys/net/ipv4/tcp_synack_retries 2&gt;/dev/null)&quot;
+  echo
+  echo &quot;=== socket / connection limits ===&quot;
+  echo &quot;  somaxconn                   : $(cat /proc/sys/net/core/somaxconn 2&gt;/dev/null)&quot;
+  echo &quot;  nf_conntrack_max            : $(cat /proc/sys/net/netfilter/nf_conntrack_max 2&gt;/dev/null || echo n/a)&quot;
+  echo &quot;  file-max                    : $(cat /proc/sys/fs/file-max 2&gt;/dev/null)&quot;
+  echo
+  echo &quot;=== cgroup memory limits, if in use ===&quot;
+  cat /sys/fs/cgroup/memory.max 2&gt;/dev/null | sed 's/^/  memory.max: /' || echo &quot;  (cgroup v1 or unrestricted)&quot;
+  echo
+  echo &quot;=== load ===&quot;
+  echo &quot;  loadavg                     : $(cat /proc/loadavg)&quot;
+  echo &quot;  processes in D state        : $(ps -eo stat --no-headers | grep -c '^D')&quot;
+} 2&gt;&amp;1 | tee 01-limits.txt
+
+# --- what would this host look like under load? ---
+{
+  echo &quot;=== current resource headroom ===&quot;
+  free -h | head -2 | sed 's/^/  /'
+  echo
+  echo &quot;=== file descriptors in use ===&quot;
+  echo &quot;  allocated: $(ls /proc/self/fd | wc -l)&quot;
+  echo &quot;  system max: $(cat /proc/sys/fs/file-max 2&gt;/dev/null)&quot;
+  echo
+  echo &quot;=== connection states (a SYN flood shows as SYN-RECV) ===&quot;
+  ss -tan 2&gt;/dev/null | awk 'NR&gt;1{print $1}' | sort | uniq -c | sort -rn | head -6 | sed 's/^/  /'
+} 2&gt;&amp;1 | tee 02-headroom.txt
+
+# --- amplification: what on this host would reflect? ---
+cat &gt; 03-amplifiers.md &lt;&lt;'EOF'
+# Amplification reflection: your own box as a reflector
+
+**Lab only, and only against yourself.** A reflection test sends a small
+spoofed request to an open service and checks whether a large reply arrives
+at your own address.
+
+```bash
+# DNS, against your own resolver only
+dig +noall +answer ANY example.com @127.0.0.1
+
+# NTP monlist, if chrony is running (rarely now)
+#   the classic 556x amplifier, mostly fixed
+
+# what would answer on this host?
+sudo ss -ulnp | awk 'NR&gt;1{print &quot;  &quot;$5, $7}'
+```
+
+## Why this matters for your own security
+
+1. **You may be a reflector.** If an open UDP service on your network replies
+   to spoofed requests, your network is being used to attack someone else,
+   and your address takes the blame.
+2. **You may be a victim.** Someone else may already be using you.
+
+## The fix
+- BCP 38 ingress filtering on every edge router
+- no unnecessary UDP services
+- rate limits on resolvers and any UDP responder
+
+## The measurement
+`sudo nstat -az | grep -i refrag` and your provider's abuse desk both
+surface reflected traffic.
+EOF
+cat 03-amplifiers.md
+
+# --- a rate limiter you can actually run ---
+cat &gt; 04-ratelimit.md &lt;&lt;'EOF'
+# Rate limiting, the cheapest availability control
+
+Effective rate limiting is per *source* and per *resource*, with an algorithm
+that is hard to game.
+
+</code></pre>
+<h1 id="nginx-a-leaky-bucket-per-source-ip">nginx: a leaky bucket per source IP</h1>
+<p>limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;<br />
+location /api/ {<br />
+    limit_req zone=api burst=20 nodelay;<br />
+    proxy_pass http://backend;<br />
+}</p>
+<pre><code>
+The parameters that matter:
+- **rate**: sustained requests per second per source
+- **burst**: how many may arrive at once (absorbs legitimate spikes)
+- **nodelay**: reject immediately rather than queueing (protects the backend)
+
+## Why a naive limiter fails
+- by IP: one attacker behind a NAT, or a botnet, exhausts everyone's budget
+- global: a single heavy user starves everyone
+- per account: trivially bypassed with many accounts
+
+Layer them: per IP (cheap), per account (meaningful), global (backstop).
+EOF
+cat 04-ratelimit.md
+
+# --- ReDoS: a real, one-line DoS against a regex ---
+python3 - &lt;&lt;'PY' | tee 05-redos.txt
+import re, time
+# The classic catastrophic backtracking pattern: (a+)+ against a failing input
+bad = re.compile(r&quot;^(a+)+$&quot;)
+good = re.compile(r&quot;^a+$&quot;)
+tests = [&quot;aaaaaaaaaaaaaaaaaaaaaaaaX&quot;, &quot;a&quot;*28 + &quot;X&quot;]
+
+for name, pat in ((&quot;vulnerable (a+)+&quot;, bad), (&quot;fixed a+&quot;, good)):
+    for t in tests:
+        start = time.perf_counter()
+        pat.match(t)
+        dt = time.perf_counter() - start
+        print(f&quot;  {name:&lt;18} len={len(t):&lt;3} {dt*1000:9.2f} ms&quot;)
+    print()
+
+print(&quot;  A single request, no bandwidth, complete CPU exhaustion.&quot;)
+print(&quot;  The fix is a linear pattern, or a timeout, or a non-backtracking engine.&quot;)
+print(&quot;  Any regex from untrusted input is a DoS surface - this is ReDoS,&quot;)
+print(&quot;  and it is why 'validate input, then regex' is not a complete answer.&quot;)
+PY
+cat 05-redos.txt
+
+# --- the defensive stack, written out ---
+cat &gt; 06-defence.md &lt;&lt;'EOF'
+# Defending against DoS: the full stack
+
+## 1. Before you are attacked
+- know your baseline: normal rps, normal bandwidth, normal concurrency
+- alert on deviation from baseline, not on absolute thresholds
+- run a load test so you know where your knee is
+
+## 2. At the edge
+- CDN / anycast so a volumetric attack is absorbed somewhere else
+- provider scrubbing, pre-arranged, with a contact
+- rate limiting per IP, per account, and global
+
+## 3. In the network
+- BCP 38 ingress filtering (stop amplification using you)
+- QoS so critical traffic survives congestion
+- SYN cookies and SYNPROXY
+
+## 4. On the host
+- cgroup limits so one process cannot exhaust the machine
+- connection limits and timeouts
+- fd limits (this is why &quot;too many open files&quot; is a DoS symptom)
+
+## 5. In the application
+- per-request cost limits and deadlines
+- bounded complexity: no regex backtracking on user input
+- caching so the database is not the bottleneck
+- **load shedding**: deliberately reject work to stay alive
+
+## 6. In the design
+- queues with backpressure instead of unbounded work
+- graceful degradation: serve cached content when the backend is down
+- redundancy, so failure of one node is not failure of the service
+
+## The order of preference under attack
+  absorb (CDN) &gt; reject (rate limit) &gt; shed (drop work) &gt; degrade (serve stale)
+Catching traffic you cannot absorb is the worst option and the most
+expensive.
+EOF
+cat 06-defence.md
+</code></pre>
+<p><strong>Step 5 is the punchline</strong>: one HTTP request, a 29-character string, and complete CPU exhaustion.<br />
+No bandwidth required. That's why DoS lives in the <em>application</em> layer far more often than the<br />
+network layer.</p>
+<p><strong>Record:</strong> <code>05-redos.txt</code> and <code>06-defence.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why can cryptography protect confidentiality but not availability?</li>
+<li>Name the five DoS vectors and which is cheapest for an attacker.</li>
+<li>What is amplification, and what is BCP 38's role in it?</li>
+<li>What does a SYN cookie actually avoid storing?</li>
+<li>Why does a per-IP rate limiter fail against a botnet, and what do you add?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Denial of Service</strong> → <strong>Firewalls &amp; Filtering</strong> → <strong>IDS / IPS</strong> → <strong>TCP Three-Way Handshake</strong> →<br />
+<strong>Classic TCP/IP Security Problems</strong>.<br />
+The capstone of CS161, and the start of thinking about Tier 6 and Tier 8.</p>

@@ -1,0 +1,281 @@
+<h1 id="writing-reproducible-findings-and-evidence">Writing Reproducible Findings and Evidence</h1>
+<h2 id="summary">Summary</h2>
+<p>A finding is only as good as its reproducibility. If a reader cannot re-run your proof from what<br />
+you wrote, you have written an assertion, not a finding.</p>
+<p>The framing: <strong>the test of a finding is whether a competent engineer<br />
+who has never met you could reproduce it from the report alone.</strong> That<br />
+single sentence drives every formatting decision.</p>
+<blockquote>
+<p>Companion to <code>rep-01</code> (structure) and <code>rep-03</code> (severity). This note<br />
+is the finding body and the evidence chain.</p>
+</blockquote>
+<h2 id="anatomy-of-a-finding">Anatomy of a finding</h2>
+<pre><code class="language-text">  1. TITLE          what, where, and the consequence. Not a CVE id.
+                    &quot;Unauthenticated remote code execution on WEB-01&quot;
+                    not &quot;Critical finding 1&quot;
+
+  2. RISK           what an attacker GAINS, in business terms.
+                    Written so a non-technical reader understands it.
+
+  3. PREREQUISITE   what must be true for this to work.
+                    THIS IS THE LINE THAT DISTINGUISHES A FINDING
+                    FROM A POSSIBILITY.
+
+  4. EVIDENCE       the exact request, the exact response.
+                    Verbatim. Copy-pasteable.
+
+  5. STEPS TO       numbered, minimal, reproducible from step 1.
+     REPRODUCE      A reader should not have to think.
+
+  6. ROOT CAUSE     why the vulnerability exists, technically.
+                    This is what makes the fix obvious.
+
+  7. REMEDIATION    specific, owned, and scheduled.
+                    &quot;Remove the endpoint&quot; not &quot;improve security&quot;.
+
+  8. RE-TEST       when it will be checked, and how.
+</code></pre>
+<h2 id="the-evidence-standard">The evidence standard</h2>
+<pre><code class="language-yaml"># what goes in an evidence block, and what does not
+evidence:
+  target: &quot;192.168.56.20:8080 (WEB-01)&quot;
+  context: &quot;Authenticated as LAB\alice, a standard user account with no
+            administrative rights. Authenticated access was supplied under
+            the engagement letter.&quot;
+  request: |
+    GET /admin/records HTTP/1.1
+    Host: 192.168.56.20:8080
+    Cookie: session=[REDACTED]
+    Connection: close
+  response: |
+    HTTP/1.0 200 OK
+    Server: SimpleHTTP/0.6 Python/3.13.2
+    Content-Length: 14238
+
+    [REDACTED — record structure shown;
+     one sample row redacted; 0 records retained]
+  observable: &quot;HTTP 200 with 14,238 bytes. No Cookie or Authorization
+               header was sent. The same response was returned from a
+               fresh session with an empty cookie jar.&quot;
+  NOT_claimed:
+    - &quot;That the endpoint was used in anger&quot;
+    - &quot;Which records exist&quot;
+    - &quot;How many records exist in total&quot;
+  captured_at: &quot;2026-10-14T11:04:22Z&quot;
+  captured_by: &quot;nwpcs&quot;
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/rep-02 &amp;&amp; cd ~/aegis/labs/rep-02
+mkdir -p evidence
+
+cat &gt; 01-evidence.md &lt;&lt;'EOF'
+# Evidence rules
+
+```text
+  WHAT MAKES EVIDENCE EVIDENCE
+    1. REPRODUCIBLE   a reader can re-run it, from your text, on a
+                      clean system, and get the same result.
+    2. TIMESTAMPED    when it was observed, in UTC, with the timezone.
+    3. CONTEXTUAL     which account, which privilege level, which
+                      network position.
+    4. ATTRIBUTED     who collected it, from where.
+    5. UNALTERED      the artefact is hashed, and the hash is in the
+                      report.
+
+  WHAT MUST NEVER APPEAR IN A REPORT
+    - a live credential, session cookie, or API key, in ANY encoding
+    - another person's personal data, even one row
+    - a full database dump, even &quot;for evidence&quot;
+    - a screenshot that has not been checked for credentials
+    - an internal hostname the client has not already disclosed,
+      if the client is sensitive about it - ask first
+    - anything you did not actually observe
+
+  THE REDACTION RULE
+    Redact to the SHAPE, not the content. &quot;3 rows, 4 columns, the
+    fourth column is a partial card number, values [REDACTED]&quot; tells
+    the client everything they need. The values themselves tell the
+    client nothing they did not already have.
+
+  THE SCREENSHOT RULE
+    Screenshots are for HUMANS. Raw output is for REPRODUCTION.
+    Both, and the screenshot is a convenience, not the evidence.
+    Crop for layout, blur for secrets - and blur rather than crop
+    for secrets, because cropping hides the context that makes the
+    screenshot legible.
+```
+EOF
+echo &quot;written: 01-evidence.md&quot;
+
+cat &gt; 02-template.md &lt;&lt;'EOF'
+## F-04 · Unauthenticated access to customer records on WEB-01 · **CRITICAL**
+
+**Risk**
+An unauthenticated attacker with network access to port 8080 can
+read the production customer database in full, including names, email
+addresses, and partial payment card data. No credentials are required,
+and the endpoint is not referenced anywhere in the application's
+documentation.
+
+**Prerequisite for exploitation**
+A TCP connection to 192.168.56.20:8080 from the internal network. No
+user interaction, no credentials, no special tooling. The endpoint is
+not linked from any page, so it requires a direct request.
+
+**Evidence**
+</code></pre>
+<p>GET /admin/records HTTP/1.1<br />
+Host: 192.168.56.20:8080<br />
+Connection: close</p>
+<pre><code>```http
+HTTP/1.0 200 OK
+Server: SimpleHTTP/0.6 Python/3.13.2
+Content-Length: 14238
+
+[REDACTED — structure shown, 3 sample rows redacted,
+ no records retained]
+</code></pre>
+<p>The request carried no <code>Cookie</code> and no <code>Authorization</code> header. The<br />
+identical response was returned from a separate session with an empty<br />
+cookie jar, at 2026-10-14T11:04:22Z, as <code>LAB\alice</code> (a standard user).</p>
+<p><strong>Steps to reproduce</strong><br />
+1. From any host on 192.168.56.0/24: <code>curl -i http://192.168.56.20:8080/admin/records</code><br />
+2. No credentials are requested or required.<br />
+3. The response is the customer records table.</p>
+<p><strong>Not claimed</strong><br />
+We did not enumerate the records, retrieve a dataset, or determine the<br />
+total row count beyond the response length. We establish access, not<br />
+exfiltration.</p>
+<p><strong>Root cause</strong><br />
+The endpoint was introduced during the 2024 migration and was never<br />
+placed behind authentication. It is served by a development HTTP server<br />
+(<code>python -m http.server</code>) rather than the production application server,<br />
+which indicates it bypassed the normal routing and middleware chain.<br />
+The firewall rule permitting 8080 from the internal range was written<br />
+for the application servers and was never narrowed.</p>
+<p><strong>Remediation</strong><br />
+| # | Action | Owner | Effort | Priority |<br />
+|---|---|---|---|---|<br />
+| 1 | Remove the endpoint; no application feature uses it | Web Platform | Immediate | Immediate |<br />
+| 2 | Migrate remaining endpoints off the development server | Web Platform | 2 days | Immediate |<br />
+| 3 | Narrow the 8080 firewall rule to the application server range | Network Ops | Immediate | Immediate |<br />
+| 4 | Add a CI check that fails when an <code>/admin/*</code> route has no authentication | Web Platform | 1 sprint | High |</p>
+<p><strong>Re-test</strong> 30 days after remediation, included in this engagement. The re-test repeats the<br />
+request above and confirms a 401 or 403, and confirms the firewall rule scope.<br />
+EOF<br />
+echo "written: 02-template.md"</p>
+<p>cat &gt; 03-check.py &lt;&lt;'PY'</p>
+<h1 id="usrbinenv-python3">!/usr/bin/env python3</h1>
+<p>"""Check a draft report for the things that make it unusable.</p>
+<p>Catches the failure modes that get a report rejected by the client's<br />
+legal team or ignored by their engineers.<br />
+"""<br />
+import re, sys, pathlib</p>
+<p>PATTERNS = [<br />
+    # (regex, severity, what it means)<br />
+    (r"\b(?:\d{1,3}.){3}\d{1,3}\b(?!.<em>[REDACTED)", 0, "an IP address - check it is in the approved list"),<br />
+    (r"\b[a-f0-9]{64}\b", 0, "a sha256 - good, but check it is a FILE hash and labelled"),<br />
+    (r"\b[a-f0-9]{32}\b", 2, "a bare 32-hex string - possibly a password hash. Remove or label."),<br />
+    (r"(?:password|passwd|pwd)\s</em>[:=]\s<em>\S+", 3,<br />
+     "a credential in plaintext. REMOVE."),<br />
+    (r"(?i)authorization:\s</em>(?![REDACTED)\S+", 3,<br />
+     "an Authorization header. Redact it."),<br />
+    (r"(?i)cookie:\s<em>(?![REDACTED)\S+", 3,<br />
+     "a Cookie header. Redact it."),<br />
+    (r"\bBearer\s+[A-Za-z0-9.<em>-]{20,}", 3, "a bearer token. Redact it."),<br />
+    (r"(?i)\b(api[</em>-]?key|secret|token)\b\s</em>[:=]\s*\S+", 3,<br />
+     "a key or token. Redact it."),<br />
+    (r"\bCVSS[^0-9]{0,4}\d.\d\b", 1,<br />
+     "a CVSS score. Fine to include, but it must not BE the severity."),<br />
+    (r"(?i)\bcritical\b", 0, "Critical used - check the prerequisite supports it."),<br />
+    (r"(?i)\bwe recommend .{0,20}$", 0, "check this recommendation is specific"),<br />
+    (r"(?i)\bimprove .{0,30}security\b", 2,<br />
+     "a non-specific remediation. This is the most common rejection reason."),<br />
+    (r"(?i)\bwe found no\b|\bno vulnerabilities\b", 2,<br />
+     "a negative finding. Must be scoped ('no findings in the scope tested')."),<br />
+    (r"\bTODO|\bTBD|\bXXX\b", 3, "a placeholder. The report was submitted with a blank."),<br />
+    (r"(?i)\bshould\b", 1, "'should' - is it a recommendation or a description?"),<br />
+]</p>
+<p>def check(path):<br />
+    text = pathlib.Path(path).read_text(errors="ignore")<br />
+    lines = text.splitlines()<br />
+    issues = []<br />
+    for rx, sev, why in PATTERNS:<br />
+        for i, line in enumerate(lines, 1):<br />
+            for m in re.finditer(rx, line):<br />
+                snippet = line[max(0, m.start()-25):m.end()+25]<br />
+                issues.append((sev, i, why, snippet.strip()[:90]))<br />
+    if not issues:<br />
+        print("  no issues found by the automated check.")<br />
+        print("  (that is not the same as 'ready to send' - see below.)")<br />
+        return 0<br />
+    for sev, i, why, snip in sorted(issues):<br />
+        tag = ["INFO ", "WARN ", "CHECK", "FIX  "][sev]<br />
+        print(f"  [{tag}] line {i:&lt;5} {why}")<br />
+        print(f"           {snip}")<br />
+    n3 = sum(1 for s, <em>_ in issues if s == 3)<br />
+    n2 = sum(1 for s, </em><em> in issues if s == 2)<br />
+    print(f"\n  {n3} must-fix, {n2} to check, "<br />
+          f"{sum(1 for s, *</em> in issues if s&lt;2)} informational.")<br />
+    if n3: print("  DO NOT SEND with must-fix items.")<br />
+    return 1 if n3 else 0</p>
+<p>if <strong>name</strong> == "<strong>main</strong>":<br />
+    if len(sys.argv) &lt; 2:<br />
+        print(<strong>doc</strong>); sys.exit(0)<br />
+    rc = 0<br />
+    for p in sys.argv[1:]:<br />
+        print(f"=== {p} ==="); rc |= check(p); print()<br />
+    print("THE CHECKS AN AUTOMATED TOOL CANNOT DO:")<br />
+    print("  - can a competent engineer reproduce each finding from this text alone?")<br />
+    print("  - is every prerequisite stated, and is the severity consistent with it?")<br />
+    print("  - is every recommendation specific enough to schedule?")<br />
+    print("  - does the executive summary match what the findings actually say?")<br />
+    print("  - would the client accept this being forwarded to their board?")<br />
+    sys.exit(rc)<br />
+PY<br />
+echo "written: 03-check.py"</p>
+<p>python3 - &lt;&lt;'PY' | tee 04-demo.txt</p>
+<h1 id="a-deliberately-bad-draft-to-exercise-the-checker">a deliberately bad draft, to exercise the checker</h1>
+<p>import pathlib<br />
+bad = """# Findings</p>
+<h2 id="f-01-sql-injection-in-search">F-01  SQL Injection in search</h2>
+<p>The search page is vulnerable. We found that ' OR 1=1-- returns all<br />
+rows. This is a CRITICAL issue and the database password is<br />
+admin:Sup3rS3cret! which we were able to read from the config.<br />
+The admin hash is 8846f7eaee8fb117ad06bdd830b7586c and we could<br />
+crack it.</p>
+<p>CVSS 9.8. We recommend to improve the security posture. There were<br />
+no other vulnerabilities found.</p>
+<h2 id="f-02">F-02</h2>
+<p>TODO: fill this in<br />
+See 192.168.56.20:8080.<br />
+"""<br />
+pathlib.Path("draft-bad.md").write_text(bad)<br />
+PY<br />
+python3 03-check.py draft-bad.md 2&gt;&amp;1 | sed 's/^/  /' | tee -a 04-demo.txt<br />
+rm -f draft-bad.md<br />
+```</p>
+<p><strong>Step 3 is the deliverable</strong>: <code>03-check.py</code> flags a plaintext credential in the draft, a bare<br />
+32-hex password hash, and <code>TODO</code> — and then prints the five checks <strong>an automated tool cannot<br />
+do</strong>: whether a competent engineer could reproduce each finding from the text alone, whether the<br />
+severity is consistent with the stated prerequisite, and whether the executive summary matches<br />
+what the findings say.</p>
+<p><strong><code>02-template.md</code></strong> is the worked example, and the section that makes it good is <strong>"Not claimed"</strong>:<br />
+<em>we did not enumerate the records, retrieve a dataset, or determine the total row count beyond the<br />
+response length. We establish access, not exfiltration.</em> That paragraph is what keeps the report<br />
+defensible.</p>
+<p><strong>Record:</strong> <code>03-check.py</code> and <code>04-demo.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name the eight sections of a finding, in order.</li>
+<li>What is the prerequisite line, and why does it distinguish a finding from a possibility?</li>
+<li>Why must a title avoid CVE identifiers?</li>
+<li>Give the five properties that make something evidence.</li>
+<li>Name six things that must never appear in a report.</li>
+<li>Why redact to the <em>shape</em> rather than the content?</li>
+<li>When should you blur a screenshot rather than crop it?</li>
+<li>Why does severity often need qualification, and when is it just noise?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Pentest Reporting</strong> → <strong>Evidence Handling</strong> → <strong>Risk Likelihood Impact</strong> →<br />
+<strong>Reproducible Findings</strong> → <strong>Remediation</strong>.<br />
+<code>rep-03</code> is the severity work; <code>rep-04</code> is the remediation and summary.</p>

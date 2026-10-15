@@ -1,0 +1,299 @@
+<h1 id="network-and-credential-plugins">Network and Credential Plugins</h1>
+<h2 id="summary">Summary</h2>
+<p>Two plugin groups, one question each: <strong>what was this machine talking to</strong>, and <strong>what<br />
+credentials existed here</strong>. Both give you direct evidence rather than inference, and both require<br />
+authorisation before you run them.</p>
+<p>The framing: <strong><code>netscan</code> gives you attribution; <code>credential_dump</code> gives<br />
+you compromise.</strong> The first is usually fine to run in an engagement.<br />
+The second prints every credential on the host and is treated<br />
+accordingly.</p>
+<blockquote>
+<p>Companion to <code>ad-05</code> (credential dumping) and <code>imp-01</code>. This note is<br />
+the memory-side version.</p>
+</blockquote>
+<h2 id="network-plugins">Network plugins</h2>
+<pre><code class="language-bash">VOL=&quot;vol.py&quot;; IMG=&quot;memory.raw&quot;
+
+# netscan - every TCP connection, with the owning PID
+$VOL windows.netscan -f &quot;$IMG&quot;
+#   columns: Offset, Proto, LocalAddr, LocalPort, ForeignAddr,
+#            ForeignPort, PID, Owner, Created
+#   ^ Owner is the PROCESS NAME. That is the join to pslist.
+#     &quot;an outbound connection from lsass.exe&quot; is a finding you can
+#     act on immediately.
+
+# netstat - the socket table, with state
+$VOL windows.netstat -f &quot;$IMG&quot;
+#   columns: Offset, Proto, LocalAddr, LocalPort, ForeignAddr,
+#            ForeignPort, State, PID, Owner
+#   ^ State tells you LISTENING vs ESTABLISHED. An ESTABLISHED
+#     outbound to a new address at the time of the capture is the
+#     moment of the exfiltration.
+
+# netscan can filter to one process - and you should
+$VOL windows.netscan -f &quot;$IMG&quot; --pid 2100
+$VOL windows.netscan -f &quot;$IMG&quot; --pid 2100 --dump
+#   ^ --dump writes the socket data (the in-memory request and
+#     response) to files. That is HTTP bodies, passwords typed into
+#     a form, and anything plaintext. Treat the output as evidence.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/vol-03 &amp;&amp; cd ~/aegis/labs/vol-03
+
+cat &gt; 01-network-questions.md &lt;&lt;'MD'
+# What to ask the network plugins
+
+```text
+  1. WHICH PROCESS HAS AN OUTBOUND CONNECTION I DO NOT RECOGNISE?
+     $VOL windows.netscan -f IMG | grep -v &quot;127.0.0.1\|192.168\|10\.\|172.1&quot;
+     then join the PID to pslist. This is question 1 because a
+     single unexpected outbound connection with a known process name
+     is the fastest finding in memory forensics.
+
+  2. IS A SYSTEM PROCESS TALKING OUT?
+     lsass.exe, services.exe, or csrss.exe with an ESTABLISHED
+     connection to an external address is credential theft or a
+     C2 channel using a system binary. Nothing legitimate does this.
+
+  3. IS THERE A LISTENER THAT SHOULD NOT BE THERE?
+     A LISTENING socket on an unusual port, owned by a user process,
+     is either an implant or an authorised service nobody told you
+     about. Both are worth a question.
+
+  4. WHAT IS THE SESSION MAPPING?
+     $VOL windows.getsids -f IMG
+     An interactive user session with a connection to an external
+     host is a user being phished or an implant running as the user.
+
+  5. IS THE TIMING CONSISTENT?
+     netscan's Created timestamp against windows.info's SystemTime.
+     A connection created 40 seconds before capture, to an address
+     first seen in this session, is an active C2 channel at the moment
+     you took the image.
+
+  6. WHAT ABOUT THE DNS CACHE?
+     $VOL windows.dumpfiles --pid &lt;pid&gt; IMG     (the resolver cache)
+     $VOL windows.registry.printkey --key \
+       'ROAMING\MACHINE\SOFTWARE\MICROSOFT\WINDOWS NT\CURRENTVERSION\DNS\CACHE'
+     A DNS cache entry for a domain you do not recognise, from a
+     process you cannot explain, ties the network finding to the
+     host finding.
+```
+MD
+cat 01-network-questions.md
+
+cat &gt; 02-network.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+VOL=&quot;${VOL:-vol.py}&quot;; IMG=&quot;${1:?usage: ./02-network.sh memory.raw}&quot;
+echo &quot;=== 1. every connection, with its owning process ===&quot;
+$VOL windows.netscan -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;=== 2. THE EXTERNAL ONES, which is the actual question ===&quot;
+$VOL windows.netscan -f &quot;$IMG&quot; 2&gt;/dev/null \
+  | grep -vE &quot;127\.0\.0\.1|0\.0\.0\.0|192\.168\.|10\.[0-9]|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.&quot; \
+  | sed 's/^/  /'
+echo
+echo &quot;  ^ if this is empty, nothing was talking out at capture time.&quot;
+echo &quot;    That is a finding in itself: it means either the malware&quot;
+echo &quot;    was idle, or it was beaconing on a long interval, or the&quot;
+echo &quot;    capture was taken while the network was down.&quot;
+echo
+echo &quot;=== 3. the state, which distinguishes a listener from a channel ===&quot;
+$VOL windows.netstat -f &quot;$IMG&quot; 2&gt;/dev/null | sed 's/^/  /'
+echo
+echo &quot;  LISTENING   = a service. Question whether it should exist.&quot;
+echo &quot;  ESTABLISHED = an active conversation. This is the finding.&quot;
+echo
+echo &quot;=== 4. system processes with connections (the fastest finding) ===&quot;
+$VOL windows.netscan -f &quot;$IMG&quot; 2&gt;/dev/null \
+  | grep -iE &quot;lsass|services|csrss|winlogon|svchost&quot; | sed 's/^/  /'
+echo
+echo &quot;  None of these should have an outbound connection to an&quot;
+echo &quot;  external address. If one does, either it is an impersonated&quot;
+echo &quot;  process (hollowing) or the binary has been replaced.&quot;
+echo
+echo &quot;=== 5. join netscan's PIDs to pslist ===&quot;
+$VOL windows.netscan -f &quot;$IMG&quot; 2&gt;/dev/null | awk 'NR&gt;1 &amp;&amp; $6!=&quot;&quot;{print $6}' | sort -u \
+  | while read -r pid; do
+    nm=$($VOL windows.pslist -f &quot;$IMG&quot; 2&gt;/dev/null | awk -v p=&quot;$pid&quot; '$1==p{print $3}')
+    printf &quot;  pid %-6s %s\n&quot; &quot;$pid&quot; &quot;${nm:-NOT IN THE PROCESS LIST}&quot;
+  done
+echo
+echo &quot;  ^ 'NOT IN THE PROCESS LIST' means a socket owned by a process&quot;
+echo &quot;    that pslist cannot see. That is DKOM, and it is one of the&quot;
+echo &quot;    strongest single findings in memory forensics.&quot;
+EOF
+chmod +x 02-network.sh
+</code></pre>
+<h2 id="credential-plugins-and-the-authorisation-gate">Credential plugins, and the authorisation gate</h2>
+<pre><code class="language-text">  THE PLUGINS
+
+    windows.credential_dump    lsadump + mimikatz + SAM + DPAPI, all
+                              in one. Prints every credential it can
+                              find, in plaintext where possible.
+    windows.hashdump          the NT hashes only. Same access, less
+                              output to handle.
+    windows.lsadump           the LSASS secrets only.
+
+  WHAT EACH NEEDS
+    Access to LSASS memory. In practice: the acquisition ran as
+    SYSTEM or as an administrator, so the memory you have contains
+    what that user could read. If you acquired as an admin, you can
+    usually read LSASS. If you acquired as SYSTEM, definitely.
+
+  THE AUTHORISATION QUESTION, and it is not a formality:
+
+    These plugins print EVERY CREDENTIAL ON THE HOST, including:
+      - every cached domain logon for every user who has ever
+        authenticated to this machine
+      - the local administrator's hash
+      - the machine account's hash (crack it = domain admin
+        neighbour at best)
+      - DPAPI master keys, which decrypt saved browser passwords and
+        stored credentials
+
+    In a client engagement, this is CREDENTIAL EXTRACTION and it needs
+    its own ROE clause. It is not implied by &quot;memory forensics&quot;.
+
+    In a lab, it is your own lab.
+
+    THE PRACTICAL RULE: run hashdump rather than credential_dump
+    unless you specifically need the plaintext. The hashes are a
+    demonstrable finding; the plaintext is a liability.
+</code></pre>
+<pre><code class="language-bash">cat &gt; 03-credentials.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+VOL=&quot;${VOL:-vol.py}&quot;; IMG=&quot;${1:?usage: ./03-credentials.sh memory.raw}&quot;
+OUT=&quot;${2:-/tmp/aegis-evidence}&quot;; mkdir -p &quot;$OUT&quot;; chmod 700 &quot;$OUT&quot;
+
+cat &lt;&lt;'NOTE'
+AUTHORISATION GATE
+
+  These plugins print every credential on the host: cached domain
+  logons, the local admin hash, the machine account, and DPAPI
+  master keys.
+
+  In a client engagement this is credential EXTRACTION and needs its
+  own ROE clause. Confirm it before running anything below.
+
+  In this project they run against YOUR OWN lab.
+NOTE
+read -r -p &quot;  proceed? [y/N] &quot; go
+[ &quot;$go&quot; = &quot;y&quot; ] || { echo &quot;  not run&quot;; exit 0; }
+
+echo
+echo &quot;=== 1. the hashes (the demonstrable finding) ===&quot;
+$VOL windows.hashdump -f &quot;$IMG&quot; &gt; &quot;$OUT/hashes.txt&quot; 2&gt;/dev/null
+wc -l &quot;$OUT/hashes.txt&quot; | sed 's/^/  accounts: /'
+head -5 &quot;$OUT/hashes.txt&quot; | sed 's/^/  /'
+echo
+echo &quot;  ^ NT hashes, every account with a cached logon. THIS IS&quot;
+echo &quot;    ALREADY A FINDING: it means the host can be used to crack&quot;
+echo &quot;    every user who ever logged into it.&quot;
+echo
+echo &quot;=== 2. what is worth cracking, and what is not ===&quot;
+echo &quot;    1. the MACHINE account (\$) -&gt; nearest DC -&gt; real risk&quot;
+echo &quot;    2. the local Administrator&quot;
+echo &quot;    3. domain admins in the cached logons&quot;
+echo &quot;    4. anything that appears in more than one host's dump&quot;
+echo &quot;       (the same hash on three hosts means the user is roaming&quot;
+echo &quot;        and their password is weak)&quot;
+echo
+echo &quot;  Use cry-d4's method for the crack. NOT hashcat against the&quot;
+echo &quot;  whole dump - triage first.&quot;
+echo
+echo &quot;=== 3. LSASS secrets (what lsadump gives you that hashdump does not) ===&quot;
+$VOL windows.lsadump -f &quot;$IMG&quot; &gt; &quot;$OUT/lsadump.txt&quot; 2&gt;/dev/null
+head -30 &quot;$OUT/lsadump.txt&quot; | sed 's/^/  /'
+echo
+echo &quot;  ^ the domain\\password entries are cached logons in&quot;
+echo &quot;    PLAINTEXT. A single one is enough to log in as that user&quot;
+echo &quot;    with no cracking at all.&quot;
+echo
+echo &quot;=== 4. DPAPI (the per-user credentials) ===&quot;
+$VOL windows.registry.hivelist -f &quot;$IMG&quot; 2&gt;/dev/null | grep -i user | sed 's/^/  /'
+echo
+echo &quot;  the user hives tell you which users were logged on.&quot;
+echo &quot;  their DPAPI master keys decrypt saved credentials.&quot;
+echo
+echo &quot;=== 5. credential_dump - everything, in one ===&quot;
+echo &quot;  NOT RUN by default. Run it only if the ROE says so and if&quot;
+echo &quot;  you need the plaintext for a specific demonstration.&quot;
+echo &quot;  $VOL windows.credential_dump -f '$IMG' &gt; '$OUT/alldump.txt'&quot;
+echo
+echo &quot;=== HANDLE THESE FILES LIKE NT HASHES ===&quot;
+ls -la &quot;$OUT&quot; | sed 's/^/  /'
+echo &quot;  encrypt at rest, no email, delete on the ROE date, and say&quot;
+echo &quot;  so in the report. credential_dump output is the most&quot;
+echo &quot;  sensitive artefact in this entire course.&quot;
+EOF
+chmod +x 03-credentials.sh
+
+# --- offline: the join, which is the point ---
+python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-join.txt
+print(&quot;  === the join between the two plugin groups ===\n&quot;)
+print(&quot;  netscan gives you: a connection, and a PID&quot;)
+print(&quot;  pslist  gives you: a PID, and a process name&quot;)
+print(&quot;  Together: 'an outbound connection to &lt;address&gt; owned by&quot;)
+print(&quot;  &lt;process&gt;'. That is a finding. Alone, either is a fact.\n&quot;)
+print(&quot;  THE FOUR JOINS THAT PRODUCE FINDINGS:\n&quot;)
+print(&quot;  1. netscan.PID not in pslist&quot;)
+print(&quot;     -&gt; a socket owned by a process that does not exist.&quot;)
+print(&quot;        DKOM. The strongest single memory finding there is.\n&quot;)
+print(&quot;  2. netscan.Owner is a SYSTEM process with an EXTERNAL conn&quot;)
+print(&quot;     -&gt; lsass.exe or services.exe talking out. Credential theft&quot;)
+print(&quot;        or an impersonated process. Never legitimate.\n&quot;)
+print(&quot;  3. netscan.Owner is a process whose cmdline is suspicious&quot;)
+print(&quot;     -&gt; the network finding and the process finding are the&quot;)
+print(&quot;        same finding, and you can now report it as one thing.&quot;)
+print()
+print(&quot;  4. windows.dnscache has an entry for netscan's destination&quot;)
+print(&quot;     -&gt; the connection is to a domain this host resolved, which&quot;)
+print(&quot;        rules out a hardcoded IP and gives you the domain for&quot;)
+print(&quot;        blocking and for the report.\n&quot;)
+print(&quot;  THE SAMPLE FINDING, IN FULL:&quot;)
+print()
+print(&quot;    'At the time of acquisition (2026-10-14 14:32:11 UTC), the host&quot;)
+print(&quot;     had an ESTABLISHED TCP connection to 198.51.100.44:443,&quot;)
+print(&quot;     owned by PID 3412. That PID appears in the process list as&quot;)
+print(&quot;     \&quot;svchost.exe\&quot; running from&quot;)
+print(&quot;     C:\\Users\\jdoe\\AppData\\Local\\Temp\\svchost.exe, with&quot;)
+print(&quot;     module \\\&quot;...\\Temp\\inject.dll\\\&quot; loaded, and a command&quot;)
+print(&quot;     line of \&quot;svchost.exe -k netsvcs -w\&quot;. The real svchost&quot;)
+print(&quot;     runs from C:\\Windows\\System32. The Windows DNS cache on&quot;)
+print(&quot;     the host contains an entry for cdn.example.com, which&quot;)
+print(&quot;     resolves to 198.51.100.44. This is a process impersonation&quot;)
+print(&quot;     used to host a C2 channel.'\n&quot;)
+print(&quot;  THAT is a finding. Six plugins, joined, and every claim in&quot;)
+print(&quot;  it is checkable by the reader from the output you provide.&quot;)
+print()
+print(&quot;  Versus: 'found a suspicious svchost.exe'.&quot;)
+PY
+cat 04-join.txt
+</code></pre>
+<p><strong>Step 4 is the deliverable</strong>: the six-plugin join that produces a real finding — <code>netscan</code> gives<br />
+a connection and a PID, <code>pslist</code> names the process, the path contradicts the name, a module is<br />
+injected, and the DNS cache resolves the destination. Every claim in that sample paragraph is<br />
+checkable by the reader from the output you attached.</p>
+<p>And the sharpest one: <strong><code>netscan.PID</code> not appearing in <code>pslist</code> is DKOM</strong> — a socket owned by a<br />
+process that doesn't exist, which is the strongest single finding in memory forensics.</p>
+<p><strong><code>03-credentials.sh</code></strong> puts the authorisation gate <em>before</em> the commands, defaults to<br />
+<code>hashdump</code> rather than <code>credential_dump</code>, and says why: the hashes are a demonstrable finding;<br />
+the plaintext is a liability.</p>
+<p><strong>Record:</strong> <code>04-join.txt</code> and <code>03-credentials.sh</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does <code>netscan</code> give you that <code>pslist</code> does not, and vice versa?</li>
+<li>What is the difference between a LISTENING and an ESTABLISHED socket in terms of findings?</li>
+<li>Why is an outbound connection from <code>lsass.exe</code> a finding?</li>
+<li>What does a <code>netscan</code> PID that is absent from <code>pslist</code> indicate?</li>
+<li>What does <code>netscan --dump</code> produce, and how should it be handled?</li>
+<li>Name three plugins that expose credentials, and what each needs.</li>
+<li>Why is <code>hashdump</code> preferred over <code>credential_dump</code> in an engagement?</li>
+<li>What does a plaintext entry in <code>lsadump</code> mean for the remediation?</li>
+<li>Why does DNS cache data strengthen a network finding?</li>
+<li>What is <code>--pid</code> filtering for, and why should you always use it?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Volatility 3</strong> → <strong>Windows Networking</strong> → <strong>Credential Dumping</strong> →<br />
+<strong>NT Hash</strong> → <strong>Active Directory</strong>.<br />
+<code>for-07</code> is the network-side equivalent, from a PCAP.</p>

@@ -1,0 +1,202 @@
+<h1 id="processes-threads-and-process-control">Processes, Threads and Process Control</h1>
+<h2 id="summary">Summary</h2>
+<p>A process is an executing program with its own resources: address space, open files, credentials.<br />
+Threads share everything except the stack and registers.</p>
+<p>Security-wise, a process is the <strong>unit of isolation</strong> and a thread is the <strong>unit of shared risk</strong>.<br />
+Getting this distinction right explains privilege boundaries, <code>ptrace</code> targets, and why memory<br />
+corruption in a multithreaded server is catastrophic.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>Process states</strong>: new, ready, running, waiting, terminated.</li>
+<li><strong>Process Control Block (PCB)</strong>: PID, state, PC, registers, memory info, open files, credentials.</li>
+<li><strong>Program vs process</strong>: a program on disk is not running; the process is the instance.</li>
+<li><strong>Threads</strong>: shared heap, shared files, per-thread stack.</li>
+<li><strong>fork()</strong>: duplicates the address space (copy-on-write).</li>
+<li><strong>execve()</strong>: replaces the image entirely — a different program in the same PID.</li>
+<li><strong>Zombie</strong>: exited process whose parent has not reaped it.</li>
+<li><strong>Credentials live per-process</strong>: which is why <code>setuid</code> binaries matter.</li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>PID</strong></td>
+<td>Process identifier</td>
+</tr>
+<tr>
+<td><strong>PCB</strong></td>
+<td>Kernel's per-process record</td>
+</tr>
+<tr>
+<td><strong>fork()</strong></td>
+<td>Create a child process</td>
+</tr>
+<tr>
+<td><strong>execve()</strong></td>
+<td>Replace the current program image</td>
+</tr>
+<tr>
+<td><strong>Thread</strong></td>
+<td>Execution stream sharing an address space</td>
+</tr>
+<tr>
+<td><strong>Context switch</strong></td>
+<td>Saving/restoring CPU state between processes</td>
+</tr>
+<tr>
+<td><strong>Zombie</strong></td>
+<td>Terminated process awaiting reaping</td>
+</tr>
+<tr>
+<td><strong>Orphan</strong></td>
+<td>Process whose parent died</td>
+</tr>
+<tr>
+<td><strong>Reaping</strong></td>
+<td>Parent collecting a child's exit status</td>
+</tr>
+<tr>
+<td><strong>Group / session</strong></td>
+<td>Process groupings for signals and job control</td>
+</tr>
+<tr>
+<td><strong>Nice / priority</strong></td>
+<td>CPU scheduling weight</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">ps aux | head -10
+ps -ef --forest | head -20
+ps -eLf | head -10          # threads
+cat /proc/self/status | head -12
+ls /proc/self/task | wc -l
+
+# process tree, who spawned whom
+pstree -sp $$ 2&gt;/dev/null | head -5
+
+# signals
+kill -l | head -25
+kill -TERM $$ ; echo &quot;would have killed this shell&quot;
+
+# credential inspection
+cat /proc/self/status | grep -E &quot;^(Uid|Gid|PPid|Threads|SigCgt)&quot;
+sudo cat /proc/1/status | grep -E &quot;^(Uid|Name)&quot;
+
+# zombies
+ps -eo pid,ppid,stat,comm | awk '$3 ~ /Z/ {print}' | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> map the process model on your machine, then observe fork/exec/credential transfer.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/neso-os-3 &amp;&amp; cd ~/aegis/labs/neso-os-3
+
+# --- 1. the process inventory ---
+{
+  echo &quot;=== totals ===&quot;
+  echo &quot;processes: $(ps -e --no-headers | wc -l)&quot;
+  echo &quot;threads:    $(ps -eL --no-headers | wc -l)&quot;
+  echo
+  echo &quot;=== my process ===&quot;
+  grep -E &quot;^(Name|Pid|PPid|Uid|Gid|Threads)&quot; /proc/self/status
+  echo
+  echo &quot;=== processes by user ===&quot;
+  ps -eo user --no-headers | sort | uniq -c | sort -rn | head
+  echo
+  echo &quot;=== zombies ===&quot;
+  ps -eo pid,ppid,stat,comm | awk '$3 ~ /Z/' | head
+  echo &quot;(empty = nothing un-reaped)&quot;
+} &gt; 01-processes.txt; cat 01-processes.txt
+
+# --- 2. fork: same program, separate address space ---
+cat &gt; forkdemo.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+#include &lt;stdlib.h&gt;
+int main(void) {
+    int x = 42;
+    pid_t p = fork();
+    if (p == 0) {                       /* child */
+        x = 99;
+        printf(&quot;child  pid=%d ppid=%d x=%d\n&quot;, getpid(), getppid(), x);
+        exit(0);
+    }
+    printf(&quot;parent pid=%d child=%d x=%d\n&quot;, getpid(), p, x);
+    wait(NULL);
+    return 0;
+}
+EOF
+gcc -o forkdemo forkdemo.c &amp;&amp; ./forkdemo | tee 02-fork.txt
+echo &quot;The child changed its own x to 99. The parent still has 42. Separate address spaces.&quot;
+
+# --- 3. execve: the SAME pid becomes a different program ---
+cat &gt; execdemo.c &lt;&lt;'EOF'
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+int main(void) {
+    printf(&quot;before exec, pid=%d\n&quot;, getpid());
+    fflush(stdout);
+    execl(&quot;/bin/echo&quot;, &quot;echo&quot;, &quot;AFTER execve, this is /bin/echo, same pid&quot;, NULL);
+    perror(&quot;execl&quot;);
+    return 1;
+}
+EOF
+gcc -o execdemo execdemo.c &amp;&amp; ./execdemo | tee 03-exec.txt
+echo &quot;Note: the PID does not change. execve replaces the image, it does not fork.&quot;
+echo &quot;This is exactly what your shell does when you type a command.&quot;
+
+# --- 4. credentials live in the process, not the binary ---
+{
+  echo &quot;=== my credentials ===&quot;
+  grep -E &quot;^(Uid|Gid|CapEff|CapBnd)&quot; /proc/self/status
+  echo
+  echo &quot;=== a setuid binary: the credential transition ===&quot;
+  ls -l /usr/bin/passwd /usr/bin/sudo 2&gt;/dev/null
+  echo &quot;  ^ the 's' in the mode means setuid. The kernel swaps UID on execve.&quot;
+  echo
+  echo &quot;=== observe it: who owns my shell's root ===&quot;
+  echo &quot;my uid: $(id -u)  effective: $(id -u -n)&quot;
+  sudo -u nobody id 2&gt;/dev/null
+  echo
+  echo &quot;=== setuid and sgid binaries on this machine ===&quot;
+  find / -perm -4000 -type f 2&gt;/dev/null | head -10
+  find / -perm -2000 -type f 2&gt;/dev/null | head -5
+} 2&gt;&amp;1 | tee 04-credentials.txt
+
+# --- 5. threads share the address space ---
+cat &gt; threads.c &lt;&lt;'EOF'
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+static int shared = 7;                 /* ONE copy, shared */
+static void *w(void *_) { printf(&quot;  thread sees shared=%d\n&quot;, shared); return 0; }
+int main(void) {
+    pthread_t t;
+    pthread_create(&amp;t, NULL, w, NULL);
+    shared = 100;                      /* main changes it */
+    pthread_join(t, NULL);
+    printf(&quot;main has shared=%d\n&quot;, shared);
+    return 0;
+}
+EOF
+gcc -o threads threads.c -lpthread &amp;&amp; ./threads | tee 05-threads.txt
+echo &quot;Same variable, one address space. That is why memory bugs cross thread boundaries.&quot;
+</code></pre>
+<p><strong>Step 4 connects straight back to <code>pr-02</code>.</strong> Every SUID binary is code that will execute with<br />
+elevated privilege, chosen by whoever can write the binary or the library it loads.</p>
+<p><strong>Record:</strong> <code>04-credentials.txt</code> — the SUID list from your own machine.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What does <code>fork()</code> do to the address space, and what does <code>execve()</code> replace?</li>
+<li>Why does <code>execve</code> keep the same PID while <code>fork</code> creates a new one?</li>
+<li>What is a zombie process and how do you get rid of it?</li>
+<li>Where do a process's credentials live, and what does setuid do to them?</li>
+<li>Why is memory corruption in a multithreaded server worse than in a single-threaded one?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Process vs Thread</strong> → <strong>UID / GID / root</strong> → <strong>SUID / SGID</strong> → <strong>System Call</strong> → <strong>ptrace</strong>.</p>

@@ -1,0 +1,278 @@
+<h1 id="detection-engineering-with-yara-and-sigma">Detection Engineering with YARA and Sigma</h1>
+<h2 id="summary">Summary</h2>
+<p>Triage tells you about one file. <strong>Detection engineering tells you about<br />
+the next thousand.</strong> This note is the discipline of turning an<br />
+observation into a rule, a rule into a deployment, and a deployment<br />
+into a coverage map.</p>
+<p>The framing: <strong>a detection that only fires on the sample you already<br />
+have is not a detection.</strong> It is a description. The difference is<br />
+measured by what it finds on data you did not write it against.</p>
+<blockquote>
+<p>Companion to <code>for-05</code> (where the indicators come from) and <code>ad-08</code><br />
+(Windows event-based detection). This note is the file and log<br />
+side, and the coverage discipline that applies to both.</p>
+</blockquote>
+<h2 id="yara-the-shape-of-a-good-rule">YARA: the shape of a good rule</h2>
+<pre><code class="language-text">  A YARA RULE IS FOUR THINGS:
+    meta      who wrote it, when, what it detects, and a reference
+    strings   the observable facts (not the conclusion)
+    condition  the logic that says &quot;these together mean this&quot;
+
+  THE DISCIPLINE:
+    STRINGS are facts.     &quot;Global\\xyz_Module&quot; is a fact.
+    META is provenance.    TLP:Amber, author, reference, date.
+    CONDITION is judgement. This is where the rule lives or dies.
+</code></pre>
+<pre><code class="language-yara">// A worked rule, from a triage finding
+import &quot;pe&quot;
+import &quot;math&quot;
+
+rule AEGIS_Exercise_Credential_Dumper
+{
+    meta:
+        description = &quot;Detects the credential dumper discussed in AEGIS-2026-001&quot;
+        author      = &quot;nwpcs&quot;
+        date        = &quot;2026-10-14&quot;
+        reference   = &quot;AEGIS lab, case AEGIS-2026-001&quot;
+        tlp         = &quot;Amber&quot;
+        confidence  = &quot;Medium&quot;
+
+    strings:
+        // FACT 1: a mutex name recovered statically from the sample
+        $mutex = &quot;Global\\AegisExerciseMutex_7f3a&quot; ascii wide nocase
+
+        // FACT 2: the API combination that indicates credential access
+        $api1 = &quot;CredEnumerateW&quot; ascii
+        $api2 = &quot;LsaRetrievePrivateData&quot; ascii
+        $api3 = &quot;CryptUnprotectData&quot; ascii   // DPAPI
+
+        // FACT 3: a PDB string that leaked the build path
+        $pdb = &quot;\\Build\\CredHarvest\\release\\x64\\&quot; ascii wide
+
+        // FACT 4: a URL recovered from the configuration
+        $c2  = &quot;cdn.example.com&quot; ascii wide
+
+    condition:
+        uint16(0) == 0x5A4D and           // it is a PE
+        $mutex and
+        1 of ($api*) and
+        ($pdb or $c2)
+}
+</code></pre>
+<h2 id="the-four-ways-a-yara-rule-fails">The four ways a YARA rule fails</h2>
+<pre><code class="language-text">  1. TOO NARROW
+     You wrote it against one sample. It fires on that sample and
+     nothing else, ever. It is a description of one file.
+     THE FIX: two or more independent strings, ANDed. A mutex alone
+              is one family member; a mutex AND an API AND a PDB path
+              is a family.
+
+  2. TOO BROAD
+     &quot;Contains the string 'http'&quot; matches everything. You will get
+     a flood, the analyst will mute it, and the rule is dead while
+     appearing enabled.
+     THE FIX: require the specific combination. Require the string
+              that only the malware uses, not the one everything uses.
+
+  3. THE CONDITION IS A GUESS
+     If you cannot explain why each string is in the rule, remove it.
+     Every string should have a reason you can say out loud.
+     THE QUESTION: &quot;if an analyst asked why is this string here, what
+                  would I say?&quot; If the answer is &quot;I saw it in the
+                  sample&quot;, the answer is not good enough.
+
+  4. NO TESTING AGAINST A CORPUS
+     A rule that has only been tested against the sample it was
+     written from has not been tested.
+     THE FIX: run it against a corpus of GOOD files. If it fires on
+              50 Windows binaries, it is too broad.
+</code></pre>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/for-06 &amp;&amp; cd ~/aegis/labs/for-06
+mkdir -p rules corpus/{good,bad} output
+
+cat &gt; 01-rule.yar &lt;&lt;'YARA'
+import &quot;pe&quot;
+
+rule AEGIS_Exercise_Credential_Dumper
+{
+    meta:
+        description = &quot;Credential dumper from AEGIS-2026-001&quot;
+        author      = &quot;nwpcs&quot;
+        date        = &quot;2026-10-14&quot;
+        reference   = &quot;AEGIS lab case AEGIS-2026-001&quot;
+        tlp         = &quot;Amber&quot;
+        confidence  = &quot;Medium&quot;
+        scope       = &quot;One family. Will not generalise.&quot;
+
+    strings:
+        $mutex = &quot;Global\\AegisExerciseMutex_7f3a&quot; ascii wide nocase
+        $api1  = &quot;CredEnumerateW&quot; ascii
+        $api2  = &quot;LsaRetrievePrivateData&quot; ascii
+        $pdb   = &quot;\\Build\\CredHarvest\\release\\x64\\&quot; ascii wide
+        $c2    = &quot;cdn.example.com&quot; ascii wide
+
+    condition:
+        uint16(0) == 0x5A4D and
+        $mutex and
+        1 of ($api*) and
+        ($pdb or $c2)
+}
+YARA
+echo &quot;written: 01-rule.yar&quot;
+
+# --- the corpus test, which is the part everybody skips ---
+{
+  echo &quot;=== yara is installed, and the rule parses ===&quot;
+  yara --version | sed 's/^/  /'
+  yara rules/ 01-rule.yar 2&gt;&amp;1 | head -5 | sed 's/^/  /' \
+    || echo &quot;  (no output = no match, which is correct on an empty corpus)&quot;
+  echo
+  echo &quot;=== BUILD A CORPUS, because a rule needs one ===&quot;
+  mkdir -p corpus/good corpus/bad
+  # &quot;good&quot;: files that must NOT match. Real binaries from this system.
+  for f in /usr/bin/strings /usr/bin/xxd /usr/bin/file /usr/bin/tshark; do
+    [ -f &quot;$f&quot; ] &amp;&amp; cp &quot;$f&quot; corpus/good/ 2&gt;/dev/null
+  done
+  ls corpus/good/ | sed 's/^/  good: /'
+  echo &quot;  ^ these are the files that MUST NOT match. A rule that&quot;
+  echo &quot;    fires on any of these is too broad.&quot;
+  echo
+  echo &quot;=== TEST: the false-positive rate, which is the number that matters ===&quot;
+  fp=0
+  for f in corpus/good/*; do
+    [ -f &quot;$f&quot; ] || continue
+    if yara rules/ 01-rule.yar &quot;$f&quot; &gt;/dev/null 2&gt;&amp;1; then
+      echo &quot;  FALSE POSITIVE: $(basename &quot;$f&quot;)&quot;
+      fp=$((fp+1))
+    fi
+  done
+  total=$(ls corpus/good/ 2&gt;/dev/null | wc -l)
+  echo &quot;  false positives: $fp / $total good files&quot;
+  echo
+  if [ &quot;$fp&quot; -gt 0 ]; then
+    echo &quot;  THE RULE IS TOO BROAD. An analyst will see this, and will&quot;
+    echo &quot;  stop reading the alerts, and the rule is now worse than&quot;
+    echo &quot;  nothing. Remove the offending string.&quot;
+  else
+    echo &quot;  clean on this corpus. This is a MINIMUM bar, not a pass:&quot;
+    echo &quot;  a real test uses thousands of good files, and a real test&quot;
+    echo &quot;  includes VARIANTS of the malware you did not have.&quot;
+  fi
+} 2&gt;&amp;1 | tee 02-corpus-test.txt
+</code></pre>
+<h2 id="sigma-detection-rules-for-logs-not-files">Sigma: detection rules for logs, not files</h2>
+<pre><code class="language-text">  YARA is for FILES. Sigma is for LOGS.
+
+  A sigma rule is YAML with a fixed shape, so it can be converted
+  into a query for whatever SIEM you use. That portability is the
+  whole reason it exists.
+</code></pre>
+<pre><code class="language-yaml">title: Domain Replication Request from a Non-DC Host
+id: 8b1e6f2a-4c7d-4e91-9a3b-2f6d8e1c5b04
+status: experimental
+description: &gt;
+  Detects a directory replication request carrying the DCSync rights.
+  A legitimate replication request comes from another domain controller.
+  The same request from a workstation or a member server is either a
+  backup application that has not been reviewed, or an attack.
+references:
+  - AEGIS case AEGIS-2026-001, finding F-xx
+  - ad-08 in the AEGIS curriculum
+author: nwpcs
+date: 2026-10-14
+tags:
+  - attack.credential_access
+  - attack.t1003.006
+logsource:
+  product: windows
+  service: security
+detection:
+  selection_object:
+    EventID: 4662
+    ObjectType: domainDNS
+  selection_rights:
+    ObjectAccess:
+      - 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2
+      - 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2
+      - 89e95b76-444d-4c62-991a-0facbeda640c
+  filter_dc:
+    SubjectDomainName|endswith: &quot;DCs&quot;
+  condition: selection_object and selection_rights and not filter_dc
+falsepositives:
+  - A backup or monitoring application with correctly scoped rights
+  - System Centre, or a product that replicates the directory
+level: high
+</code></pre>
+<h2 id="the-maturity-ladder">The maturity ladder</h2>
+<pre><code class="language-text">  LEVEL 0  NO DETECTION
+    You learn about attacks from your users and from your engagement
+    report. There is no detection capability.
+
+  LEVEL 1  FILE-BASED
+    YARA at the mail gateway and at the file server. Catches known
+    families of known files.
+
+  LEVEL 2  LOG-BASED
+    Sigma-converted queries in the SIEM for the high-signal events
+    (DCSync's 4662, 5136 for roast preparation, 4672 with SeDebug).
+
+  LEVEL 3  BEHAVIOURAL
+    Detections that describe a SEQUENCE: a new prefetch, followed by
+    a write to a system directory, followed by an outbound connection
+    to a new external address. This is where detection actually
+    starts working, because it catches the unknown.
+
+  LEVEL 4  HUNT-DRIVEN
+    You run queries on a schedule for the anomalies rather than the
+    signatures: new SPNs, new delegation flags, new local admins,
+    new accounts with never-seen-before logon patterns.
+
+  MOST ORGANISATIONS ARE AT LEVEL 1 AND BELIEVE THEY ARE AT LEVEL 3,
+  because they have alerts. Having alerts is not the same as having
+  coverage.
+</code></pre>
+<h2 id="coverage-the-question-that-matters">Coverage: the question that matters</h2>
+<pre><code class="language-text">  &quot;ARE WE COVERED?&quot; IS ANSWERED BY A TABLE, NOT A FEELING.
+
+  for each technique in your framework (MITRE ATT&amp;CK):
+    - is there a detection?        (a rule exists)
+    - is it deployed?              (the rule runs in production)
+    - is it tested?                (it fired on a test, correctly)
+    - is it trusted?               (analysts have not muted it)
+    - what is the false-positive rate?
+    - WHAT IS THE RESIDUAL RISK if it does not fire?
+
+  THE LAST ROW IS THE ONE NOBODY FILLS IN, and it is the one that
+  tells the client what they are actually exposed to. &quot;We have no
+  detection for Kerberoasting, and if it happens we will find out
+  when someone escalates&quot; is a finding.
+
+  THE TABLE, AND IT IS THE DELIVERABLE OF ANY ASSESSMENT THAT INCLUDES
+  A DETECTION SECTION:
+
+  | technique | detection | deployed | tested | FP rate | residual risk |
+  |---|---|---|---|---|---|
+  | DCSync | 4662 + 3 GUIDs | yes | no | unknown | HIGH - not tested |
+  | AS-REP roasting | none | - | - | - | HIGH - no detection exists |
+  | Kerberoasting | none | - | - | - | HIGH - only detectable after |
+  |   | | | | | credential use, not the roast |
+  | LSASS dumping | 4688 + 7045 | yes | no | unknown | MEDIUM |
+  | SMB relay | none | - | - | - | MEDIUM - config check only |
+</code></pre>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What are the four parts of a YARA rule, and which one is judgement?</li>
+<li>Why must strings be facts rather than conclusions?</li>
+<li>Name the four ways a YARA rule fails.</li>
+<li>Why is a mutex alone a weak rule and a mutex plus an API plus a<br />
+   PDB path a stronger one?</li>
+<li>What is a false-positive rate, and why is it measured against <em>good</em> files?</li>
+<li>What is the difference between a rule existing and a rule being deployed?</li>
+<li>Name the five detection maturity levels.</li>
+<li>Why is behavioural detection stronger than signature detection?</li>
+<li>What is the last column of the coverage table, and why does nobody fill it in?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>YARA</strong> → <strong>Sigma Rules</strong> → <strong>Detection Engineering</strong> → <strong>Windows Logging</strong> →<br />
+<strong>Threat Detection</strong>.<br />
+<code>ad-08</code> is the event-side version of this note.</p>

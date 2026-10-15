@@ -1,0 +1,165 @@
+<h1 id="bandit-levels-11-20-git-more-encoding-pipes-etcshadow">Bandit Levels 11-20: git, more encoding, pipes, /etc/shadow</h1>
+<h2 id="summary">Summary</h2>
+<p>Levels 11-20 introduce <code>git</code> (finding a <strong>stashed or deleted</strong> password), more encoding work,<br />
+<code>/etc/passwd</code> and <code>/etc/shadow</code> parsing, and pipes. The theme is <strong>reading data from places a<br />
+first-time user does not look</strong>: repositories, shadow files, and process output.</p>
+<h2 id="level-notes">Level notes</h2>
+<p><strong>Level 11 — git has the password in its history.</strong></p>
+<pre><code class="language-bash">ls -la
+cat .git/config
+git log --oneline --all
+git show                 # the commit content
+git log -p --all         # every commit WITH its diff
+cat .git/logs/HEAD       # raw reflog, sometimes more revealing
+</code></pre>
+<p><strong>The lesson:</strong> a <code>.git</code> directory is a complete history of the project, including things later<br />
+deleted. On a web target, an exposed <code>.git</code> hands over the source. This is exactly the<br />
+misconfiguration class from <code>ms-04</code>.</p>
+<p><strong>Level 12 — the port is in the gzipped git pack.</strong></p>
+<pre><code class="language-bash">ls -la
+zcat .git/objects/pack/*.pack.gz | strings | grep port
+</code></pre>
+<p><code>zcat</code> (or <code>gunzip -c</code>) decompresses to stdout, so it pipes. Compressed data is just more data.</p>
+<p><strong>Level 13 — SSH key permission issues.</strong></p>
+<pre><code class="language-bash">ls -la
+chmod 600 id_rsa
+ssh-keygen -y -f id_rsa      # derive the public key without logging in
+ssh bandit13@localhost -i id_rsa
+chmod 644 id_rsa.pub
+</code></pre>
+<p><code>chmod 600</code> is required because SSH refuses overly-permissive private keys — a small but real<br />
+example of permissions affecting behaviour.</p>
+<p><strong>Level 14 — a crackable hash.</strong></p>
+<pre><code class="language-bash">ls -la
+cat /etc/shadow | grep bandit14
+john --wordlist=/usr/share/wordlists/rockyou.txt --show hash.txt
+</code></pre>
+<p>Or identify it and let hashcat use the GPU:</p>
+<pre><code class="language-bash">hashid hash.txt
+hashcat -m 1400 hash.txt /usr/share/wordlists/rockyou.txt
+</code></pre>
+<p><strong>Level 15 — find the hash, then the password for it.</strong></p>
+<pre><code class="language-bash">find / -readable -type f -exec grep -l &quot;hash&quot; {} \; 2&gt;/dev/null
+cat /etc/shadow | grep bandit15
+john --wordlist=/usr/share/wordlists/rockyou.txt --show hash.txt
+</code></pre>
+<p><strong>Level 16 — one hash leads to a user's password, which unlocks the next level.</strong></p>
+<pre><code class="language-bash">for i in $(seq 0 15); do
+  grep bandit$i /etc/shadow
+done
+john --wordlist=/usr/share/wordlists/rockyou.txt --show hash.txt
+ssh bandit15@localhost -p 2220
+</code></pre>
+<p><strong>Level 17 — a crackable password behind an SSHD config and a MySQL user.</strong></p>
+<pre><code class="language-bash">ss -tulpn                 # find the running services
+cat /etc/ssh/ssh_config   # find the non-standard port
+cat /etc/mysql/mariadb.conf.d/mariadb.cnf
+# find and crack the hash, then connect to mysql with the recovered password
+</code></pre>
+<p><code>ss</code> is the modern replacement for <code>netstat</code> and you should use it everywhere.</p>
+<p><strong>Level 18 — shell differences.</strong></p>
+<pre><code class="language-bash">diff /etc/passwd bandit18 2&gt;/dev/null   # 'diff' the shell builtin vs the binary
+type -a diff
+which diff
+</code></pre>
+<p><code>type -a</code> is the command that tells you whether something is a builtin, an alias, or a binary —<br />
+and where it lives. Genuinely important when a tool behaves differently than you expect.</p>
+<p><strong>Level 19 — a config file with readable credentials.</strong></p>
+<pre><code class="language-bash">ls -la
+cat /etc/passwd | grep bandit19
+ls -la /etc/bandit/ 2&gt;/dev/null
+cat /etc/bandit/passwd   # or whatever the readable config points at
+</code></pre>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- git archaeology ---
+git log --oneline --all
+git log -p --all
+git show
+cat .git/logs/HEAD
+git stash list
+git fsck --lost-found         # dangling commits from reset --hard
+strings .git/objects/pack/*.pack | grep -i pass
+
+# --- compression into a pipe ---
+zcat file.gz | strings | grep pattern
+gunzip -c file.gz &gt; out
+unzip -p archive.zip file     # extract to stdout without unpacking
+
+# --- hashes, the two-tool approach ---
+sudo cat /etc/shadow | grep '^bandit1[4-6]:' | cut -d: -f1,2 &gt; /tmp/h.txt
+hashid /tmp/h.txt
+john --wordlist=/usr/share/wordlists/rockyou.txt --show /tmp/h.txt
+hashcat -m 1311 /tmp/h.txt /usr/share/wordlists/rockyou.txt
+
+# --- where things are ---
+type -a diff
+command -v diff
+which -a diff
+ss -tulpn
+find /etc -name &quot;*bandit*&quot; -o -name &quot;*.conf&quot; 2&gt;/dev/null | head
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> clear levels 11-20 and note every place a password hid that you did not expect.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/otw-01 &amp;&amp; cd ~/aegis/labs/otw-01
+
+ssh bandit11@bandit.labs.overthewire.org -p 2220
+</code></pre>
+<p><strong>On the box, maintain the journal — the <em>locations</em> are the lesson:</strong></p>
+<pre><code class="language-bash">cat &gt;&gt; ~/my-notes.txt &lt;&lt;'EOF'
+
+## Where Bandit hid things (11-20)
+- git object database      : .git/objects, .git/logs/HEAD
+- compressed               : .git/objects/pack/*.pack.gz (use zcat | strings)
+- hashes                   : /etc/shadow (john / hashcat)
+- service config           : /etc/ssh/ssh_config, /etc/mysql/*
+- shadowed vs built-in     : type -a / command -v / which -a
+EOF
+cat ~/my-notes.txt
+</code></pre>
+<p><strong>Back on Kali, build the reverse-lookup reference:</strong></p>
+<pre><code class="language-bash">cd ~/aegis/labs/otw-01
+cat &gt; 01-hiding-places.md &lt;&lt;'EOF'
+# Where credentials hide
+
+| Place | How to read it |
+|---|---|
+| `.git` history | `git log -p --all`, `cat .git/logs/HEAD` |
+| `.git` packfiles | `zcat .git/objects/pack/*.pack.gz \| strings` |
+| deleted commits | `git fsck --lost-found` |
+| `/etc/shadow` | `sudo grep '^user:' /etc/shadow`, then john/hashcat |
+| SSH keys | `chmod 600`, then `ssh -i` |
+| service configs | `/etc/ssh/`, `/etc/mysql/`, `/etc/apache2/` |
+| process list | `ss -tulpn`, `ps aux` |
+| environment | `/proc/PID/environ` |
+| shell history | `~/.bash_history` |
+| compressed files | `zcat`, `unzip -p`, `bzip2 -dc` |
+EOF
+cat 01-hiding-places.md | tee 01-hiding-places.txt
+
+# --- practise the git archaeology on YOUR OWN repo ---
+cd ~/Projects/aegis-academy
+{
+  echo &quot;=== deleted content still recoverable from git ===&quot;
+  git log --oneline | head -10
+  echo
+  echo &quot;=== search every historical commit for a secret ===&quot;
+  git log -p --all | grep -iE &quot;(password|api[_-]?key|BEGIN .*PRIVATE KEY)&quot; | head -5 || echo &quot;  none found&quot;
+  echo
+  echo &quot;=== this is why .gitignore exists ===&quot;
+  git check-ignore -v transcripts/foo.vtt
+} | tee -a 02-git-on-aegis.txt
+</code></pre>
+<p><strong>Step 3 on your own repository is the professional habit.</strong> A committed secret is still a<br />
+secret three years later.</p>
+<p><strong>Record:</strong> <code>01-hiding-places.md</code>. This table is the same one an incident responder works from.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Why does an exposed <code>.git</code> directory leak the whole project?</li>
+<li>What does <code>zcat file.gz | strings | grep x</code> do, step by step?</li>
+<li>Why does SSH refuse a world-readable private key?</li>
+<li>What is the difference between <code>type -a diff</code> and <code>which diff</code>?</li>
+<li>A secret was committed by mistake. Why is deleting it in a new commit insufficient?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Version Control (git)</strong> → <strong>Credential Exposure</strong> → <strong>Password Hashing</strong> → <strong>john &amp; hashcat</strong> →<br />
+<strong>Insecure Deserialisation</strong>.</p>

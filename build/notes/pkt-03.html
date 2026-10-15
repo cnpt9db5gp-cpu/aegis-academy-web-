@@ -1,0 +1,218 @@
+<h1 id="arp-dns-and-dhcp-in-the-wild">ARP, DNS and DHCP in the Wild</h1>
+<h2 id="summary">Summary</h2>
+<p>Three protocols you will see in every capture. Each has a distinctive shape, and each has a<br />
+distinctive misuse.</p>
+<h2 id="key-ideas">Key ideas</h2>
+<ul>
+<li><strong>ARP</strong>: request is broadcast, reply is unicast and unsolicited. Every host trusts any reply</li>
+<li><strong>ARP spoofing</strong>: send unsolicited ARPs claiming someone else's IP; caches update silently</li>
+<li><strong>DNS</strong>: UDP/53, a question, an answer, and nothing authenticates either</li>
+<li><strong>DNS cache poisoning</strong>: get a false answer cached at a resolver, and every client inherits it</li>
+<li><strong>DHCP</strong>: Discover/Offer/Request/Acknowledge, all broadcast, all unauthenticated until the client<br />
+  configures itself</li>
+<li><strong>Rogue DHCP</strong> wins by answering the <em>Request</em> faster than the real server</li>
+<li>In a capture, these three stand out by: broadcast destination, and <em>the responder replying<br />
+  without being asked</em></li>
+</ul>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ARP request / reply</strong></td>
+<td>Who-has / I-am, broadcast / unicast</td>
+</tr>
+<tr>
+<td><strong>ARP cache</strong></td>
+<td>Host's IP→MAC table</td>
+</tr>
+<tr>
+<td><strong>Gratuitous ARP</strong></td>
+<td>Unsolicited announcement of an IP/MAC pair</td>
+</tr>
+<tr>
+<td><strong>DNS query / response</strong></td>
+<td>Question / answer</td>
+</tr>
+<tr>
+<td><strong>Recursive resolver</strong></td>
+<td>Server that queries on your behalf</td>
+</tr>
+<tr>
+<td><strong>Cache poisoning</strong></td>
+<td>Inserting a false record into a cache</td>
+</tr>
+<tr>
+<td><strong>DNS hijacking</strong></td>
+<td>Intercepting resolution entirely</td>
+</tr>
+<tr>
+<td><strong>DORA</strong></td>
+<td>DHCP's four messages</td>
+</tr>
+<tr>
+<td><strong>Rogue DHCP</strong></td>
+<td>Unauthorised server answering clients</td>
+</tr>
+<tr>
+<td><strong>DHCP starvation</strong></td>
+<td>Exhausting the pool so your rogue server answers next</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- watch all three, on your own loopback ---
+sudo timeout 20 tcpdump -i any -n -e &quot;arp or (udp port 67) or (udp port 53)&quot; 2&gt;/dev/null | head -20
+
+# --- generate ARP traffic ---
+ping -c1 127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+sudo arping -c2 127.0.0.1 2&gt;/dev/null | head -4
+
+# --- generate DNS traffic ---
+dig +short localhost @127.0.0.1 &gt;/dev/null 2&gt;&amp;1 &amp;
+dig +short example.com    @127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+
+# --- DHCP, on the lab link only ---
+# T1: sudo tcpdump -i vboxnet0 -n -e &quot;udp port 67 or udp port 68&quot;
+# T2: sudo dhclient -r vboxnet0 &amp;&amp; sudo dhclient vboxnet0
+
+# --- reads that matter for the lab ---
+ip neigh show
+cat /etc/resolv.conf | grep nameserver
+grep -A8 &quot;lease {&quot; /var/lib/dhcp/dhclient.leases 2&gt;/dev/null | head -12
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> capture all three protocols, identify the shapes, and understand the attacks from<br />
+the packets rather than from theory.</p>
+<pre><code class="language-bash"># --- PRE-FLIGHT: this lab needs root, so authenticate ONCE, HERE, first ---
+# `sudo something &amp;` backgrounds the password PROMPT along with the command.
+# With no terminal attached to answer it, sudo fails - and `2&gt;/dev/null`
+# then throws away the only clue. The result is a capture file that was
+# never written, followed by a screenful of &quot;no such file&quot;.
+#
+# `sudo -v` validates the credential in the FOREGROUND, where you can see
+# and answer the prompt. It caches for ~15 minutes, so every backgrounded
+# `sudo` below is prompt-free and actually runs.
+if ! sudo -v; then
+  echo &quot;  sudo is unavailable or the password was wrong - stop here.&quot; &gt;&amp;2
+  echo &quot;  Everything below needs root. Nothing will be captured.&quot; &gt;&amp;2
+  exit 1
+fi
+mkdir -p ~/aegis/labs/pkt-03 &amp;&amp; cd ~/aegis/labs/pkt-03
+
+# --- 1. capture all three at once ---
+sudo timeout 25 tcpdump -i any -n -e -w three-protos.pcap \
+  &quot;arp or udp port 53 or udp port 67 or udp port 68&quot; 2&gt;/dev/null &amp;
+TC=$!
+sleep 1
+ping -c2 127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+dig +short localhost @127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+ip neigh flush all 2&gt;/dev/null; ping -c1 127.0.0.1 &gt;/dev/null 2&gt;&amp;1
+sleep 3
+if ip -br addr show vboxnet0 &gt;/dev/null 2&gt;&amp;1; then
+  sudo dhclient -r vboxnet0 &gt;/dev/null 2&gt;&amp;1; sleep 1; sudo dhclient vboxnet0 &gt;/dev/null 2&gt;&amp;1 &amp;
+  sleep 8
+fi
+kill $TC 2&gt;/dev/null; wait $TC 2&gt;/dev/null
+
+# --- 2. ARP: request is broadcast, reply is unicast ---
+echo &quot;=== ARP ===&quot;
+tshark -r three-protos.pcap -Y &quot;arp&quot; -T fields \
+  -e arp.src.proto_ipv4 -e arp.src.proto_eth.src -e arp.dst.proto_ipv4 \
+  -e arp.dst.proto_eth.dst -e eth.dst 2&gt;/dev/null | head -10 | tee 01-arp.txt
+echo
+echo &quot;  Look at the last column. A request has a broadcast destination MAC&quot;
+echo &quot;  (ff:ff:ff:ff:ff:ff); a reply has a unicast one. A reply arriving with&quot;
+echo &quot;  no preceding request is either a gratuitous ARP or an attack.&quot;
+
+# --- 3. DNS: query and answer ---
+echo
+echo &quot;=== DNS ===&quot;
+tshark -r three-protos.pcap -Y &quot;dns&quot; -T fields \
+  -e dns.flags.response -e dns.qry.name -e dns.a -e dns.flags.rcode 2&gt;/dev/null | head -10 | tee 02-dns.txt
+echo
+echo &quot;  flags.response 0 = query, 1 = answer.&quot;
+echo &quot;  An answer with no matching query, or a TTL of 0, is suspicious.&quot;
+
+# --- 4. DHCP: DORA, in order ---
+echo
+echo &quot;=== DHCP (if your lab link produced any) ===&quot;
+tshark -r three-protos.pcap -Y &quot;bootp&quot; -T fields \
+  -e frame.number -e bootp.type -e bootp.option.dhcp_type -e ip.src -e ip.dst 2&gt;/dev/null | head -10 | tee 03-dhcp.txt
+echo
+cat &lt;&lt;'EOF'
+  1 = Discover (client, broadcast)
+  2 = Offer    (server, broadcast or unicast)
+  3 = Request  (client, broadcast)   &lt;- the attacker races here
+  5 = Ack      (server)
+  8 = Release  (client, giving the lease back)
+EOF
+
+# --- 5. THE ATTACK, described against the packets you just read ---
+cat &gt; 04-attacks.md &lt;&lt;'EOF'
+# Three attacks, three packet shapes
+
+## ARP spoofing
+You send an ARP *reply* (not a request) claiming &quot;192.168.56.101 is at MY mac&quot;.
+Every host that receives it updates its cache. No request is needed, so no
+host knows anything unusual happened.
+
+In a capture this looks like: unsolicited replies, or replies whose claimed
+IP does not match the network they arrived on.
+
+Mitigation: static ARP entries, dynamic ARP inspection, or port security.
+
+## DNS cache poisoning
+You answer a resolver's recursive query before the real authoritative server
+does, with a forged A record and a TTL of 0 to maximise churn. Every client
+using that resolver now resolves the name to your address.
+
+In a capture this looks like: answers to queries the local host did not send,
+answers with a much shorter TTL, or answers arriving with no query.
+
+Mitigation: DNSSEC validation, locking down which servers a resolver will
+query, and monitoring resolver logs.
+
+## Rogue DHCP
+You answer the client's DHCP *Request* faster than the legitimate server, with
+a gateway and DNS pointing at you. The client configures itself to route
+through the attacker's machine.
+
+In a capture this looks like: an Offer for a MAC address that is not on the
+known client list, or a Request answered by two servers.
+
+Mitigation: DHCP snooping on switches, port security on edge ports.
+EOF
+cat 04-attacks.md
+
+# --- 6. baselines, for later comparison ---
+{
+  echo &quot;=== ARP volume (poisoning raises this sharply) ===&quot;
+  sudo timeout 10 tcpdump -i any -n arp 2&gt;/dev/null | wc -l
+  echo &quot;=== ARP replies specifically (poisoning is replies) ===&quot;
+  sudo timeout 10 tcpdump -i any -n &quot;arp[6][2] = 2&quot; 2&gt;/dev/null | wc -l
+  echo &quot;=== DNS queries ===&quot;
+  sudo timeout 10 tcpdump -i any -n &quot;udp port 53 and not arp&quot; 2&gt;/dev/null | wc -l
+} 2&gt;&amp;1 | tee 05-baseline.txt
+echo
+echo &quot;Record these numbers. They are your 'normal' for this machine.&quot;
+</code></pre>
+<p><strong>Step 5 is the payoff</strong>: each attack is now described in terms of the exact packets you just<br />
+captured and read yourself, rather than abstractly.</p>
+<p><strong>Record:</strong> <code>04-attacks.md</code> and <code>05-baseline.txt</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>How does an ARP reply differ on the wire from an ARP request?</li>
+<li>Why does a gratuitous ARP not require the target to ask anything?</li>
+<li>What TTL would a DNS poisoner use, and why?</li>
+<li>Which DHCP message does a rogue server race to answer?</li>
+<li>Name a mitigation for each of the three attacks.</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>ARP</strong> → <strong>Arp Spoofing</strong> → <strong>DNS</strong> → <strong>DNS Rebinding</strong> → <strong>DHCP Starvation</strong> →<br />
+<strong>Rogue DHCP</strong> → <strong>Man-in-the-Middle</strong>.</p>

@@ -1,0 +1,234 @@
+<h1 id="bandit-levels-21-29-su-cron-permissions-suid-shell-scripts">Bandit Levels 21-29: su, cron, permissions, SUID, shell scripts</h1>
+<h2 id="summary">Summary</h2>
+<p>Levels 21-29 are where Bandit stops being about <code>find</code> and starts being about <strong>privileges</strong>:<br />
+who can do what, which files a less-privileged user can abuse, and how a script or a cron job<br />
+becomes an escalation path. This is a direct preview of Tier 1 (<code>linux-privesc-doctrine</code>).</p>
+<p><strong>The single idea across all nine levels:</strong> <em>a process that runs as root but reads or executes<br />
+something a normal user can influence is a privilege escalation waiting to happen.</em></p>
+<h2 id="level-notes">Level notes</h2>
+<p><strong>Level 21 — su and privileges.</strong></p>
+<pre><code class="language-bash">ls -la
+sudo -l                     # what may I do as root?
+sudo -l -U bandit20
+cat /etc/passwd | grep bandit2
+sudo su - bandit21          # switch user WITH their password
+sudo -u bandit21 ls -l /
+</code></pre>
+<p><strong><code>sudo -l</code> is the single most valuable command in privilege escalation.</strong> It tells you exactly<br />
+what escalation paths you have been given.</p>
+<p><strong>Level 22 — cron.</strong></p>
+<pre><code class="language-bash">ls -la
+cat /etc/cron.d/cronjob
+ls -la /opt
+</code></pre>
+<p><strong>What to look for in a cron job:</strong> the user it runs as, the command, and <em>every</em> input that job<br />
+trusts — a script path, a file it reads, a command it builds with variable data.</p>
+<p><strong>Level 23 — what does the cron job let me control?</strong></p>
+<pre><code class="language-bash">cat /etc/cron.d/cronjob
+ls -la /opt
+cat /opt/backup.sh
+# the job runs as root and writes $1 into a file this user can influence
+# -&gt; inject a command via that argument
+</code></pre>
+<p><strong>The pattern:</strong> a root cron job that takes a parameter, with no validation, executed by a low<br />
+privilege user. You do not exploit the cron daemon; you abuse its input handling.</p>
+<p><strong>Level 24 — git leaking again, via a backup script.</strong></p>
+<pre><code class="language-bash">ls -la
+cat backup.py
+python3 -c &quot;import subprocess; print(subprocess.run(['git','log'],capture_output=True,text=True).stdout)&quot;
+</code></pre>
+<p><code>backup.py</code> shells out to git; git reads config from <code>.git/config</code>. That is the hook.</p>
+<p><strong>Level 25 — a wordlist and more john.</strong></p>
+<pre><code class="language-bash">ls -la
+cat /etc/passwd | grep bandit25
+find / -readable 2&gt;/dev/null | grep -i password
+john --wordlist=./rockyou.txt --show hash.txt
+</code></pre>
+<p><strong>Level 26 — the same idea with an explicit command instead of a script.</strong></p>
+<pre><code class="language-bash">cat cronjob
+# cron: * * * * * /usr/bin/run me
+sudo tar -czf $BACKUP.tar.bak * -C /home/bandit26
+</code></pre>
+<p><code>sudo tar -czf ... *</code> runs as root and <code>*</code> is expanded by <em>your</em> shell first. If you can make the<br />
+filename contain what you want, root executes it. This is <strong>argument injection</strong>, and it is one of<br />
+the oldest real-world cron vulnerabilities there is.</p>
+<p><strong>Level 27 — the tools are different, the lesson is identical.</strong></p>
+<pre><code class="language-bash">cat cronjob
+sudo more /home/bandit26/flag &gt; /etc/shadow   # or similar redirection trick
+cat /etc/shadow
+</code></pre>
+<p><strong>Lesson: a privileged command that writes to a user-writable path is an arbitrary file write.</strong><br />
+<code>&gt;</code> is resolved by the shell before <code>sudo</code> runs, so the redirection happens as you.</p>
+<p><strong>Level 28 — git configured to run commands.</strong></p>
+<pre><code class="language-bash">git init -q repo &amp;&amp; cd repo
+git config --global core.pager &quot;less -fr&quot;
+# or
+git config --global core.sshCommand /bin/sh
+git log 2&gt;/dev/null || git add -A &amp;&amp; git commit -m x
+cat /etc/shadow
+</code></pre>
+<p><strong>Lesson: git configuration is code execution.</strong> <code>core.pager</code>, <code>core.sshCommand</code>, and aliases all<br />
+run commands. Auditing <code>.gitconfig</code> is part of any Linux compromise investigation.</p>
+<p><strong>Level 29 — a Python script that runs as root.</strong></p>
+<pre><code class="language-bash">cat /opt/jail.py
+python3 -c 'import os; os.system(&quot;/bin/sh&quot;)'
+</code></pre>
+<p><strong>Lesson: when a privileged process runs an interpreter, the interpreter's own features are the<br />
+attack surface</strong> — <code>PYTHONPATH</code>, <code>LD_PRELOAD</code>, <code>PYTHONSTARTUP</code>, and here, an import that executes<br />
+a module you control.</p>
+<h2 id="the-escalation-checklist-these-levels-teach">The escalation checklist these levels teach</h2>
+<ol>
+<li><code>sudo -l</code> — what am I explicitly permitted?</li>
+<li><code>id</code>, <code>groups</code> — what identities can I act as?</li>
+<li><code>find / -perm -4000</code> — SUID binaries</li>
+<li><code>find / -perm -777</code>, <code>find / -writable</code> — writable scripts and directories</li>
+<li><code>/etc/cron.d/</code>, systemd units — privileged jobs and what they trust</li>
+<li><code>/etc/shadow</code> — what can I actually read?</li>
+<li>Containers/docker socket — <code>docker.sock</code> means root, instantly</li>
+</ol>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Privilege escalation</strong></td>
+<td>Gaining higher privileges than you started with</td>
+</tr>
+<tr>
+<td><strong>SUID (4000)</strong></td>
+<td>Run a binary with the <em>owner's</em> privileges</td>
+</tr>
+<tr>
+<td><strong>SGID (2000)</strong></td>
+<td>Run with the group's privileges</td>
+</tr>
+<tr>
+<td><strong>cron</strong></td>
+<td>The scheduler; root jobs here are a prime target</td>
+</tr>
+<tr>
+<td><strong>Argument injection</strong></td>
+<td>Controlling parameters a privileged command trusts</td>
+</tr>
+<tr>
+<td><strong>Arbitrary file write</strong></td>
+<td>Writing wherever a privileged process writes</td>
+</tr>
+<tr>
+<td><strong><code>sudo -l</code></strong></td>
+<td>List permitted sudo actions</td>
+</tr>
+<tr>
+<td><strong><code>/etc/shadow</code></strong></td>
+<td>Password hashes; root-only, mode 640/600</td>
+</tr>
+<tr>
+<td><strong>Environment hijack</strong></td>
+<td><code>PYTHONPATH</code>/<code>LD_PRELOAD</code> against an interpreter</td>
+</tr>
+<tr>
+<td><strong>core.pager</strong></td>
+<td>A git config that executes a command</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash"># --- the privilege escalation enumeration set ---
+id; groups; sudo -n -l 2&gt;/dev/null || sudo -l
+
+# --- SUID and SGID ---
+find / -perm -4000 -type f 2&gt;/dev/null | tee suid.txt
+find / -perm -2000 -type f 2&gt;/dev/null | tee sgid.txt
+find / -perm -6000 -type f 2&gt;/dev/null          # SUID+SGID
+
+# --- writable things that matter ---
+find / -writable -type f 2&gt;/dev/null | grep -vE &quot;^/(proc|sys|dev)&quot; | head -30
+find /etc -writable -type f 2&gt;/dev/null
+find /etc/cron* -type f -exec ls -la {} \; 2&gt;/dev/null
+systemctl list-timers --all 2&gt;/dev/null
+ls -la /etc/systemd/system/
+
+# --- the interpreters an attacker abuses ---
+env | grep -E &quot;PYTHON|LD_PRELOAD|LD_LIBRARY&quot;
+ls -la /etc/ld.so.preload 2&gt;/dev/null
+cat /etc/ld.so.preload 2&gt;/dev/null &amp;&amp; echo &quot;^^ NON-EMPTY = COMPROMISED&quot;
+
+# --- git as a code-execution surface ---
+git config --global --list
+cat ~/.gitconfig 2&gt;/dev/null
+git config --list --show-origin
+
+# --- the docker socket ---
+ls -la /var/run/docker.sock 2&gt;/dev/null &amp;&amp; echo &quot;docker.sock present = root-equivalent&quot;
+</code></pre>
+<h2 id="field-lab">Field lab</h2>
+<p><strong>Objective:</strong> run the full escalation enumeration set against <strong>your own Kali box</strong> (read-only<br />
+commands), and against your deliberately-misconfigured lab VM if you built one.</p>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/otw-02 &amp;&amp; cd ~/aegis/labs/otw-02
+
+{
+  echo &quot;=== PRIVILEGE ESCALATION ENUMERATION ===&quot;
+  echo &quot;target: $(hostname)   date: $(date -Iseconds)&quot;
+  echo
+  echo &quot;=== who am I ===&quot;
+  id; groups
+  echo
+  echo &quot;=== sudo privileges ===&quot;
+  sudo -n -l 2&gt;/dev/null || sudo -l
+  echo
+  echo &quot;=== SUID binaries (every one is a candidate) ===&quot;
+  find / -perm -4000 -type f 2&gt;/dev/null | tee 01-suid.txt
+  echo &quot;count: $(wc -l &lt; 01-suid.txt)&quot;
+  echo
+  echo &quot;=== SGID ===&quot;
+  find / -perm -2000 -type f 2&gt;/dev/null | head -20
+  echo
+  echo &quot;=== cron ===&quot;
+  ls -la /etc/cron.d/ /etc/crontab 2&gt;/dev/null
+  cat /etc/crontab 2&gt;/dev/null | grep -v '^#' | grep -v '^$'
+  echo
+  echo &quot;=== systemd timers ===&quot;
+  systemctl list-timers --all --no-pager 2&gt;/dev/null | head -10
+  echo
+  echo &quot;=== writable in /etc ===&quot;
+  find /etc -writable -type f 2&gt;/dev/null | head -20
+  echo
+  echo &quot;=== interpreter hijack surface ===&quot;
+  echo &quot;LD_PRELOAD=${LD_PRELOAD:-&lt;empty, good&gt;}&quot;
+  echo &quot;PYTHONPATH=${PYTHONPATH:-&lt;empty, good&gt;}&quot;
+  cat /etc/ld.so.preload 2&gt;/dev/null || echo &quot;/etc/ld.so.preload absent (good)&quot;
+  echo
+  echo &quot;=== git config as code execution ===&quot;
+  git config --global --list 2&gt;/dev/null || echo &quot;no global git config&quot;
+  cat ~/.gitconfig 2&gt;/dev/null
+  echo
+  echo &quot;=== containers ===&quot;
+  ls -la /var/run/docker.sock 2&gt;/dev/null || echo &quot;no docker socket&quot;
+} 2&gt;&amp;1 | tee 02-enumeration.txt
+
+echo &quot;=== READ THIS ===&quot;
+grep -A5 &quot;SUID binaries&quot; 02-enumeration.txt | head -10
+echo
+echo &quot;Every SUID binary listed above is code that runs as its owner.&quot;
+echo &quot;That is the entire attack surface for Tier 3 exploitation.&quot;
+</code></pre>
+<p><strong>On your lab VM (the deliberately misconfigured one from <code>kr-06</code>), run the same script and<br />
+compare.</strong> The differences between the two outputs <em>are</em> the misconfigurations. That comparison<br />
+is what real privilege escalation assessment looks like.</p>
+<p><strong>Record:</strong> the SUID list. You will need it in <code>pr-02</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>What is the difference between SUID (4000) and SGID (2000)?</li>
+<li>A root cron job runs <code>tar -czf $BACKUP.tar.bak * -C /home/user</code>. Why is that exploitable?</li>
+<li>Why is git configuration a code-execution surface?</li>
+<li>Why does having <code>/var/run/docker.sock</code> mean root?</li>
+<li>What is the first command you run when handed a shell, and why?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Linux Privilege Escalation</strong> → <strong>SUID / SGID Bits</strong> → <strong>Cron</strong> → <strong>systemd</strong> →<br />
+<strong>Race Condition</strong>. This is the practical half of Tier 1.</p>

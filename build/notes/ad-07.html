@@ -1,0 +1,502 @@
+<h1 id="windows-privilege-escalation-and-gpo-abuse">Windows Privilege Escalation and GPO Abuse</h1>
+<h2 id="summary">Summary</h2>
+<p>Domain admin is rarely the goal — <strong>local admin on a useful host</strong> is. This note is the Windows<br />
+escalation catalogue: the misconfigurations that turn a user into an administrator, and the<br />
+Group Policy mechanism that turns one admin into domain admin without touching a single host.</p>
+<p>GPO abuse is the part that surprises people: it is a <em>domain-wide</em> escalation executed<br />
+through an ordinary management tool, with no exploit and often no host access at all.</p>
+<blockquote>
+<p>Companion to <code>ex-01</code>..<code>ex-06</code> (the exploitation mechanics) and <code>ad-03</code>'s<br />
+graph. This note is the Windows-specific escalation and the GPO abuse.</p>
+</blockquote>
+<h2 id="local-escalation-the-catalogue">Local escalation: the catalogue</h2>
+<pre><code class="language-text">  SERVICE AND INSTALLER
+    unquoted service path with a writable directory
+    (C:\Program Files\My App\ - the space is the vulnerability)
+    writable service binary
+    service with a weak DACL on the binary or its directory
+    DLL search order hijack on a service that loads from a writable path
+    unquoted path + writable C:\ -&gt; plant the exe
+
+  FILE PERMISSIONS
+    a user-writable directory on the PATH of a service
+    a user-writable scheduled task file
+    a user-writable log directory a service parses
+
+  REGISTRY
+    HKLM\...\Image File Execution Options\ debugger = your exe
+      (requires SeDebugPrivilege or Debug programs privilege)
+    AppInit_DLLs for an exe a user will run
+    IFEO on an exe the user launches
+    Unquoted service path written into the registry
+
+  PRIVILEGES (check these first — many are one command away)
+    SeDebugPrivilege   -&gt; read/write any process, dump LSASS
+    SeImpersonatePrivilege -&gt; token impersonation
+    SeAssignPrimaryTokenPrivilege -&gt; same
+    SeTcbPrivilege     -&gt; act as part of the OS
+    SeBackupPrivilege  -&gt; read any file by bypassing ACLs
+    SeRestorePrivilege -&gt; write any file bypassing ACLs
+    SeLoadDriverPrivilege -&gt; load a kernel driver. Game over.
+    These are assigned to a user or a GROUP. &quot;Backup Admins&quot; gets
+    SeBackupPrivilege by definition.
+
+  THE TRIVIAL ONE
+    whoami /priv | findstr /i &quot;SeDebug Privilege&quot;
+    If you have SeDebugPrivilege and SeImpersonate, you have SYSTEM.
+    Nothing else in this list matters.
+</code></pre>
+<h2 id="token-manipulation-the-two-that-matter">Token manipulation, the two that matter</h2>
+<pre><code class="language-text">  THE PRINCIPLE: your token is the union of your SIDs' privileges plus
+  the group's, and token filtering is what removes the ones that would
+  let you escalate (read-only domain controllers, etc.).
+
+  THE TWO CLASSIC ESCALATIONS:
+
+  1. SeDebugPrivilege + SeImpersonatePrivilege
+     Open SYSTEM's token, duplicate it, impersonate it.
+     SYSTEM on the machine. No exploit. Configuration.
+
+  2. A privileged service token you can read
+     (SYSTEM, or a service account with a token you can open)
+     → duplicate that token → use it.
+
+  AND THE VARIANT THAT WORKS ON DOMAIN CONTROLLERS:
+  an account that is a member of Domain Admins but is in the
+  &quot;Account Operators&quot;, &quot;Backup Operators&quot;, or &quot;Print Operators&quot; group
+  is TOKEN-FILTERED on a DC: the DC's SID is removed from their token.
+  So the &quot;Domain Admin&quot; who cannot administer the domain is a real
+  thing, and its inverse (an account that CAN) is a real finding.
+
+  MEANWHILE on MEMBER SERVERS there is no filtering. So:
+    a filtered Domain Admin on a DC cannot escalate easily
+    the SAME account on a member server is a straight local admin.
+  Which is why &quot;get a shell on a member server, not the DC&quot; is
+  correct AD tradecraft.
+</code></pre>
+<h2 id="group-policy-the-domain-wide-escalation">Group Policy: the domain-wide escalation</h2>
+<pre><code class="language-text">  HOW GPO WORKS:
+    a GPO is a collection of registry settings and scripts.
+    computers receive GPOs by LINK ORDER (not security group).
+    the LAST policy in the link order wins for a conflicting setting.
+    startup scripts run as SYSTEM.
+    scheduled tasks in a GPO run as SYSTEM.
+
+  WHY IT IS ESCALATION:
+    an attacker who can CREATE OR EDIT a GPO linked to an OU that
+    contains a domain controller, or to the Domain Controllers OU,
+    gets SYSTEM on the domain controller, as a scheduled task,
+    without ever executing anything on it by hand.
+
+  THE ATTACK CHAIN (this is the whole technique):
+    1. you have WRITE on a GPO, or CREATE on a GPO in a user-
+       controlled OU
+    2. edit it:
+         - add a scheduled task that runs your payload as SYSTEM
+         - or a startup script
+         - or change a setting that causes code execution
+    3. wait for the refresh interval (or gpupdate /force it)
+    4. the payload runs as SYSTEM on every machine in that OU,
+       including the DC if the OU contains one
+
+  THE VARIANTS THAT REPLACE execve-style payloads:
+    - the &quot;Computer Configuration &gt; Preferences &gt; Windows Settings&quot;
+      task, which is a legitimate feature (used for software installs)
+    - the updater service abuse (ad-06's local escalation, but written
+      as a GPO so it applies everywhere at once)
+
+  THE VARIANT THAT DEPLOYS A BACKDOOR:
+    - the GPO defence-in-depth bypass: abuse Sysmon or the Windows
+      firewall GPO to disable the client's EDR, then use a scheduled
+      task to persist. This is not a memory-execution trick; it is
+      &quot;change the security policy and let the client's own tooling
+      trust the change&quot;.
+</code></pre>
+<h2 id="finding-gpo-abuse-in-an-assessment">Finding GPO abuse in an assessment</h2>
+<pre><code class="language-text">  THE AUDIT (all LDAP, from ad-03):
+    1. which OUs do I have CREATE or WRITE on?
+       (the write path is the attack surface, not the OUs)
+    2. which of those OUs contain a domain controller or a server?
+    3. is the Domain Controllers OU writable by a non-admin?
+       -&gt; a Critical on its own
+    4. which GPOs do I have WRITE on?
+    5. do those GPOs link to anything containing a DC?
+
+  THE DEFENDER'S VIEW:
+    - alert on 5136 for GroupPolicy objects being modified
+    - alert on 4742 for computer account changes (the &quot;DC replacement&quot; GPO abuse)
+    - monitor who has &quot;Create Group Policy Objects&quot; in the
+      delegation on OUs
+    - restrict GPO edit rights with &quot;Group Policy Creator Owners&quot;
+      being scoped, not domain-wide
+</code></pre>
+<h2 id="reporting-gpo-abuse">Reporting GPO abuse</h2>
+<pre><code class="language-text">## F-xx · Standard user can create a Group Policy Object linked to the Domain Controllers OU
+
+Risk
+  An authenticated user in the &quot;Helpdesk&quot; group can create a Group Policy
+  Object and link it to the Domain Controllers organizational unit. The
+  policy's scheduled task runs as SYSTEM on every domain controller
+  under normal GPO refresh. This is domain compromise with no exploit,
+  no host access, and no privileged tooling.
+
+Prerequisites
+  Membership of Helpdesk. Nothing else. No user interaction.
+
+Evidence
+  (Destructive actions were NOT taken. This was established by reading
+   the ACLs and the delegation model, not by creating a policy.)
+  The Helpdesk group has &quot;Create Group Policy Objects&quot; on
+  OU=Domain Controllers,DC=lab,DC=internal. The OU contains two domain
+  controllers (DC01, DC02).
+
+  We did not create a policy. The ROE does not permit GPO
+  modification, and the ACL analysis is sufficient to demonstrate the
+  finding.
+
+Business impact
+  Complete domain compromise by any Helpdesk user. The Helpdesk group
+  exists so that non-administrators can help users with their
+  accounts; it was never intended to include GPO creation rights.
+
+Remediation
+  1. Remove &quot;Create Group Policy Objects&quot; from the Helpdesk group;
+     scope Group Policy Creator Owners to a dedicated group  [Domain Admins, Immediate]
+  2. Audit every OU for delegated GPO creation rights          [Security, 1 sprint]
+  3. Enable Advanced Group Policy auditing (event 5136 for GroupPolicy
+     objects)                                            [Security, 1 sprint]
+  4. Review the full GPO delegation model; the current one grants
+     more than the helpdesk function requires       [IT Ops, 1 sprint]
+
+Note
+  No GPO was created or modified during this assessment.
+</code></pre>
+<h2 id="terminology">Terminology</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Unquoted service path</strong></td>
+<td>A path with a space, where Windows guesses the exe name</td>
+</tr>
+<tr>
+<td><strong>SeDebugPrivilege</strong></td>
+<td>Open any process; combined with SeImpersonate, SYSTEM</td>
+</tr>
+<tr>
+<td><strong>SeImpersonatePrivilege</strong></td>
+<td>Duplicate and use another token</td>
+</tr>
+<tr>
+<td><strong>SeBackupPrivilege</strong></td>
+<td>Read/write any file by bypassing ACLs</td>
+</tr>
+<tr>
+<td><strong>SeLoadDriverPrivilege</strong></td>
+<td>Load a kernel driver</td>
+</tr>
+<tr>
+<td><strong>Token filtering</strong></td>
+<td>Removing the DC SID on member servers; on DCs, strips others</td>
+</tr>
+<tr>
+<td><strong>Account Operators</strong></td>
+<td>A group that is token-filtered on member servers but not DCs</td>
+</tr>
+<tr>
+<td><strong>GPO</strong></td>
+<td>Group Policy Object: registry settings + scripts applied by link order</td>
+</tr>
+<tr>
+<td><strong>Startup script</strong></td>
+<td>A GPO script that runs as SYSTEM at boot</td>
+</tr>
+<tr>
+<td><strong>Scheduled task in a GPO</strong></td>
+<td>The escalation primitive; runs as SYSTEM</td>
+</tr>
+<tr>
+<td><strong>GPO link order</strong></td>
+<td>The last conflicting policy wins; order = priority</td>
+</tr>
+<tr>
+<td><strong>Delegate permission</strong></td>
+<td>"Create GPOs" etc, on an OU or a GPO</td>
+</tr>
+<tr>
+<td><strong>Group Policy Creator Owners</strong></td>
+<td>The group that can edit all GPOs by default</td>
+</tr>
+<tr>
+<td><strong>5136</strong></td>
+<td>Directory object changed; the GPO detection</td>
+</tr>
+<tr>
+<td><strong>4742</strong></td>
+<td>Computer account changed; the DC-replacement escalation</td>
+</tr>
+</tbody>
+</table>
+<h2 id="kali-commands">Kali commands</h2>
+<pre><code class="language-bash">mkdir -p ~/aegis/labs/ad-07 &amp;&amp; cd ~/aegis/labs/ad-07
+source ~/aegis/bin/scope-guard.sh
+
+# --- 1. the privilege check, first, always ---
+cat &gt; 01-privs.md &lt;&lt;'MD'
+# Privilege enumeration - the FIRST thing you do on a Windows host
+
+```cmd
+whoami /priv
+```
+Look for anything in the list below. If you have SeDebugPrivilege AND
+SeImpersonatePrivilege, you have SYSTEM. Do not go further.
+
+| Privilege | What it gets you | Needs another? |
+|---|---|---|
+| SeDebugPrivilege | Open any process; read/write its memory | SeImpersonate |
+| SeImpersonatePrivilege | Duplicate and use a token | SeDebug (to open SYSTEM) |
+| SeAssignPrimaryTokenPrivilege | Same as impersonate | SeImpersonate |
+| SeTcbPrivilege | Act as part of the OS | - |
+| SeBackupPrivilege | Read any file (bypasses ACLs) | - |
+| SeRestorePrivilege | Write any file (bypasses ACLs) | SeBackup to read first |
+| SeLoadDriverPrivilege | Load a signed kernel driver | - |
+| SeTakeOwnershipPrivilege | Take ownership of anything | - |
+| SeCreateTokenPrivilege | Create a token from scratch | usually a service |
+
+```cmd
+:: the two together, the whole escalation in two lines
+whoami /priv | findstr /i &quot;SeDebug SeImpersonate&quot;
+:: if both are present -&gt; SYSTEM. See ntdsutil or the token impersonation
+:: technique. Nothing else in this lecture matters.
+```
+
+```powershell
+# PowerShell equivalent
+whoami /priv | Select-String &quot;SeDebug|SeImpersonate|SeBackup|SeTcb&quot;
+```
+MD
+
+# --- 2. the local escalation checks, on a Windows lab host ---
+cat &gt; 02-local-esc.md &lt;&lt;'MD'
+# Local escalation checks on a Windows host (run as your current user)
+
+</code></pre>
+<p>:: 1. unquoted service paths (a space in the path is the bug)<br />
+wmic service get name,pathname,startmode | findstr /i /v "C:\Windows\" | findstr /i " "<br />
+powershell -c "Get-WmiObject Win32_Service | ? {$<em>.PathName -match ' ' -and $</em>.PathName -notmatch '^\"'} | select Name,PathName"</p>
+<p>:: 2. writable service binaries<br />
+accesschk.exe -uwcv * -s * * * * 2&gt;nul | findstr /i "WARN"<br />
+icacls "C:\Program Files\MyApp\service.exe"</p>
+<p>:: 3. the Installed Applications - a common writable-then-run path<br />
+powershell -c "Get-WmiObject Win32_Product | select Name,IdentifyingNumber"</p>
+<p>:: 4. scheduled tasks<br />
+schtasks /query /fo LIST /v | findstr /i "TaskName Run As"</p>
+<p>:: 5. DLL search order - what DLLs does this process load from where?<br />
+::    (Process Explorer: Image Path tab -&gt; DLLs; anything writable is it)<br />
+handle.exe -p <pid> *.dll</p>
+<p>:: 6. the registry - IFEO and AppInit_DLLs<br />
+reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" /s<br />
+reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" /v AppInit_DLLs<br />
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager" /v AppCertDlls</p>
+<p>:: 7. token filtering - is this a domain controller?<br />
+::    a DC has the "Account Operators" group stripped; a member server<br />
+::    does not. Compare whoami /groups on both.<br />
+nltest /dsgetdc:%USERDOMAIN%</p>
+<pre><code>
+```powershell
+# the sharpest version: everything at once, and it flags what's unusual
+Get-WmiObject Win32_Service |
+  Where-Object { $_.PathName -notmatch '^&quot;' -and $_.PathName -match ' ' } |
+  Select-Object Name, StartName, PathName
+
+# the ones running as SYSTEM with a writable binary
+Get-WmiObject Win32_Service |
+  Where-Object { $_.StartName -eq 'LocalSystem' } |
+  ForEach-Object {
+    $p = ($_.PathName -replace '&quot;','').Split(' ')[0]
+    if (Test-Path $p) {
+      $acl = Get-Acl $p
+      if ($acl.Access | Where-Object {
+            $_.IdentityReference -match 'BUILTIN\\\\Users|Authenticated Users' }) {
+        &quot;WRITABLE + SYSTEM: $($_.Name) -&gt; $p&quot;
+      }
+    }
+  }
+</code></pre>
+<p>MD</p>
+<h1 id="-3-the-gpo-audit-from-your-linux-box-">--- 3. the GPO audit, from your Linux box ---</h1>
+<p>cat &gt; 03-gpo-audit.sh &lt;&lt;'EOF'</p>
+<h1 id="usrbinenv-bash">!/usr/bin/env bash</h1>
+<h1 id="gpo-escalation-audit-read-only-ldap-against-your-lab-dc">GPO escalation audit. READ-ONLY LDAP against YOUR lab DC.</h1>
+<p>DC="${1:?usage: ./03-gpo-audit.sh 192.168.56.10}"<br />
+b=$(echo "$DC" | cut -d. -f1)<br />
+case "$b" in 192.168.56.<em>|10.10.10.</em>|127.<em>) ;;<br />
+</em>) echo "REFUSED: $DC outside the lab range." &gt;&2; exit 3 ;; esac<br />
+NC=$(ldapsearch -x -H "ldap://$DC" -b "" -s base defaultNamingContext 2&gt;/dev/null \<br />
+     | grep -m1 "^defaultNamingContext:" | awk '{print $2}')<br />
+echo "[scope] $DC in range; anonymous, read-only"<br />
+echo "[naming context] ${NC:-unknown}"<br />
+echo<br />
+echo "=== 1. GROUP POLICY CREATOR OWNERS: who edits every GPO by default? ==="<br />
+ldapsearch -x -H "ldap://$DC" -b "${NC}" \<br />
+  "(&amp;(objectClass=group)(sAMAccountName=Group Policy Creator Owners))" \<br />
+  member 2&gt;/dev/null | grep "^member:" | sed 's/^/  /'<br />
+echo "  ^ if a non-admin group is in here, every GPO is editable by it."<br />
+echo "    This is the single most common GPO-abuse finding."<br />
+echo<br />
+echo "=== 2. DELEGATED rights on the Domain Controllers OU ==="<br />
+echo "  (nTSACL is the byte array; decode it with the DSACLs tool on Windows"<br />
+echo "   or with impacket. From Linux, read it and look at the DACL length.)"<br />
+DC_OU=$(ldapsearch -x -H "ldap://$DC" -b "${NC}" \<br />
+  "(objectClass=organizationalUnit)" dn 2&gt;/dev/null \<br />
+  | grep -m1 "^dn:" | sed 's/^dn: //')<br />
+echo "  first OU found: ${DC_OU:-none}"<br />
+echo<br />
+echo "  To list which OUs contain DCs (the escalation targets):"<br />
+ldapsearch -x -H "ldap://$DC" -b "${NC}" \<br />
+  "(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192)" \<br />
+  dn 2&gt;/dev/null | grep "^dn:" | sed 's/^/    /'<br />
+echo "  ^ userAccountControl bit 8192 = TRUSTED_FOR_DELEGATION (a DC)"<br />
+echo<br />
+echo "=== 3. GPOs linked to the whole domain ==="<br />
+ldapsearch -x -H "ldap://$DC" -b "${NC}" \<br />
+  "(objectClass=GroupPolicyContainer)" cn gPCFileSysPath gPCUserSysPath 2&gt;/dev/null \<br />
+  | grep -E "^(cn|gPCFileSysPath):" | sed 's/^/  /' | head -30<br />
+echo<br />
+echo "=== 4. scheduled tasks inside GPOs (the escalation primitive) ==="<br />
+echo "  (the gPCMachineExtensionNames attribute lists the extensions; the"<br />
+echo "   scheduled-tasks extension GUID tells you a task is defined.)"<br />
+ldapsearch -x -H "ldap://$DC" -b "${NC}" \<br />
+  "(objectClass=GroupPolicyContainer)" cn gPCMachineExtensionNames 2&gt;/dev/null \<br />
+  | grep -E "^(cn|gPCMachineExtensionNames):" | sed 's/^/  /' | head -20<br />
+echo<br />
+echo "=== 5. the thing that makes it exploitable: DELEGATION on the OU ==="<br />
+echo "  Ask the DC for the OU's nTSACL and decode it:"<br />
+echo "    nxc ldap <dc> -u user -p pass --bloodhound   # (writes an edge)"<br />
+echo "    or, on a Windows host with access:"<br />
+echo "      dsacls \\<DC>\\OU=<name>,DC=lab,DC=internal"<br />
+echo "  Look for: 'Create Group Policy Objects' granted to a non-admin."<br />
+echo<br />
+echo "=== 6. the SYSPREP check (the loudest GPO abuse of all) ==="<br />
+echo "  If the domain FQDN is present in the DNS suffix of this host and"<br />
+echo "  DNS is not secure, an attacker can hijack the sysprep search and"<br />
+echo "  get arbitrary code execution as SYSTEM on every host that boots."<br />
+echo "  Check:   ipconfig /all | findstr /i \"DNS suffix\""<br />
+echo "  Defend:  omit the domain FQDN from the DNS suffix (GPO: 'Configure DNS'"<br />
+echo "           - not set to the primary domain's DNS domain name)."<br />
+EOF<br />
+chmod +x 03-gpo-audit.sh</p>
+<h1 id="-4-offline-token-filtering-which-is-the-non-obvious-one-">--- 4. offline: token filtering, which is the non-obvious one ---</h1>
+<p>python3 - &lt;&lt;'PY' 2&gt;&amp;1 | tee 04-token-filtering.txt<br />
+print("  === token filtering: why a Domain Admin is not always an admin ===\n")<br />
+print("  YOUR TOKEN = your user SID + every group SID (transitively)")<br />
+print("             + privileges granted to those SIDs")<br />
+print()<br />
+print("  ON A MEMBER SERVER: no filtering. Every group membership is present.")<br />
+print("    Domain Admin on a member server = local SYSTEM by design.")<br />
+print()<br />
+print("  ON A DOMAIN CONTROLLER: the DC's OWN SID (S-1-5-32-552) is REMOVED")<br />
+print("  from your token. Also, certain privileged GROUPS are filtered when")<br />
+print("  you connect over the network (UAC remote restrictions).")<br />
+print()<br />
+print("  THE FOUR GROUPS THAT ARE TOKEN-FILTERED ON A DC:")<br />
+print("    Account Operators   (S-1-5-32-548)")<br />
+print("    Server Operators    (S-1-5-32-549)")<br />
+print("    Print Operators     (S-1-5-32-550)")<br />
+print("    Backup Operators    (S-1-5-32-551)")<br />
+print()<br />
+print("  So:")<br />
+print("    an ACCOUNT OPERATORS member, over the network, to a DC:")<br />
+print("      -&gt; cannot do most of what the group implies")<br />
+print("    the SAME account, to a MEMBER SERVER:")<br />
+print("      -&gt; full group rights, including backup/restore")<br />
+print()<br />
+print("  THE ATTACKER'S READING: 'get a shell on a member server, not the")<br />
+print("  DC'. On a member server there is no filtering, so an Account")<br />
+print("  Operators account is straight local admin and SYSTEM.")<br />
+print()<br />
+print("  THE FINDING: any account in those four groups, over the network,")<br />
+print("  to a DC, is a privilege that exists on paper and not in practice.")<br />
+print("  Either it should be filtered (it is, for remote) or the audit")<br />
+print("  should reflect that the group has real power on member servers.")<br />
+print("  Most organisations have not thought about this split.")<br />
+PY<br />
+cat 04-token-filtering.txt</p>
+<h1 id="-5-what-the-report-says-">--- 5. what the report says ---</h1>
+<p>cat &gt; 05-report.md &lt;&lt;'EOF'</p>
+<h2 id="f-xx-unquoted-service-path-on-4-servers">F-xx · Unquoted service path on 4 servers</h2>
+<p>Risk<br />
+  Four servers run services whose binary path contains a space and is<br />
+  not quoted. On each, any authenticated user can place an executable<br />
+  at the truncation point and have it run as LocalSystem at next boot,<br />
+  simply by restarting the service. This grants SYSTEM on those servers<br />
+  without any exploit.</p>
+<p>Prerequisites<br />
+  An authenticated account on the target server, and permission to<br />
+  restart a service (which most authenticated users have by default<br />
+  through the "Change a service configuration" right, or via SCM).</p>
+<p>Evidence<br />
+  server1: C:\Program Files\Contoso Sync\agent.exe  -&gt; LocalSystem<br />
+    (a user-writable directory 'C:\Program Files\Contoso Sync\' exists)<br />
+  [three more hosts]<br />
+  We did not restart the services or place a payload. The ACL analysis<br />
+  and the unquoted path are sufficient and are documented above.</p>
+<p>Remediation<br />
+  1. Quote the service path and move it to a directory users cannot write<br />
+                                                         [Server Ops, Immediate]<br />
+  2. Remove "Change a service configuration" (SeServiceLogonRight) from<br />
+     the default Users group                          [Domain Admins, Immediate]<br />
+  3. Audit all service paths for unquoted paths and writable<br />
+     directories                                     [Server Ops, 1 sprint]</p>
+<h2 id="f-xx-domain-admins-token-filtered-on-domain-controllers">F-xx · Domain Admins token-filtered on domain controllers</h2>
+<p>Risk<br />
+  Four accounts are members of Domain Admins but are in the Account<br />
+  Operators group. On member servers these accounts have unrestricted<br />
+  local administrative rights including backup and restore. On domain<br />
+  controllers, the same accounts cannot exercise most of the Account<br />
+  Operators rights over the network. The result is that the<br />
+  organisation's privileged access review, which is based on group<br />
+  membership, overstates what an attacker with these accounts can do<br />
+  against a domain controller and understates what they can do against<br />
+  every member server.</p>
+<p>This is a governance finding rather than a direct path to compromise.<br />
+It is included because it materially changes the blast radius of any<br />
+account compromise in this domain, and it is not visible without<br />
+understanding token filtering.</p>
+<p>Remediation<br />
+  1. Document which privileged accounts are filtered on DCs and which<br />
+     are not                                              [Security, 1 sprint]<br />
+  2. Re-scope Account Operators and Backup Operators to the minimum<br />
+     set of hosts                                       [Domain Admins, 2 sprints]<br />
+  3. Add a PAM/JIT process for the four accounts         [IT Ops, 1 sprint]<br />
+EOF<br />
+cat 05-report.md<br />
+```</p>
+<p><strong>Step 4 is the non-obvious one</strong>: token filtering. An Account Operators member is filtered on a<br />
+domain controller and unrestricted on a member server — which means the same credential is worth<br />
+more against the wrong target. That's why "get a shell on a member server, not the DC" is<br />
+correct tradecraft, and it changes how you read any group membership report.</p>
+<p><strong><code>05-report.md</code></strong> demonstrates the discipline the whole note is about: both findings state<br />
+explicitly that nothing destructive was done, and the ACL analysis is presented as sufficient.<br />
+Creating a GPO or restarting a service to "prove" it would breach the ROE and risk an outage.</p>
+<p><strong>Record:</strong> <code>04-token-filtering.txt</code> and <code>05-report.md</code>.</p>
+<h2 id="self-test">Self-test</h2>
+<ol>
+<li>Name four Windows privileges, what each gives you, and which need a second one.</li>
+<li>What is an unquoted service path, and why is the space the bug?</li>
+<li>Which four groups are token-filtered on a domain controller?</li>
+<li>Why does that make "get a member server, not the DC" correct?</li>
+<li>How does GPO link order determine which policy wins?</li>
+<li>Why is GPO abuse a domain-wide escalation without host access?</li>
+<li>Why is a <em>scheduled task in a GPO</em> the escalation primitive?</li>
+<li>What should a report say when you could have escalated but did not?</li>
+</ol>
+<h2 id="connected-knowledge">Connected knowledge</h2>
+<p><strong>Privilege Escalation (Windows)</strong> → <strong>GPO Abuse</strong> → <strong>Token Manipulation</strong> →<br />
+<strong>Active Directory</strong> → <strong>Privilege Separation</strong>.<br />
+<code>bh-03</code> is how you find who has WRITE on a GPO.</p>
